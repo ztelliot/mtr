@@ -187,7 +187,42 @@ Build the frontend container image:
 docker build -f Dockerfile.web -t mtr-web:v1.2.3 --build-arg VERSION=v1.2.3 .
 ```
 
-The frontend image serves the Vite build with Caddy on port `80`.
+Pass `COMMIT` to include the same short revision shown by the Server:
+
+```sh
+docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
+  --build-arg VERSION=v1.2.3 \
+  --build-arg COMMIT=$(git rev-parse HEAD) .
+```
+
+The frontend image serves the Vite build with Caddy on port `80`. At runtime it
+loads `/config.json`, so deployments can replace that single file without
+rebuilding the image. Use an empty `apiBaseUrl` only when the same public origin
+also reverse-proxies `/v1` to Server. Otherwise set it to the browser-reachable
+Server API origin:
+
+```json
+{
+  "apiBaseUrl": "https://mtr-api.example.com",
+  "apiToken": "frontend-token"
+}
+```
+
+The Kubernetes examples include `deploy/web.yaml`, which deploys
+`ghcr.io/ztelliot/mtr-web:latest`, exposes it as the `mtr-web` Service, and
+mounts `mtr-web-config` over `/usr/share/caddy/config.json`. For a local
+cluster smoke test:
+
+```sh
+kubectl apply -k deploy
+kubectl -n mtr port-forward svc/mtr-server 8080:8080
+kubectl -n mtr port-forward svc/mtr-web 8081:80
+```
+
+If you access the workbench at `http://localhost:8081`, set
+`apiBaseUrl` in `mtr-web-config` to `http://localhost:8080`, or put an Ingress
+or gateway in front of both services and route `/v1` to `mtr-server` and `/` to
+`mtr-web`.
 
 The workbench can create `ping`, `traceroute`, `mtr`, `http`, and `dns` jobs,
 list Agents, and stream structured job events from `/v1/jobs/<job-id>/stream`.

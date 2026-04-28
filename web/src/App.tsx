@@ -41,7 +41,7 @@ import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTa
 import { SchedulePage } from "./SchedulePage";
 import { jobEventFromStreamMessage, knownJobErrorType, mergeEvent, targetResolvedIP } from "./streamEvents";
 import type { Agent, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, RuntimeConfig, Tool, VersionInfo } from "./types";
-import { appVersion } from "./version";
+import { appVersionLabel } from "./version";
 
 const streamErrorStatusFallbackMS = 4000;
 const streamNames = ["message", "progress", "target_resolved", "target_blocked", "unsupported_tool", "unsupported_protocol", "job_timeout", "hop", "hop_summary", "metric", "summary", "completed", "succeeded", "failed", "canceled", "stderr", "stdout"];
@@ -934,19 +934,19 @@ export function App() {
             {settingsControls("settings-controls")}
           </div>
           <div className="footer-meta-row">
-            <Group gap="xs">
-              <Text c="dimmed" size="sm" className="footer-copyright">
-                {t("footer.copyright", { year: new Date().getFullYear(), brand: t("brand") })}
-              </Text>
-              <Text c="dimmed" size="sm">·</Text>
-              <Anchor href="https://github.com/ztelliot/mtr" target="_blank" c="dimmed" size="sm" underline="never" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <Text c="dimmed" size="sm" className="footer-copyright">
+              {t("footer.copyright", { year: new Date().getFullYear(), brand: t("brand") })}
+            </Text>
+            <Group gap="sm" className="footer-version-group">
+              <Anchor href="https://github.com/ztelliot/mtr" target="_blank" c="dimmed" size="sm" underline="never" className="footer-repo-link">
                 <GitBranch size={14} /> ztelliot/mtr
               </Anchor>
+              <Text c="dimmed" size="sm" className="footer-separator">|</Text>
+              <button aria-label={t("footer.versionSettings")} className="version-button footer-version" type="button" onClick={onVersionClick}>
+                <span>{t("footer.frontendVersion", { version: appVersionLabel })}</span>
+                <span>{t("footer.serverVersion", { version: formatServerVersion(serverVersion, t) })}</span>
+              </button>
             </Group>
-            <button aria-label={t("footer.versionSettings")} className="version-button footer-version" type="button" onClick={onVersionClick}>
-              <span>{t("footer.frontendVersion", { version: appVersion })}</span>
-              <span>{t("footer.serverVersion", { version: formatServerVersion(serverVersion, t) })}</span>
-            </button>
           </div>
         </footer>
       </Container>

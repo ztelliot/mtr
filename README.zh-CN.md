@@ -191,7 +191,40 @@ pnpm --dir web build
 docker build -f Dockerfile.web -t mtr-web:v1.2.3 --build-arg VERSION=v1.2.3 .
 ```
 
-前端镜像使用 Caddy 在 `80` 端口提供 Vite 构建产物。
+传入 `COMMIT` 后，前端页脚会显示和 Server 一致的短提交号：
+
+```sh
+docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
+  --build-arg VERSION=v1.2.3 \
+  --build-arg COMMIT=$(git rev-parse HEAD) .
+```
+
+前端镜像使用 Caddy 在 `80` 端口提供 Vite 构建产物。运行时会读取
+`/config.json`，因此部署时可以只替换这个文件，而不需要重新构建镜像。
+只有当前端公开访问域名也把 `/v1` 反向代理到 Server 时，`apiBaseUrl`
+才适合留空。否则请设置为浏览器可以访问到的 Server API 地址：
+
+```json
+{
+  "apiBaseUrl": "https://mtr-api.example.com",
+  "apiToken": "frontend-token"
+}
+```
+
+Kubernetes 示例包含 `deploy/web.yaml`，会部署
+`ghcr.io/ztelliot/mtr-web:latest`，创建 `mtr-web` Service，并通过
+`mtr-web-config` 覆盖容器内的 `/usr/share/caddy/config.json`。本地集群可用
+下面的方式快速验证：
+
+```sh
+kubectl apply -k deploy
+kubectl -n mtr port-forward svc/mtr-server 8080:8080
+kubectl -n mtr port-forward svc/mtr-web 8081:80
+```
+
+如果通过 `http://localhost:8081` 访问工作台，请把 `mtr-web-config` 中的
+`apiBaseUrl` 设置为 `http://localhost:8080`；或者在两个服务前放置 Ingress
+或网关，将 `/v1` 路由到 `mtr-server`，将 `/` 路由到 `mtr-web`。
 
 工作台可以创建 `ping`、`traceroute`、`mtr`、`http` 和 `dns` 任务，列出 Agent，
 并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。`traceroute` 和 `mtr`

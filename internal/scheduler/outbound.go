@@ -333,7 +333,7 @@ func versionInfoString(info version.Info) string {
 		return ""
 	}
 	if info.Commit != "" {
-		out += " " + info.Commit
+		out += " " + version.ShortCommit(info.Commit)
 	}
 	if info.BuiltAt != "" {
 		out += " " + info.BuiltAt

@@ -19,9 +19,16 @@ type Info struct {
 func Current() Info {
 	return Info{
 		Version: Version,
-		Commit:  Commit,
+		Commit:  ShortCommit(Commit),
 		BuiltAt: BuiltAt,
 	}
+}
+
+func ShortCommit(commit string) string {
+	if len(commit) > 8 {
+		return commit[:8]
+	}
+	return commit
 }
 
 func String() string {

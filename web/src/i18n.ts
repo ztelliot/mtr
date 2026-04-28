@@ -114,7 +114,7 @@ export const resources = {
       footer: {
         copyright: "© {{year}} {{brand}}",
         version: "v{{version}}",
-        frontendVersion: "前端 v{{version}}",
+        frontendVersion: "前端 {{version}}",
         serverVersion: "后端 {{version}}",
         versionUnknown: "未知",
         versionSettings: "版本信息"
@@ -360,7 +360,7 @@ export const resources = {
       footer: {
         copyright: "© {{year}} {{brand}}",
         version: "v{{version}}",
-        frontendVersion: "Web v{{version}}",
+        frontendVersion: "Web {{version}}",
         serverVersion: "Server {{version}}",
         versionUnknown: "unknown",
         versionSettings: "Version information"

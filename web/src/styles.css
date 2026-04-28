@@ -185,17 +185,34 @@ body,
 
 .footer-meta-row {
   align-items: center;
-  display: flex;
+  display: grid;
   flex: 1;
   gap: 16px;
-  justify-content: space-between;
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
+  width: 100%;
+}
+
+.footer-version-group {
+  justify-self: end;
+  min-width: 0;
+}
+
+.footer-repo-link {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.footer-separator {
+  flex: 0 0 auto;
 }
 
 .version-button {
   background: transparent;
   border: 0;
-  color: light-dark(#6b7280, #a4adbb);
+  color: var(--mantine-color-dimmed);
   cursor: pointer;
   font: inherit;
   font-size: 11px;
@@ -205,15 +222,12 @@ body,
   user-select: none;
 }
 
-.version-button:hover {
-  color: light-dark(#111827, #f4f7fb);
-}
-
 .footer-version {
   align-items: flex-end;
   display: inline-flex;
   flex-direction: column;
   gap: 2px;
+  justify-self: end;
   justify-content: flex-end;
   max-width: 100%;
   text-align: right;

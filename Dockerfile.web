@@ -6,13 +6,17 @@ RUN npm install -g pnpm && pnpm install --frozen-lockfile
 
 COPY web/ ./
 ARG VERSION=dev
+ARG COMMIT=
 ENV VITE_APP_VERSION=${VERSION}
+ENV VITE_APP_COMMIT=${COMMIT}
 RUN pnpm build
 
 FROM caddy:alpine
 ARG VERSION=dev
+ARG COMMIT=
 LABEL org.opencontainers.image.title="mtr-web" \
-      org.opencontainers.image.version="${VERSION}"
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}"
 RUN printf '%s\n' \
     ':80 {' \
     '  root * /usr/share/caddy' \

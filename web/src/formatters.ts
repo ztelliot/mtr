@@ -4,7 +4,7 @@ export function formatServerVersion(info: VersionInfo | null, t: (key: string) =
   if (!info?.version) {
     return t("footer.versionUnknown");
   }
-  return info.commit ? `${info.version} ${info.commit.slice(0, 7)}` : info.version;
+  return info.commit ? `${info.version} ${info.commit.slice(0, 8)}` : info.version;
 }
 
 export function formatMS(value?: number): string {
