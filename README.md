@@ -224,6 +224,30 @@ If you access the workbench at `http://localhost:8081`, set
 or gateway in front of both services and route `/v1` to `mtr-server` and `/` to
 `mtr-web`.
 
+The `deploy/agent.yaml` DaemonSet can derive per-node Agent metadata from
+Kubernetes Node labels without teaching the Agent binary about Kubernetes. An
+init container reads the current Node labels, renders a normal `agent.yaml` into
+an `emptyDir`, and the Agent container starts with that generated config. The
+ServiceAccount only needs read-only `get nodes` permission for the init
+container. The example maps these labels by default:
+
+```sh
+kubectl label node <node> \
+  mtr.ztelliot.dev/country=JP \
+  mtr.ztelliot.dev/region=tokyo \
+  mtr.ztelliot.dev/provider=kubernetes \
+  mtr.ztelliot.dev/isp=example-net \
+  mtr.ztelliot.dev/protocols=3 \
+  mtr.ztelliot.dev/hide-first-hops=0 \
+  mtr.ztelliot.dev/capabilities=ping,traceroute,mtr,http,dns,port
+```
+
+Change `render-agent-config.sh` in `mtr-agent-config` if your cluster already
+uses different label names. `protocols` uses the same bitmask as Agent config:
+`1` for IPv4, `2` for IPv6, and `3` for both. `capabilities` is a
+comma-separated tool list. If a label is missing, the init container writes the
+fallback value into the generated config.
+
 The workbench can create `ping`, `traceroute`, `mtr`, `http`, and `dns` jobs,
 list Agents, and stream structured job events from `/v1/jobs/<job-id>/stream`.
 `traceroute` and `mtr` require an explicit Agent selection because the server

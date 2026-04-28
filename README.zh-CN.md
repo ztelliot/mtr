@@ -226,6 +226,28 @@ kubectl -n mtr port-forward svc/mtr-web 8081:80
 `apiBaseUrl` 设置为 `http://localhost:8080`；或者在两个服务前放置 Ingress
 或网关，将 `/v1` 路由到 `mtr-server`，将 `/` 路由到 `mtr-web`。
 
+`deploy/agent.yaml` DaemonSet 可以从 Kubernetes Node labels 生成每个节点的
+Agent 元数据，但这个逻辑只在部署层完成，Agent 二进制本身并不知道 Kubernetes。
+示例使用 initContainer 读取当前 Node 的 labels，把普通的 `agent.yaml` 渲染到
+`emptyDir`，主容器再读取这个生成后的配置文件。ServiceAccount 只需要给
+initContainer 使用的只读 `get nodes` 权限。默认映射这些 labels：
+
+```sh
+kubectl label node <node> \
+  mtr.ztelliot.dev/country=JP \
+  mtr.ztelliot.dev/region=tokyo \
+  mtr.ztelliot.dev/provider=kubernetes \
+  mtr.ztelliot.dev/isp=example-net \
+  mtr.ztelliot.dev/protocols=3 \
+  mtr.ztelliot.dev/hide-first-hops=0 \
+  mtr.ztelliot.dev/capabilities=ping,traceroute,mtr,http,dns,port
+```
+
+如果集群已经有自己的 label 命名，可修改 `mtr-agent-config` 里的
+`render-agent-config.sh`。`protocols` 使用和 Agent 配置相同的位掩码：
+`1` 表示 IPv4，`2` 表示 IPv6，`3` 表示同时支持两者。`capabilities`
+是逗号分隔的工具列表。缺少 label 时，initContainer 会把 fallback 值写入生成后的配置文件。
+
 工作台可以创建 `ping`、`traceroute`、`mtr`、`http` 和 `dns` 任务，列出 Agent，
 并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。`traceroute` 和 `mtr`
 需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`。

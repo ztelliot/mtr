@@ -5,32 +5,93 @@ metadata:
   namespace: mtr
 automountServiceAccountToken: false
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mtr-agent-node-reader
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mtr-agent-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mtr-agent-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: mtr-agent
+    namespace: mtr
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mtr-agent-config
   namespace: mtr
 data:
-  agent.yaml: |
+  render-agent-config.sh: |
+    #!/bin/sh
+    set -eu
+
+    label() {
+      kubectl get node "${MTR_NODE_NAME}" -o "jsonpath={.metadata.labels['$1']}"
+    }
+
+    country="$(label mtr.ztelliot.dev/country || true)"
+    region="$(label mtr.ztelliot.dev/region || true)"
+    provider="$(label mtr.ztelliot.dev/provider || true)"
+    isp="$(label mtr.ztelliot.dev/isp || true)"
+    protocols="$(label mtr.ztelliot.dev/protocols || true)"
+    hide_first_hops="$(label mtr.ztelliot.dev/hide-first-hops || true)"
+    capabilities="$(label mtr.ztelliot.dev/capabilities || true)"
+
+    write_capabilities() {
+      if [ -n "${capabilities}" ]; then
+        old_ifs="${IFS}"
+        IFS=","
+        for capability in ${capabilities}; do
+          capability="$(printf '%s' "${capability}" | xargs)"
+          if [ -n "${capability}" ]; then
+            printf '  - %s\n' "${capability}"
+          fi
+        done
+        IFS="${old_ifs}"
+      else
+        printf '%s\n' \
+          '  - ping' \
+          '  - traceroute' \
+          '  - mtr' \
+          '  - http' \
+          '  - dns' \
+          '  - port'
+      fi
+    }
+
+    cat > /work/agent.yaml <<EOF
     mode: "grpc"
     log_level: "info"
-    country: "CN"
-    region: "k8s"
-    provider: "kubernetes"
-    isp: "bgp"
-    protocols: 3
-    hide_first_hops: 0
+    country: "${country:-CN}"
+    region: "${region:-k8s}"
+    provider: "${provider:-kubernetes}"
+    isp: "${isp:-bgp}"
+    protocols: ${protocols:-3}
+    hide_first_hops: ${hide_first_hops:-0}
     capabilities:
-      - ping
-      - traceroute
-      - mtr
-      - http
-      - dns
-      - port
+    EOF
+    write_capabilities >> /work/agent.yaml
+    cat >> /work/agent.yaml <<EOF
     tls:
       ca_file: "/var/run/mtr/tls/ca.crt"
       cert_file: "/var/run/mtr/tls/tls.crt"
       key_file: "/var/run/mtr/tls/tls.key"
+    EOF
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -63,6 +124,38 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 10
+      initContainers:
+        - name: render-agent-config
+          image: bitnami/kubectl:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /config/render-agent-config.sh
+          env:
+            - name: MTR_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HOME
+              value: /tmp
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: generated-config
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
       containers:
         - name: agent
           image: ghcr.io/ztelliot/mtr-agent:latest
@@ -99,7 +192,7 @@ spec:
               add:
                 - NET_RAW
           volumeMounts:
-            - name: config
+            - name: generated-config
               mountPath: /etc/mtr/agent.yaml
               subPath: agent.yaml
               readOnly: true
@@ -112,6 +205,25 @@ spec:
         - name: config
           configMap:
             name: mtr-agent-config
+            defaultMode: 0755
+        - name: generated-config
+          emptyDir: {}
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         - name: tls
           secret:
             secretName: mtr-agent-tls
