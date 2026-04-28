@@ -1,0 +1,12 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mtr-agent-deny-ingress
+  namespace: mtr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mtr-agent
+  policyTypes:
+    - Ingress
+  ingress: []

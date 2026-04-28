@@ -1,0 +1,32 @@
+FROM node:25-alpine AS build
+WORKDIR /app
+
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+
+COPY web/ ./
+ARG VERSION=dev
+ENV VITE_APP_VERSION=${VERSION}
+RUN pnpm build
+
+FROM caddy:alpine
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="mtr-web" \
+      org.opencontainers.image.version="${VERSION}"
+RUN printf '%s\n' \
+    ':80 {' \
+    '  root * /usr/share/caddy' \
+    '  encode zstd gzip' \
+    '' \
+    '  handle /config.json {' \
+    '    header Cache-Control "no-store"' \
+    '    file_server' \
+    '  }' \
+    '' \
+    '  handle {' \
+    '    try_files {path} {path}/ /index.html' \
+    '    file_server' \
+    '  }' \
+    '}' > /etc/caddy/Caddyfile
+COPY --from=build /app/dist /usr/share/caddy
+EXPOSE 80

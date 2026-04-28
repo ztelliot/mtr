@@ -1,0 +1,7 @@
+.git
+.codex
+node_modules
+web/node_modules
+web/dist
+web/*.tsbuildinfo
+mtr.db*

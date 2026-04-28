@@ -1,0 +1,32 @@
+id: "edge-http-1"
+mode: "http"
+log_level: "info"
+country: "CN"
+region: "edge"
+provider: "kubernetes"
+isp: "bgp"
+server_addr: "localhost:8443"
+register_token: "change-me-agent-token"
+http_token: "change-me-agent-http-token"
+http_addr: ":9000"
+protocols: 1
+hide_first_hops: 0
+capabilities:
+  - ping
+  - traceroute
+  - mtr
+  - http
+  - dns
+  - port
+speedtest:
+  # Only exposed when HTTP mode is enabled on http_addr. Set max_bytes to 0 to disable.
+  default_bytes: 1048576
+  max_bytes: 10485760
+  global_requests_per_minute: 120
+  global_burst: 20
+  ip_requests_per_minute: 12
+  ip_burst: 3
+tls:
+  ca_file: ""
+  cert_file: ""
+  key_file: ""
