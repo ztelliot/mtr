@@ -274,11 +274,12 @@ spec:
               cpu: "1"
               memory: 512Mi
           securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
             privileged: false
             allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
-            seccompProfile:
-              type: Unconfined
             capabilities:
               drop:
                 - ALL

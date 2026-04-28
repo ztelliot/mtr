@@ -506,19 +506,20 @@ kubectl apply -k deploy
 The Agent manifest is intentionally tight on privileges:
 
 - the main Agent container does not mount a ServiceAccount token
-- non-root runtime, no host network/PID/IPC, and `privileged: false`
+- no host network/PID/IPC and `privileged: false`
 - read-only root filesystem, with only read-only config/cert mounts and one
   `emptyDir` mounted at `/tmp`
 - all Linux capabilities dropped except `NET_RAW`
 - a NetworkPolicy denies inbound traffic to Agent pods
 
 `NET_RAW` is the one deliberate exception because the current ICMP-backed
-implementations of `ping`, `traceroute`, and `mtr` need raw sockets. If your
-cluster enforces strict Pod Security Admission, plan for an explicit exception
-for `NET_RAW` in the Agent namespace. The Agent container sets
-`allowPrivilegeEscalation: true` so this capability can enter the effective set
-for the non-root process. The Agent logs `CapEff`, `CapBnd`, `NoNewPrivs`, and
-`Seccomp` at startup to make the effective runtime privileges visible.
+implementations of `ping`, `traceroute`, and `mtr` need raw sockets. The main
+Agent container runs as UID 0 so `NET_RAW` can enter the permitted and effective
+capability sets, but it is not privileged and all other capabilities are
+dropped. If your cluster enforces strict Pod Security Admission, plan for an
+explicit exception for this Agent security context. The Agent logs `CapEff`,
+`CapBnd`, `NoNewPrivs`, and `Seccomp` at startup to make the effective runtime
+privileges visible.
 
 The DaemonSet example has one narrow RBAC rule for the init container that
 renders per-node config from Node labels: `get nodes`. The generated config is

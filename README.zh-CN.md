@@ -481,12 +481,12 @@ kubectl apply -k deploy
 Agent 的权限在清单里被刻意压到很窄：
 
 - 主 Agent 容器不挂载 ServiceAccount Token
-- 非 root 运行，不使用 host network/PID/IPC，`privileged: false`
+- 不使用 host network/PID/IPC，`privileged: false`
 - 根文件系统只读，只额外挂载只读配置、只读证书和一个 `emptyDir` 类型的 `/tmp`
 - 默认丢弃全部 Linux capabilities，只额外保留 `NET_RAW`
 - 附带 NetworkPolicy 拒绝进入 Agent Pod 的入站流量
 
-之所以保留 `NET_RAW`，是因为当前 `ping`、`traceroute`、`mtr` 的 ICMP 实现需要原始 socket。若你的集群启用了严格的 Pod Security Admission，需要为 Agent 所在命名空间显式处理 `NET_RAW` 这一项例外。Agent 主容器设置了 `allowPrivilegeEscalation: true`，以便这个 capability 能进入非 root 进程的有效能力集。Agent 启动时会打印 `CapEff`、`CapBnd`、`NoNewPrivs` 和 `Seccomp`，便于确认实际权限。
+之所以保留 `NET_RAW`，是因为当前 `ping`、`traceroute`、`mtr` 的 ICMP 实现需要原始 socket。Agent 主容器使用 UID 0 运行，以便 `NET_RAW` 能进入 permitted/effective capability sets；但它不是 privileged，且仍然丢弃除 `NET_RAW` 之外的全部 capabilities。若你的集群启用了严格的 Pod Security Admission，需要为这个 Agent securityContext 显式放行。Agent 启动时会打印 `CapEff`、`CapBnd`、`NoNewPrivs` 和 `Seccomp`，便于确认实际权限。
 
 DaemonSet 示例额外包含一条很窄的 RBAC：initContainer 需要 `get nodes`，用于从 Node labels 渲染每个节点的配置。生成后的配置写入 `emptyDir`，主 Agent 容器随后在不挂载 ServiceAccount Token 的情况下运行。
 
