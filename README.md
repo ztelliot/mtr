@@ -229,7 +229,10 @@ Kubernetes Node labels without teaching the Agent binary about Kubernetes. An
 init container reads the current Node labels, renders a normal `agent.yaml` into
 an `emptyDir`, and the Agent container starts with that generated config. The
 ServiceAccount only needs read-only `get nodes` permission for the init
-container. The example maps these labels by default:
+container. The init container talks to the apiserver via the explicit
+`MTR_KUBERNETES_API_SERVER` env in the manifest, so adjust it if your cluster's
+Kubernetes Service IP is not `https://10.96.0.1:443`. The example maps these
+labels by default:
 
 ```sh
 kubectl label node <node> \
@@ -502,18 +505,25 @@ kubectl apply -k deploy
 
 The Agent manifest is intentionally tight on privileges:
 
-- `automountServiceAccountToken: false`
-- non-root runtime, no host network/PID/IPC, `privileged: false`, and
-  `allowPrivilegeEscalation: false`
+- the main Agent container does not mount a ServiceAccount token
+- non-root runtime, no host network/PID/IPC, and `privileged: false`
 - read-only root filesystem, with only read-only config/cert mounts and one
   `emptyDir` mounted at `/tmp`
 - all Linux capabilities dropped except `NET_RAW`
 - a NetworkPolicy denies inbound traffic to Agent pods
 
 `NET_RAW` is the one deliberate exception because the current ICMP-backed
-implementations of `ping`, `traceroute`, and `mtr` need raw sockets. No extra
-RBAC is shipped with the Agent. If your cluster enforces strict Pod Security
-Admission, plan for an explicit exception for `NET_RAW` in the Agent namespace.
+implementations of `ping`, `traceroute`, and `mtr` need raw sockets. If your
+cluster enforces strict Pod Security Admission, plan for an explicit exception
+for `NET_RAW` in the Agent namespace. The Agent container sets
+`allowPrivilegeEscalation: true` so this capability can enter the effective set
+for the non-root process. The Agent logs `CapEff`, `CapBnd`, `NoNewPrivs`, and
+`Seccomp` at startup to make the effective runtime privileges visible.
+
+The DaemonSet example has one narrow RBAC rule for the init container that
+renders per-node config from Node labels: `get nodes`. The generated config is
+written to an `emptyDir`; the main Agent container then runs without the
+ServiceAccount token mounted.
 
 The baseline does not include a default-deny egress `NetworkPolicy`. The Agent
 is supposed to probe arbitrary external targets, and standard Kubernetes

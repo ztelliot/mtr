@@ -67,6 +67,7 @@ func main() {
 	}
 	log := newLogger(cfg.LogLevel)
 	log.Info("agent config loaded", "path", *cfgPath, "mode", cfg.Mode, "version", version.String())
+	log.Info("agent linux privileges", procStatusLogAttrs()...)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 2)
@@ -109,6 +110,36 @@ func main() {
 			os.Exit(1)
 		}
 	case <-ctx.Done():
+	}
+}
+
+func procStatusLogAttrs() []any {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return []any{"proc_status_error", err.Error()}
+	}
+	wanted := map[string]string{
+		"CapBnd":     "",
+		"CapEff":     "",
+		"CapPrm":     "",
+		"NoNewPrivs": "",
+		"Seccomp":    "",
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if _, exists := wanted[key]; exists {
+			wanted[key] = strings.TrimSpace(value)
+		}
+	}
+	return []any{
+		"cap_bnd", wanted["CapBnd"],
+		"cap_eff", wanted["CapEff"],
+		"cap_prm", wanted["CapPrm"],
+		"no_new_privs", wanted["NoNewPrivs"],
+		"seccomp", wanted["Seccomp"],
 	}
 }
 

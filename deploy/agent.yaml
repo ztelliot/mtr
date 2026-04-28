@@ -40,17 +40,103 @@ data:
     #!/bin/sh
     set -eu
 
-    label() {
-      kubectl get node "${MTR_NODE_NAME}" -o "jsonpath={.metadata.labels['$1']}"
+    log() {
+      printf '%s\n' "[render-agent-config] $*" >&2
     }
 
-    country="$(label mtr.ztelliot.dev/country || true)"
-    region="$(label mtr.ztelliot.dev/region || true)"
-    provider="$(label mtr.ztelliot.dev/provider || true)"
-    isp="$(label mtr.ztelliot.dev/isp || true)"
-    protocols="$(label mtr.ztelliot.dev/protocols || true)"
-    hide_first_hops="$(label mtr.ztelliot.dev/hide-first-hops || true)"
-    capabilities="$(label mtr.ztelliot.dev/capabilities || true)"
+    api_server="${MTR_KUBERNETES_API_SERVER}"
+    token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+    ca_file="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    label() {
+      key="$1"
+      kubectl \
+        --server="${api_server}" \
+        --certificate-authority="${ca_file}" \
+        --token="${token}" \
+        get node "${MTR_NODE_NAME}" \
+        -o "go-template={{ index .metadata.labels \"${key}\" }}"
+    }
+
+    log_matching_labels() {
+      log "matching node labels:"
+      labels="$(
+        kubectl \
+          --server="${api_server}" \
+          --certificate-authority="${ca_file}" \
+          --token="${token}" \
+          get node "${MTR_NODE_NAME}" \
+          -o 'go-template={{range $key, $value := .metadata.labels}}{{printf "%s=%s\n" $key $value}}{{end}}'
+      )"
+      matching="$(printf '%s\n' "${labels}" | grep '^mtr\.ztelliot\.dev/' || true)"
+      if [ -n "${matching}" ]; then
+        printf '%s\n' "${matching}" | while IFS= read -r line; do
+          log "  ${line}"
+        done
+      else
+        log "  no mtr.ztelliot.dev/* labels found on node"
+      fi
+    }
+
+    read_label() {
+      key="$1"
+      name="$2"
+      err_file="/tmp/${name}.label.err"
+      if value="$(label "${key}" 2>"${err_file}")"; then
+        if [ "${value}" = "<no value>" ]; then
+          value=""
+        fi
+        if [ -n "${value}" ]; then
+          log "${name}: read ${key}=${value}"
+        else
+          log "${name}: label ${key} is not set"
+        fi
+        rm -f "${err_file}"
+        printf '%s' "${value}"
+        return 0
+      fi
+      log "${name}: failed to read label ${key}: $(cat "${err_file}")"
+      rm -f "${err_file}"
+      return 1
+    }
+
+    value_or_default() {
+      name="$1"
+      value="$2"
+      fallback="$3"
+      if [ -n "${value}" ]; then
+        log "${name}: using node label value ${value}"
+        printf '%s' "${value}"
+      else
+        log "${name}: node label missing, using fallback ${fallback}"
+        printf '%s' "${fallback}"
+      fi
+    }
+
+    log "rendering agent config"
+    log "node=${MTR_NODE_NAME}"
+    log "api_server=${api_server}"
+    log_matching_labels
+
+    country="$(read_label mtr.ztelliot.dev/country country || true)"
+    region="$(read_label mtr.ztelliot.dev/region region || true)"
+    provider="$(read_label mtr.ztelliot.dev/provider provider || true)"
+    isp="$(read_label mtr.ztelliot.dev/isp isp || true)"
+    protocols="$(read_label mtr.ztelliot.dev/protocols protocols || true)"
+    hide_first_hops="$(read_label mtr.ztelliot.dev/hide-first-hops hide_first_hops || true)"
+    capabilities="$(read_label mtr.ztelliot.dev/capabilities capabilities || true)"
+
+    country="$(value_or_default country "${country}" CN)"
+    region="$(value_or_default region "${region}" k8s)"
+    provider="$(value_or_default provider "${provider}" kubernetes)"
+    isp="$(value_or_default isp "${isp}" bgp)"
+    protocols="$(value_or_default protocols "${protocols}" 3)"
+    hide_first_hops="$(value_or_default hide_first_hops "${hide_first_hops}" 0)"
+    if [ -n "${capabilities}" ]; then
+      log "capabilities: using node label value ${capabilities}"
+    else
+      log "capabilities: node label missing, using fallback ping,traceroute,mtr,http,dns,port"
+    fi
 
     write_capabilities() {
       if [ -n "${capabilities}" ]; then
@@ -77,12 +163,12 @@ data:
     cat > /work/agent.yaml <<EOF
     mode: "grpc"
     log_level: "info"
-    country: "${country:-CN}"
-    region: "${region:-k8s}"
-    provider: "${provider:-kubernetes}"
-    isp: "${isp:-bgp}"
-    protocols: ${protocols:-3}
-    hide_first_hops: ${hide_first_hops:-0}
+    country: "${country}"
+    region: "${region}"
+    provider: "${provider}"
+    isp: "${isp}"
+    protocols: ${protocols}
+    hide_first_hops: ${hide_first_hops}
     capabilities:
     EOF
     write_capabilities >> /work/agent.yaml
@@ -92,6 +178,8 @@ data:
       cert_file: "/var/run/mtr/tls/tls.crt"
       key_file: "/var/run/mtr/tls/tls.key"
     EOF
+
+    log "wrote /work/agent.yaml"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -112,6 +200,7 @@ spec:
       serviceAccountName: mtr-agent
       automountServiceAccountToken: false
       enableServiceLinks: false
+      dnsPolicy: Default
       hostNetwork: false
       hostPID: false
       hostIPC: false
@@ -136,6 +225,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: MTR_KUBERNETES_API_SERVER
+              value: https://10.96.0.1:443
             - name: HOME
               value: /tmp
           securityContext:
@@ -184,8 +275,10 @@ spec:
               memory: 512Mi
           securityContext:
             privileged: false
-            allowPrivilegeEscalation: false
+            allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
+            seccompProfile:
+              type: Unconfined
             capabilities:
               drop:
                 - ALL
