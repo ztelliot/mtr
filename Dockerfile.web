@@ -1,4 +1,4 @@
-FROM node:25-alpine AS build
+FROM --platform=$BUILDPLATFORM node:25-alpine AS build
 WORKDIR /app
 
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -9,7 +9,22 @@ ARG VERSION=dev
 ARG COMMIT=
 ENV VITE_APP_VERSION=${VERSION}
 ENV VITE_APP_COMMIT=${COMMIT}
-RUN pnpm build
+RUN pnpm build && \
+    printf '%s\n' \
+      ':80 {' \
+      '  root * /usr/share/caddy' \
+      '  encode zstd gzip' \
+      '' \
+      '  handle /config.json {' \
+      '    header Cache-Control "no-store"' \
+      '    file_server' \
+      '  }' \
+      '' \
+      '  handle {' \
+      '    try_files {path} {path}/ /index.html' \
+      '    file_server' \
+      '  }' \
+      '}' > /tmp/Caddyfile
 
 FROM caddy:alpine
 ARG VERSION=dev
@@ -17,20 +32,6 @@ ARG COMMIT=
 LABEL org.opencontainers.image.title="mtr-web" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}"
-RUN printf '%s\n' \
-    ':80 {' \
-    '  root * /usr/share/caddy' \
-    '  encode zstd gzip' \
-    '' \
-    '  handle /config.json {' \
-    '    header Cache-Control "no-store"' \
-    '    file_server' \
-    '  }' \
-    '' \
-    '  handle {' \
-    '    try_files {path} {path}/ /index.html' \
-    '    file_server' \
-    '  }' \
-    '}' > /etc/caddy/Caddyfile
+COPY --from=build /tmp/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /app/dist /usr/share/caddy
 EXPOSE 80

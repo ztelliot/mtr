@@ -1,16 +1,28 @@
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
-RUN go build -trimpath -ldflags "-s -w -X github.com/ztelliot/mtr/internal/version.Version=${VERSION} -X github.com/ztelliot/mtr/internal/version.Commit=${COMMIT} -X github.com/ztelliot/mtr/internal/version.BuiltAt=${BUILT_AT}" -o /out/mtr-agent ./cmd/agent
+RUN apk add --no-cache ca-certificates && \
+    set -eux; \
+    targetos="${TARGETOS:-linux}"; \
+    targetarch="${TARGETARCH:-$(go env GOARCH)}"; \
+    goarm="${TARGETVARIANT#v}"; \
+    if [ "${targetarch}" = "arm" ] && [ -n "${goarm}" ]; then \
+      GOOS="${targetos}" GOARCH="${targetarch}" GOARM="${goarm}" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/ztelliot/mtr/internal/version.Version=${VERSION} -X github.com/ztelliot/mtr/internal/version.Commit=${COMMIT} -X github.com/ztelliot/mtr/internal/version.BuiltAt=${BUILT_AT}" -o /out/mtr-agent ./cmd/agent; \
+    else \
+      GOOS="${targetos}" GOARCH="${targetarch}" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/ztelliot/mtr/internal/version.Version=${VERSION} -X github.com/ztelliot/mtr/internal/version.Commit=${COMMIT} -X github.com/ztelliot/mtr/internal/version.BuiltAt=${BUILT_AT}" -o /out/mtr-agent ./cmd/agent; \
+    fi
 
-FROM alpine:latest
+FROM scratch
 ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
@@ -18,7 +30,7 @@ LABEL org.opencontainers.image.title="mtr-agent" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILT_AT}"
-RUN apk add --no-cache ca-certificates
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/mtr-agent /usr/local/bin/mtr-agent
 COPY configs/agent.yaml /etc/mtr/agent.yaml
 ENTRYPOINT ["/usr/local/bin/mtr-agent"]
