@@ -15,6 +15,8 @@ func TestLoadAgentUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_HTTP_TOKEN", "env-http-token")
 	t.Setenv("MTR_TLS_ENABLED", "true")
 	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
+	t.Setenv("MTR_HTTP_TLS_ENABLED", "true")
+	t.Setenv("MTR_HTTP_TLS_CERT_FILE", "/env/http-cert.pem")
 	t.Setenv("MTR_CAPABILITIES", "ping,dns")
 	t.Setenv("MTR_PROTOCOLS", "2")
 	t.Setenv("MTR_SPEEDTEST_MAX_BYTES", "2048")
@@ -23,6 +25,8 @@ func TestLoadAgentUsesEnvAndLetsYAMLOverride(t *testing.T) {
 id: file-agent
 tls:
   cert_file: /file/cert.pem
+http_tls:
+  key_file: /file/http-key.pem
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +39,9 @@ tls:
 	}
 	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) || cfg.TLS.CertFile != "/file/cert.pem" {
 		t.Fatalf("nested env/yaml values not merged: %#v", cfg.TLS)
+	}
+	if !cfg.HTTPTLS.Enabled || cfg.HTTPTLS.CertFile != "/env/http-cert.pem" || cfg.HTTPTLS.KeyFile != "/file/http-key.pem" {
+		t.Fatalf("http tls env/yaml values not merged: %#v", cfg.HTTPTLS)
 	}
 	if !reflect.DeepEqual(cfg.Capabilities, []string{"ping", "dns"}) {
 		t.Fatalf("capabilities = %#v", cfg.Capabilities)
@@ -52,6 +59,8 @@ func TestLoadServerUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", "7")
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_BURST", "8")
 	t.Setenv("MTR_RUNTIME_HTTP_TIMEOUT_SEC", "9")
+	t.Setenv("MTR_OUTBOUND_TLS_ENABLED", "true")
+	t.Setenv("MTR_OUTBOUND_TLS_CA_FILES", "/env/edge-ca.pem")
 	t.Setenv("MTR_OUTBOUND_AGENTS", `[{id: edge-env, base_url: "http://edge", http_token: secret}]`)
 	t.Setenv("MTR_TOOL_POLICIES", `{ping: {enabled: true, allowed_args: {protocol: "^(icmp)$"}, hide_first_hops: 2}}`)
 	t.Setenv("MTR_API_TOKENS", `[{secret: token-env, schedule_access: read, tools: {http: {allowed_args: {method: "^(HEAD)$"}}}, agents: [edge-1]}]`)
@@ -87,6 +96,9 @@ runtime:
 	}
 	if len(cfg.OutboundAgents) != 1 || cfg.OutboundAgents[0].ID != "edge-env" || cfg.OutboundAgents[0].BaseURL != "http://edge" || cfg.OutboundAgents[0].HTTPToken != "secret" {
 		t.Fatalf("outbound agents env not loaded: %#v", cfg.OutboundAgents)
+	}
+	if !cfg.OutboundTLS.Enabled || !reflect.DeepEqual(cfg.OutboundTLS.CAFiles, []string{"/env/edge-ca.pem"}) {
+		t.Fatalf("outbound tls env not loaded: %#v", cfg.OutboundTLS)
 	}
 	pingPolicy := cfg.ToolPolicies["ping"]
 	if !pingPolicy.Enabled || pingPolicy.HideFirstHops != 2 || pingPolicy.AllowedArgs["protocol"] != "^(icmp)$" {

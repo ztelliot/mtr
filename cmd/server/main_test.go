@@ -30,8 +30,14 @@ func TestFirstExistingConfigFallsBackToLocalPath(t *testing.T) {
 }
 
 func TestToSchedulerOutboundAgentsKeepsConnectionConfig(t *testing.T) {
-	agents := toSchedulerOutboundAgents([]config.OutboundAgent{{ID: "edge-1", BaseURL: "http://edge", HTTPToken: "secret"}})
+	agents, err := toSchedulerOutboundAgents([]config.OutboundAgent{{ID: "edge-1", BaseURL: "http://edge", HTTPToken: "secret"}}, config.TLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(agents) != 1 || agents[0].ID != "edge-1" || agents[0].BaseURL != "http://edge" || agents[0].Token != "secret" {
 		t.Fatalf("unexpected agents: %#v", agents)
+	}
+	if agents[0].HTTPClient == nil {
+		t.Fatal("expected outbound HTTP client")
 	}
 }

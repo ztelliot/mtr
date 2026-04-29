@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -93,7 +94,12 @@ func main() {
 		cfg.Runtime.OutboundInvokeAttempts,
 	)
 	hub.SetInflightLimits(cfg.Scheduler.GRPCMaxInflightPerAgent, cfg.Scheduler.OutboundMaxInflightPerAgent)
-	hub.SetOutboundAgents(toSchedulerOutboundAgents(cfg.OutboundAgents))
+	outboundAgents, err := toSchedulerOutboundAgents(cfg.OutboundAgents, cfg.OutboundTLS)
+	if err != nil {
+		log.Error("load outbound agent tls", "err", err)
+		os.Exit(1)
+	}
+	hub.SetOutboundAgents(outboundAgents)
 	go hub.Start(ctx)
 	limiter := abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{
@@ -184,16 +190,26 @@ func toAbuseToolLimits(in map[string]config.ToolLimitSpec) map[string]abuse.Tool
 	return out
 }
 
-func toSchedulerOutboundAgents(in []config.OutboundAgent) []scheduler.OutboundAgent {
+func toSchedulerOutboundAgents(in []config.OutboundAgent, tlsConfig config.TLS) ([]scheduler.OutboundAgent, error) {
 	out := make([]scheduler.OutboundAgent, 0, len(in))
+	client, err := scheduler.NewOutboundHTTPClient(scheduler.OutboundTLS{
+		Enabled:  tlsConfig.Enabled,
+		CAFiles:  tlsConfig.CAFiles,
+		CertFile: tlsConfig.CertFile,
+		KeyFile:  tlsConfig.KeyFile,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("outbound tls: %w", err)
+	}
 	for _, agent := range in {
 		out = append(out, scheduler.OutboundAgent{
-			ID:      agent.ID,
-			BaseURL: agent.BaseURL,
-			Token:   agent.HTTPToken,
+			ID:         agent.ID,
+			BaseURL:    agent.BaseURL,
+			Token:      agent.HTTPToken,
+			HTTPClient: client,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func toAPITokenConfigs(in []config.APITokenPermission) []api.TokenConfig {

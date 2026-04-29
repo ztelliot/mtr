@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ztelliot/mtr/internal/grpcwire"
 	"github.com/ztelliot/mtr/internal/model"
+	"github.com/ztelliot/mtr/internal/tlsutil"
 	"github.com/ztelliot/mtr/internal/version"
 )
 
@@ -27,9 +28,17 @@ type OutboundAgent struct {
 	ISP          string
 	BaseURL      string
 	Token        string
+	HTTPClient   *http.Client
 	Version      string
 	Capabilities []model.Tool
 	Protocols    model.ProtocolMask
+}
+
+type OutboundTLS struct {
+	Enabled  bool
+	CAFiles  []string
+	CertFile string
+	KeyFile  string
 }
 
 const (
@@ -73,6 +82,19 @@ func (h *Hub) SetOutboundAgents(agents []OutboundAgent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.outbound = append([]OutboundAgent(nil), agents...)
+}
+
+func NewOutboundHTTPClient(tlsConfig OutboundTLS) (*http.Client, error) {
+	cfg, err := tlsutil.ClientTLSConfig(tlsConfig.CAFiles, tlsConfig.CertFile, tlsConfig.KeyFile, tlsConfig.Enabled)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return http.DefaultClient, nil
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = cfg
+	return &http.Client{Transport: transport}, nil
 }
 
 func (h *Hub) startOutboundAgents(ctx context.Context) {
@@ -272,7 +294,7 @@ func probeOutboundAgentHealth(parent context.Context, agent OutboundAgent) (outb
 	if agent.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+agent.Token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundHTTPClient(agent).Do(req)
 	if err != nil {
 		return outboundHealth{}, err
 	}
@@ -438,7 +460,7 @@ func callOutboundAgentOnce(ctx context.Context, agent OutboundAgent, spec *grpcw
 	if agent.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+agent.Token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundHTTPClient(agent).Do(req)
 	if err != nil {
 		return &outboundConnectionError{err: err}
 	}
@@ -475,6 +497,13 @@ func outboundAgentURL(baseURL string, path string) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
+}
+
+func outboundHTTPClient(agent OutboundAgent) *http.Client {
+	if agent.HTTPClient != nil {
+		return agent.HTTPClient
+	}
+	return http.DefaultClient
 }
 
 func decodeOutboundLine(line []byte, jobID string, agentID string) (grpcwire.ResultEvent, error) {

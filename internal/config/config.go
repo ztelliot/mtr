@@ -22,6 +22,7 @@ type Server struct {
 	RateLimit           RateLimit            `yaml:"rate_limit"`
 	Runtime             Runtime              `yaml:"runtime"`
 	Scheduler           Scheduler            `yaml:"scheduler"`
+	OutboundTLS         TLS                  `yaml:"outbound_tls"`
 	OutboundAgents      []OutboundAgent      `yaml:"outbound_agents"`
 	ToolPolicies        map[string]Policy    `yaml:"tool_policies"`
 }
@@ -48,6 +49,7 @@ type Agent struct {
 	Protocols     uint8     `yaml:"protocols"`
 	HideFirstHops int       `yaml:"hide_first_hops"`
 	TLS           TLS       `yaml:"tls"`
+	HTTPTLS       TLS       `yaml:"http_tls"`
 	Speedtest     Speedtest `yaml:"speedtest"`
 }
 

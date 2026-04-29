@@ -2,11 +2,21 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -198,6 +208,67 @@ func TestCheckOutboundAgentHealth(t *testing.T) {
 	}
 }
 
+func TestOutboundAgentHTTPSMutualTLS(t *testing.T) {
+	files := writeOutboundMTLSFiles(t)
+	assertOutboundAgentHTTPSMutualTLS(t, files)
+}
+
+func TestOutboundAgentHTTPSMutualTLSVerifiesCAWithoutServerName(t *testing.T) {
+	files := writeOutboundMTLSFilesWithServerNames(t, nil, []string{"agent.mtr.svc"})
+	assertOutboundAgentHTTPSMutualTLS(t, files)
+}
+
+func assertOutboundAgentHTTPSMutualTLS(t *testing.T, files outboundMTLSFiles) {
+	t.Helper()
+	serverCert, err := tls.LoadX509KeyPair(files.serverCert, files.serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCAs := x509.NewCertPool()
+	caPEM, err := os.ReadFile(files.ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clientCAs.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to load test ca")
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected client certificate")
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "summary", "exit_code": 0})
+	}))
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+		MinVersion:   tls.VersionTLS12,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	client, err := NewOutboundHTTPClient(OutboundTLS{
+		Enabled:  true,
+		CAFiles:  []string{files.ca},
+		CertFile: files.clientCert,
+		KeyFile:  files.clientKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []grpcwire.ResultEvent
+	err = callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL, HTTPClient: client}, &grpcwire.JobSpec{ID: "job-1"}, func(event grpcwire.ResultEvent) {
+		got = append(got, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Event["type"] != "summary" {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
 func TestCheckOutboundAgentHealthRejectsNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -280,6 +351,105 @@ func TestOutboundLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 	}
 	if len(agents) != 1 || agents[0].Version != "v9.8.7" || agents[0].Country != "CN" || agents[0].Region != "edge" || agents[0].Provider != "kubernetes" || agents[0].ISP != "bgp" || agents[0].Protocols != model.ProtocolAll || len(agents[0].Capabilities) != 1 || agents[0].Capabilities[0] != model.ToolPing {
 		t.Fatalf("agent profile not stored: %#v", agents)
+	}
+}
+
+type outboundMTLSFiles struct {
+	ca         string
+	serverCert string
+	serverKey  string
+	clientCert string
+	clientKey  string
+}
+
+func writeOutboundMTLSFiles(t *testing.T) outboundMTLSFiles {
+	t.Helper()
+	return writeOutboundMTLSFilesWithServerNames(t, []net.IP{net.ParseIP("127.0.0.1")}, nil)
+}
+
+func writeOutboundMTLSFilesWithServerNames(t *testing.T, serverIPs []net.IP, serverDNSNames []string) outboundMTLSFiles {
+	t.Helper()
+	dir := t.TempDir()
+	caKey := newTestKey(t)
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "mtr test ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(dir, "ca.pem")
+	writeTestPEM(t, caPath, "CERTIFICATE", caDER)
+
+	serverCert, serverKey := newSignedTestCert(t, caTemplate, caKey, x509.ExtKeyUsageServerAuth, serverIPs, serverDNSNames)
+	serverCertPath := filepath.Join(dir, "server.pem")
+	serverKeyPath := filepath.Join(dir, "server-key.pem")
+	writeTestPEM(t, serverCertPath, "CERTIFICATE", serverCert)
+	writeTestPEM(t, serverKeyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(serverKey))
+
+	clientCert, clientKey := newSignedTestCert(t, caTemplate, caKey, x509.ExtKeyUsageClientAuth, nil, nil)
+	clientCertPath := filepath.Join(dir, "client.pem")
+	clientKeyPath := filepath.Join(dir, "client-key.pem")
+	writeTestPEM(t, clientCertPath, "CERTIFICATE", clientCert)
+	writeTestPEM(t, clientKeyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(clientKey))
+
+	return outboundMTLSFiles{
+		ca:         caPath,
+		serverCert: serverCertPath,
+		serverKey:  serverKeyPath,
+		clientCert: clientCertPath,
+		clientKey:  clientKeyPath,
+	}
+}
+
+func newSignedTestCert(t *testing.T, ca *x509.Certificate, caKey *rsa.PrivateKey, usage x509.ExtKeyUsage, ips []net.IP, dnsNames []string) ([]byte, *rsa.PrivateKey) {
+	t.Helper()
+	key := newTestKey(t)
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "mtr test leaf"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
+		IPAddresses:  ips,
+		DNSNames:     dnsNames,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der, key
+}
+
+func newTestKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func writeTestPEM(t *testing.T, path string, typ string, der []byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := pem.Encode(f, &pem.Block{Type: typ, Bytes: der}); err != nil {
+		t.Fatal(err)
 	}
 }
 

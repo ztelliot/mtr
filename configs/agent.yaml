@@ -33,3 +33,11 @@ tls:
   ca_files: []
   cert_file: ""
   key_file: ""
+# TLS for the HTTP Agent listener when mode includes "http". Set enabled with
+# cert_file/key_file to serve HTTPS; set ca_files as well to require Server
+# client certificates for HTTP mTLS.
+http_tls:
+  enabled: false
+  ca_files: []
+  cert_file: ""
+  key_file: ""

@@ -194,15 +194,26 @@ func agentCapabilities(in []string) []model.Tool {
 func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger) (func(), <-chan error, error) {
 	cfg.ID = defaultHTTPAgentID(cfg.ID)
 	handler := newHTTPAgentHandler(cfg, log)
+	tlsConfig, err := tlsutil.ServerTLSConfig(cfg.HTTPTLS.CAFiles, cfg.HTTPTLS.CertFile, cfg.HTTPTLS.KeyFile, cfg.HTTPTLS.Enabled)
+	if err != nil {
+		return nil, nil, fmt.Errorf("http_tls: %w", err)
+	}
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           handler,
+		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("http agent listening", "addr", listen, "agent_id", cfg.ID)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Info("http agent listening", "addr", listen, "agent_id", cfg.ID, "tls", tlsConfig != nil)
+		var err error
+		if tlsConfig != nil {
+			err = srv.ListenAndServeTLS("", "")
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}
@@ -377,7 +388,7 @@ func defaultHTTPAgentID(agentID string) string {
 }
 
 func run(ctx context.Context, cfg config.Agent, log *slog.Logger) error {
-	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, "", cfg.TLS.Enabled)
+	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Enabled)
 	if err != nil {
 		return err
 	}

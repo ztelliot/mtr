@@ -74,6 +74,12 @@ when Agent config sets `mode: http` or `mode: grpc,http`; Server probes
 `/healthz` once at startup to learn version, region, provider, capabilities,
 protocols, and redaction settings, then uses `/healthz` again only during
 recovery after connection failures.
+HTTP Agent listener TLS is controlled by Agent `http_tls`. When Server calls
+HTTPS Agents, configure global `outbound_tls` with CA files, client
+certificate/key to verify Agent server certificate chains and enable mutual TLS;
+use `https://` `base_url` values for those Agents. Client-side TLS verification
+checks the configured CA chain only, so in-cluster addresses do not need to
+match certificate SANs.
 
 HTTP Agent contract:
 
@@ -82,6 +88,12 @@ mode: "http"
 id: "edge-fc-1"
 http_addr: ":9000"
 http_token: "change-me-http-token"
+http_tls:
+  enabled: true
+  ca_files:
+    - "/var/run/mtr/tls/http-client-ca.crt"
+  cert_file: "/var/run/mtr/tls/http-agent.crt"
+  key_file: "/var/run/mtr/tls/http-agent.key"
 ```
 
 To run both the long-lived gRPC Agent and HTTP Agent in one process, use

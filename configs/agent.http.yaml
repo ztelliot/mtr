@@ -31,3 +31,8 @@ tls:
   ca_files: []
   cert_file: ""
   key_file: ""
+http_tls:
+  enabled: false
+  ca_files: []
+  cert_file: ""
+  key_file: ""

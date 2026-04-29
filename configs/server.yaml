@@ -72,6 +72,11 @@ scheduler:
   grpc_max_inflight_per_agent: 4
   outbound_max_inflight_per_agent: 1
   poll_interval_sec: 2
+outbound_tls:
+  enabled: false
+  ca_files: []
+  cert_file: ""
+  key_file: ""
 outbound_agents: []
 # Example for an agent reachable through a forwarded gateway port or HTTP function endpoint:
 # outbound_agents:
