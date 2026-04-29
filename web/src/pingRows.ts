@@ -42,12 +42,14 @@ export function isFanoutTool(tool: Tool): boolean {
 }
 
 export function capableAgents(agents: Agent[] | null | undefined, tool: Tool): Agent[] {
-  return safeAgents(agents).filter(
-    (agent) =>
-      agent.status === "online" &&
-      Array.isArray(agent.capabilities) &&
-      agent.capabilities.includes(tool)
-  );
+  return safeAgents(agents)
+    .filter(
+      (agent) =>
+        agent.status === "online" &&
+        Array.isArray(agent.capabilities) &&
+        agent.capabilities.includes(tool)
+    )
+    .sort(compareAgents);
 }
 
 export function pingCapableAgents(agents: Agent[] | null | undefined): Agent[] {
@@ -260,6 +262,16 @@ function compareNodeRows(left: NodeResultRow, right: NodeResultRow): number {
     compareSortText(left.region, right.region) ||
     compareSortText(left.isp, right.isp) ||
     compareSortText(left.provider, right.provider)
+  );
+}
+
+function compareAgents(left: Agent, right: Agent): number {
+  return (
+    compareSortText(left.country, right.country) ||
+    compareSortText(left.region, right.region) ||
+    compareSortText(left.isp, right.isp) ||
+    compareSortText(left.provider, right.provider) ||
+    compareSortText(left.id, right.id)
   );
 }
 

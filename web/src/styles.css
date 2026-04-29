@@ -991,9 +991,15 @@ body,
 }
 
 .schedule-chart-point {
-  cursor: crosshair;
   stroke: light-dark(#ffffff, #16191f);
   stroke-width: 1.5;
+}
+
+.schedule-chart-hit-point {
+  cursor: crosshair;
+  fill: transparent;
+  pointer-events: all;
+  stroke: transparent;
 }
 
 .schedule-chart-tooltip {

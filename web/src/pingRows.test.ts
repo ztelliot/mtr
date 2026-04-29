@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMtrRows, buildNodeRows, buildPingRows, pingCapableAgents } from "./pingRows";
+import { buildMtrRows, buildNodeRows, buildPingRows, capableAgents, pingCapableAgents } from "./pingRows";
 import type { Agent, Job, JobEvent } from "./types";
 
 const agents: Agent[] = [
@@ -43,6 +43,18 @@ describe("ping rows", () => {
   it("keeps only online ping-capable agents", () => {
     expect(pingCapableAgents(null)).toEqual([]);
     expect(pingCapableAgents(agents).map((agent) => agent.id)).toEqual(["edge-1"]);
+  });
+
+  it("sorts capable agents by country, region, isp, provider, then id", () => {
+    const unsorted: Agent[] = [
+      { ...agents[0], id: "us-zzz", country: "US", region: "west", isp: "Beta", provider: "B" },
+      { ...agents[0], id: "jp-b", country: "JP", region: "tokyo", isp: "Beta", provider: "B" },
+      { ...agents[0], id: "jp-a", country: "JP", region: "tokyo", isp: "Alpha", provider: "A" },
+      { ...agents[0], id: "hk-a", country: "HK", region: "hongkong", isp: "Alpha", provider: "A" },
+      { ...agents[0], id: "jp-a2", country: "JP", region: "osaka", isp: "Alpha", provider: "A" }
+    ];
+
+    expect(capableAgents(unsorted, "ping").map((agent) => agent.id)).toEqual(["hk-a", "jp-a2", "jp-a", "jp-b", "us-zzz"]);
   });
 
   it("builds node result rows from unified ping summary events", () => {

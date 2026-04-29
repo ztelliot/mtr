@@ -1074,7 +1074,7 @@ function ScheduleMetricStatsTable({
             <Table.Td className="name-column">
               <span className="schedule-chart-legend-item">
                 <span className="schedule-chart-legend-swatch" style={{ background: row.color }} />
-                {row.label}
+                <ScheduleAgentLabel label={row.label} />
               </span>
             </Table.Td>
             {columns.map((column) => (
@@ -1084,6 +1084,19 @@ function ScheduleMetricStatsTable({
         ))}
       </Table.Tbody>
     </Table>
+  );
+}
+
+function ScheduleAgentLabel({ label }: { label: string }) {
+  const match = label.match(/^(.*)\s(\[v[46]\])$/);
+  if (!match) {
+    return <>{label}</>;
+  }
+  return (
+    <span className="schedule-agent-label">
+      {match[1]}
+      <span className="agent-protocol-suffix">{match[2]}</span>
+    </span>
   );
 }
 
@@ -1119,6 +1132,7 @@ function ScheduleLineChart({
   const x = (timestamp: number) => padding.left + (maxX === minX ? plotWidth / 2 : ((timestamp - minX) / (maxX - minX)) * plotWidth);
   const y = (value: number) => padding.top + plotHeight - ((value - minY) / Math.max(1, maxY - minY)) * plotHeight;
   const gridValues = Array.from({ length: 5 }, (_, index) => minY + ((maxY - minY) / 4) * index);
+  const showPointMarkers = points.length <= 64;
 
   return (
     <div className="schedule-chart-shell">
@@ -1146,18 +1160,27 @@ function ScheduleLineChart({
               {sorted.map((point) => {
                 const tooltipLines = scheduleChartTooltipLines(point.agentTooltipLabel, point, formatValue, tool);
                 return (
-                  <circle
-                    className="schedule-chart-point"
-                    cx={x(point.timestamp)}
-                    cy={y(point.value)}
-                    fill={item.color}
-                    key={`${point.jobId}-${point.timestamp}`}
-                    onPointerEnter={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
-                    onPointerMove={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
-                    r={compact ? 3 : 3.5}
-                  >
-                    <title>{tooltipLines.join(" · ")}</title>
-                  </circle>
+                  <g key={`${point.jobId}-${point.timestamp}`}>
+                    {showPointMarkers && (
+                      <circle
+                        className="schedule-chart-point"
+                        cx={x(point.timestamp)}
+                        cy={y(point.value)}
+                        fill={item.color}
+                        r={compact ? 3 : 3.5}
+                      />
+                    )}
+                    <circle
+                      className="schedule-chart-hit-point"
+                      cx={x(point.timestamp)}
+                      cy={y(point.value)}
+                      onPointerEnter={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
+                      onPointerMove={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
+                      r={compact ? 6 : 7}
+                    >
+                      <title>{tooltipLines.join(" · ")}</title>
+                    </circle>
+                  </g>
                 );
               })}
             </g>
