@@ -27,6 +27,7 @@ speedtest:
   ip_requests_per_minute: 12
   ip_burst: 3
 tls:
-  ca_file: ""
+  enabled: false
+  ca_files: []
   cert_file: ""
   key_file: ""

@@ -22,7 +22,8 @@ api_tokens:
     all: true
 register_token: "change-me-agent-token"
 tls:
-  ca_file: ""
+  enabled: false
+  ca_files: []
   cert_file: ""
   key_file: ""
 rate_limit:

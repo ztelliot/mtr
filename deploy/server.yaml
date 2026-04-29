@@ -16,7 +16,9 @@ data:
     grpc_addr: ":8443"
     log_level: "info"
     tls:
-      ca_file: "/var/run/mtr/tls/ca.crt"
+      enabled: true
+      ca_files:
+        - "/var/run/mtr/tls/ca.crt"
       cert_file: "/var/run/mtr/tls/tls.crt"
       key_file: "/var/run/mtr/tls/tls.key"
     rate_limit:

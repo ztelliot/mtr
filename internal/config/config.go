@@ -61,9 +61,10 @@ type Speedtest struct {
 }
 
 type TLS struct {
-	CAFile   string `yaml:"ca_file"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
+	Enabled  bool     `yaml:"enabled"`
+	CAFiles  []string `yaml:"ca_files"`
+	CertFile string   `yaml:"cert_file"`
+	KeyFile  string   `yaml:"key_file"`
 }
 
 type RateLimit struct {

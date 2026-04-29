@@ -174,7 +174,9 @@ data:
     write_capabilities >> /work/agent.yaml
     cat >> /work/agent.yaml <<EOF
     tls:
-      ca_file: "/var/run/mtr/tls/ca.crt"
+      enabled: true
+      ca_files:
+        - "/var/run/mtr/tls/ca.crt"
       cert_file: "/var/run/mtr/tls/tls.crt"
       key_file: "/var/run/mtr/tls/tls.key"
     EOF

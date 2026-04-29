@@ -59,7 +59,7 @@ whose protocol mask supports the requested protocol.
 
 Every Server and Agent config field can also be supplied through environment
 variables. Environment variables use the YAML path with a `MTR_` prefix and
-upper-case underscores, for example `tls.ca_file` becomes `MTR_TLS_CA_FILE`,
+upper-case underscores, for example `tls.ca_files` becomes `MTR_TLS_CA_FILES`,
 `runtime.http_timeout_sec` becomes `MTR_RUNTIME_HTTP_TIMEOUT_SEC`, and
 `speedtest.max_bytes` becomes `MTR_SPEEDTEST_MAX_BYTES`. Config file values win
 when both sources set the same field. Lists of strings may be comma-separated
@@ -259,14 +259,17 @@ requires `agent_id` for those tools.
 ## Agent/Server mTLS
 
 `register_token` covers Agent registration authorization, while
-`tls.ca_file`, `tls.cert_file`, and `tls.key_file` protect the gRPC control
+`tls.ca_files`, `tls.cert_file`, and `tls.key_file` protect the gRPC control
 plane between Agent and Server. To enable mutual TLS:
 
-- Server must set `tls.ca_file`, `tls.cert_file`, and `tls.key_file` together.
+- Agent may set `tls.enabled: true` without `ca_files` to use the operating
+  system trust store. This is useful when connecting to a public TLS endpoint
+  such as a Cloudflare-proxied hostname.
+- Server must set `tls.ca_files`, `tls.cert_file`, and `tls.key_file` together.
   If only the server certificate/key are configured, the channel is TLS but
   Agents are not required to present a client certificate.
-- Agent must also set `tls.ca_file`, `tls.cert_file`, and `tls.key_file`
-  together. If only `ca_file` is set, the Agent verifies the Server but does
+- Agent must also set `tls.ca_files`, `tls.cert_file`, and `tls.key_file`
+  together. If only `ca_files` is set, the Agent verifies the Server but does
   not present its own client certificate.
 - In production, use both `register_token` and mTLS: token-based registration
   for logical authorization, mTLS for transport-level mutual authentication.
@@ -317,10 +320,65 @@ Server and Agent TLS config example:
 
 ```yaml
 tls:
-  ca_file: "/var/run/mtr/tls/ca.crt"
+  enabled: true
+  ca_files:
+    - "/var/run/mtr/tls/ca.crt"
   cert_file: "/var/run/mtr/tls/tls.crt"
   key_file: "/var/run/mtr/tls/tls.key"
 ```
+
+### Cloudflare gRPC reverse proxy
+
+The gRPC control plane can be placed behind [Cloudflare's proxied gRPC support](https://developers.cloudflare.com/network/grpc-connections/)
+when the Cloudflare requirements are met: enable gRPC for the zone, use a
+proxied hostname, keep SSL/TLS mode at least Full, and expose the origin gRPC
+endpoint on port 443 with TLS and HTTP/2/ALPN. This project uses grpc-go over
+HTTP/2 and sends `application/grpc+json`, which matches Cloudflare's accepted
+gRPC content-type pattern.
+
+One practical layout:
+
+```yaml
+# server.yaml on the origin
+grpc_addr: ":443"
+tls:
+  enabled: true
+  cert_file: "/var/run/mtr/tls/tls.crt"
+  key_file: "/var/run/mtr/tls/tls.key"
+
+# agent.yaml
+server_addr: "grpc.example.com:443"
+tls:
+  enabled: true
+```
+
+To support both direct Agents and Cloudflare-proxied Agents on the same origin,
+configure Cloudflare Authenticated Origin Pulls (prefer a zone-level or
+per-hostname custom certificate for account-specific authentication), then trust
+both the direct Agent CA and the Cloudflare origin-pull CA:
+
+```yaml
+# server.yaml on the origin
+grpc_addr: ":443"
+tls:
+  enabled: true
+  ca_files:
+    - "/var/run/mtr/tls/agent-ca.crt"
+    - "/var/run/mtr/tls/cloudflare-origin-pull-ca.crt"
+  cert_file: "/var/run/mtr/tls/tls.crt"
+  key_file: "/var/run/mtr/tls/tls.key"
+```
+
+Direct Agents keep their client certificate config and connect to the origin
+address. Cloudflare-proxied Agents connect to the proxied hostname and normally
+do not set Agent `cert_file`/`key_file`; Cloudflare presents the origin-pull
+client certificate to Server instead. Keep `register_token` strong because
+Cloudflare terminates the Agent-facing TLS connection and normal Agent client
+certificates are not passed through the reverse proxy. Cloudflare Access does
+not protect gRPC traffic through this reverse-proxy mode; use another
+authentication layer for sensitive origins. Cloudflare Tunnel public hostnames
+are also not the same thing as proxied gRPC here; [Cloudflare documents gRPC support for Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/use-cases/grpc/)
+via private subnet routing, not public hostname deployments.
 
 ## Security Notes
 

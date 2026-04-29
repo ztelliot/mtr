@@ -114,7 +114,7 @@ func main() {
 		},
 		Tools: toAbuseToolLimits(cfg.RateLimit.Tools),
 	})
-	creds, err := tlsutil.ServerCredentials(cfg.TLS.CAFile, cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	creds, err := tlsutil.ServerCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Enabled)
 	if err != nil {
 		log.Error("load grpc tls", "err", err)
 		os.Exit(1)

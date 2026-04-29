@@ -24,7 +24,8 @@ register_token: "change-me-agent-token"
 # Set all three files to enable mTLS on the gRPC control plane and require
 # Agents to present a client certificate signed by this CA.
 tls:
-  ca_file: ""
+  enabled: false
+  ca_files: []
   cert_file: ""
   key_file: ""
 rate_limit:

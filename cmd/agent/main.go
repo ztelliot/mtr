@@ -377,7 +377,7 @@ func defaultHTTPAgentID(agentID string) string {
 }
 
 func run(ctx context.Context, cfg config.Agent, log *slog.Logger) error {
-	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFile, cfg.TLS.CertFile, cfg.TLS.KeyFile, "")
+	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, "", cfg.TLS.Enabled)
 	if err != nil {
 		return err
 	}

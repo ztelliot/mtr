@@ -29,6 +29,7 @@ speedtest:
 # Set all three files to verify the Server certificate and present a client
 # certificate for mTLS. Multiple Agents may share the same client certificate.
 tls:
-  ca_file: ""
+  enabled: false
+  ca_files: []
   cert_file: ""
   key_file: ""

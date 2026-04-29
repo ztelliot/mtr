@@ -13,7 +13,8 @@ func TestLoadAgentUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_HTTP_ADDR", ":9100")
 	t.Setenv("MTR_REGISTER_TOKEN", "env-register-token")
 	t.Setenv("MTR_HTTP_TOKEN", "env-http-token")
-	t.Setenv("MTR_TLS_CA_FILE", "/env/ca.pem")
+	t.Setenv("MTR_TLS_ENABLED", "true")
+	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
 	t.Setenv("MTR_CAPABILITIES", "ping,dns")
 	t.Setenv("MTR_PROTOCOLS", "2")
 	t.Setenv("MTR_SPEEDTEST_MAX_BYTES", "2048")
@@ -32,7 +33,7 @@ tls:
 	if cfg.Mode != "http" || cfg.HTTPAddr != ":9100" || cfg.RegisterToken != "env-register-token" || cfg.HTTPToken != "env-http-token" {
 		t.Fatalf("env values not loaded: %#v", cfg)
 	}
-	if cfg.TLS.CAFile != "/env/ca.pem" || cfg.TLS.CertFile != "/file/cert.pem" {
+	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) || cfg.TLS.CertFile != "/file/cert.pem" {
 		t.Fatalf("nested env/yaml values not merged: %#v", cfg.TLS)
 	}
 	if !reflect.DeepEqual(cfg.Capabilities, []string{"ping", "dns"}) {
@@ -46,7 +47,8 @@ tls:
 func TestLoadServerUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_HTTP_ADDR", ":9999")
 	t.Setenv("MTR_GRPC_ADDR", ":9998")
-	t.Setenv("MTR_TLS_CA_FILE", "/env/ca.pem")
+	t.Setenv("MTR_TLS_ENABLED", "true")
+	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", "7")
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_BURST", "8")
 	t.Setenv("MTR_RUNTIME_HTTP_TIMEOUT_SEC", "9")
@@ -68,7 +70,7 @@ runtime:
 	if cfg.HTTPAddr != ":file" || cfg.GRPCAddr != ":9998" {
 		t.Fatalf("unexpected addresses: %#v", cfg)
 	}
-	if cfg.TLS.CAFile != "/env/ca.pem" {
+	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) {
 		t.Fatalf("nested tls env not loaded: %#v", cfg.TLS)
 	}
 	if cfg.RateLimit.Global.RequestsPerMinute != 7 || cfg.RateLimit.Global.Burst != 11 {

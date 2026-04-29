@@ -3,14 +3,18 @@ package tlsutil
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"os"
 
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-func ServerCredentials(caFile, certFile, keyFile string) (credentials.TransportCredentials, error) {
+func ServerCredentials(caFiles []string, certFile, keyFile string, enabled bool) (credentials.TransportCredentials, error) {
 	if certFile == "" || keyFile == "" {
+		if enabled {
+			return nil, errors.New("tls cert_file and key_file are required when tls.enabled is true")
+		}
 		return insecure.NewCredentials(), nil
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -21,8 +25,8 @@ func ServerCredentials(caFile, certFile, keyFile string) (credentials.TransportC
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	if caFile != "" {
-		ca, err := loadPool(caFile)
+	if len(caFiles) > 0 {
+		ca, err := loadPool(caFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -32,13 +36,13 @@ func ServerCredentials(caFile, certFile, keyFile string) (credentials.TransportC
 	return credentials.NewTLS(cfg), nil
 }
 
-func ClientCredentials(caFile, certFile, keyFile, serverName string) (credentials.TransportCredentials, error) {
-	if caFile == "" && certFile == "" && keyFile == "" {
+func ClientCredentials(caFiles []string, certFile, keyFile, serverName string, enabled bool) (credentials.TransportCredentials, error) {
+	if !enabled && len(caFiles) == 0 && certFile == "" && keyFile == "" {
 		return insecure.NewCredentials(), nil
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
-	if caFile != "" {
-		pool, err := loadPool(caFile)
+	if len(caFiles) > 0 {
+		pool, err := loadPool(caFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -54,12 +58,14 @@ func ClientCredentials(caFile, certFile, keyFile, serverName string) (credential
 	return credentials.NewTLS(cfg), nil
 }
 
-func loadPool(path string) (*x509.CertPool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func loadPool(paths []string) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(b)
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		pool.AppendCertsFromPEM(b)
+	}
 	return pool, nil
 }
