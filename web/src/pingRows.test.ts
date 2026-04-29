@@ -372,7 +372,6 @@ describe("ping rows", () => {
     expect(buildNodeRows("ping", agents, [aggregateJob], { "aggregate-job": events })[0]).toMatchObject({
       agentId: "edge-new",
       region: "-",
-      provider: "edge-new",
       ip: "1.1.1.1",
       lastMS: 12
     });
@@ -566,7 +565,7 @@ describe("ping rows", () => {
     });
   });
 
-  it("sorts multi-node rows by country, region, provider, and isp", () => {
+  it("sorts multi-node rows by country, region, isp, and provider", () => {
     const sortingAgents: Agent[] = [
       { ...agents[0], id: "agent-3", country: "US", region: "ca", provider: "Zeta", isp: "Beta" },
       { ...agents[0], id: "agent-1", country: "CN", region: "hk", provider: "Alpha", isp: "Zed" },

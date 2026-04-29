@@ -1,10 +1,11 @@
 import type { VersionInfo } from "./types";
+import { formatVersionLabel } from "./versionLabel";
 
 export function formatServerVersion(info: VersionInfo | null, t: (key: string) => string): string {
   if (!info?.version) {
     return t("footer.versionUnknown");
   }
-  return info.commit ? `${info.version} ${info.commit.slice(0, 8)}` : info.version;
+  return formatVersionLabel(info.version, info.commit);
 }
 
 export function formatMS(value?: number): string {

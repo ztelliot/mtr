@@ -18,7 +18,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { AlertTriangle, Pencil, Play, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { agentLocationLabel, agentLocationProviderLabel, agentSelectLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
+import { agentLocationProviderLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
 import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
@@ -31,7 +31,7 @@ import { collectGeoIPTargets, DNSRecordsCell, MtrResultTable, type GeoIPLookup }
 import { targetResolvedIP } from "./streamEvents";
 import type { Agent, CreateScheduledJobRequest, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, ScheduledJob, Tool } from "./types";
 
-type ScheduleTimeRange = "1h" | "6h" | "24h" | "7d" | "30d" | "all";
+type ScheduleTimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 type ScheduleMetricKind =
   | "pingDuration"
   | "loss"
@@ -63,6 +63,7 @@ export function SchedulePage({
   const [enabled, setEnabled] = useState(true);
   const [editingScheduleId, setEditingScheduleId] = useState("");
   const [timeRange, setTimeRange] = useState<ScheduleTimeRange>("24h");
+  const [compact, setCompact] = useState(false);
   const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
   const [selectedScheduleId, setSelectedScheduleId] = useState("");
   const [history, setHistory] = useState<Job[]>([]);
@@ -602,6 +603,8 @@ export function SchedulePage({
           lossSeries={lossSeries}
           schedule={selectedSchedule}
           timeRange={timeRange}
+          compact={compact}
+          onCompactChange={setCompact}
           onTimeRangeChange={setTimeRange}
           t={t}
         />
@@ -614,6 +617,8 @@ export function SchedulePage({
           metrics={httpMetricCards}
           schedule={selectedSchedule}
           timeRange={timeRange}
+          compact={compact}
+          onCompactChange={setCompact}
           onTimeRangeChange={setTimeRange}
           t={t}
         />
@@ -626,6 +631,8 @@ export function SchedulePage({
           rows={scheduleDNSRows}
           schedule={selectedSchedule}
           timeRange={timeRange}
+          compact={compact}
+          onCompactChange={setCompact}
           onTimeRangeChange={setTimeRange}
           t={t}
         />
@@ -637,6 +644,8 @@ export function SchedulePage({
           schedule={selectedSchedule}
           series={summarySeries}
           timeRange={timeRange}
+          compact={compact}
+          onCompactChange={setCompact}
           onTimeRangeChange={setTimeRange}
           t={t}
         />
@@ -648,13 +657,17 @@ export function SchedulePage({
             agent={agents.find((agent) => agent.id === selectedSchedule.agent_id)}
             runCount={history.length}
             schedule={selectedSchedule}
+            showAgentDetails={false}
             timeRange={timeRange}
+            compact={compact}
+            onCompactChange={setCompact}
             onTimeRangeChange={setTimeRange}
             t={t}
           />
           <div className="schedule-route-layout">
             <Paper className="schedule-panel schedule-history-panel schedule-route-history-panel" withBorder>
               <ScheduleHistory
+                compact={compact}
                 jobs={history}
                 loading={loadingHistory}
                 selectedID={selectedJobId}
@@ -668,7 +681,7 @@ export function SchedulePage({
               {loadingEvents ? (
                 <Text c="dimmed" ta="center" py="xl">{t("schedule.loadingResult")}</Text>
               ) : selectedJob ? (
-                <MtrResultTable tool={selectedJob.tool} agent={scheduleAgent} targetIP={scheduleTargetIP} rows={scheduleMtrRows} compact geoIPByIP={geoIPByIP} t={t} />
+                <MtrResultTable tool={selectedJob.tool} agent={scheduleAgent} targetIP={scheduleTargetIP} rows={scheduleMtrRows} compact={compact} geoIPByIP={geoIPByIP} t={t} />
               ) : (
                 <Text c="dimmed" ta="center" py="xl">{t("schedule.noSelectedResult")}</Text>
               )}
@@ -683,6 +696,7 @@ export function SchedulePage({
 interface ScheduleMetricPoint {
   agentId: string;
   agentLabel: string;
+  agentTooltipLabel: string;
   jobId: string;
   status: string;
   targetIP?: string;
@@ -703,46 +717,57 @@ const chartColors = ["#60a5fa", "#34d399", "#f59e0b", "#f472b6", "#a78bfa", "#22
 
 function ScheduleResultHeader({
   agent,
+  compact = false,
   runCount,
   schedule,
+  showAgentDetails = true,
   timeRange,
+  onCompactChange,
   onTimeRangeChange,
   t
 }: {
   agent?: Agent;
+  compact?: boolean;
   runCount: number;
   schedule: ScheduledJob;
+  showAgentDetails?: boolean;
   timeRange: ScheduleTimeRange;
+  onCompactChange?: (value: boolean) => void;
   onTimeRangeChange: (value: ScheduleTimeRange) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   return (
     <Group className="schedule-dashboard-header" justify="space-between" align="flex-end">
       <div>
-        <Text className="schedule-section-title">{scheduleHeaderTitle(schedule, agent)}</Text>
+        <Text className="schedule-section-title">{scheduleHeaderTitle(schedule, showAgentDetails ? agent : undefined, showAgentDetails)}</Text>
         <Text c="dimmed" size="sm">
           {`${t("schedule.samples", { count: runCount })} · ${t("schedule.nextRun", { time: formatDateTime(schedule.next_run_at) })}`}
         </Text>
       </div>
-      <Select
-        className="schedule-range-select"
-        checkIconPosition="left"
-        data={scheduleTimeRangeOptions(t)}
-        value={timeRange}
-        onChange={(value) => onTimeRangeChange((value as ScheduleTimeRange | null) ?? "24h")}
-      />
+      <Group className="schedule-dashboard-controls" gap="md" align="center">
+        {onCompactChange && (
+          <Switch className="compact-switch" checked={compact} label={t("results.compact")} labelPosition="left" onChange={(event) => onCompactChange(event.currentTarget.checked)} />
+        )}
+        <Select
+          className="schedule-range-select"
+          checkIconPosition="left"
+          data={scheduleTimeRangeOptions(t)}
+          value={timeRange}
+          onChange={(value) => onTimeRangeChange((value as ScheduleTimeRange | null) ?? "24h")}
+        />
+      </Group>
     </Group>
   );
 }
 
-function scheduleHeaderTitle(schedule: ScheduledJob, agent?: Agent): string {
+function scheduleHeaderTitle(schedule: ScheduledJob, agent?: Agent, showAgentDetails = true): string {
   const label = [schedule.name, scheduleTargetLabel(schedule)].map((part) => part?.trim()).filter(Boolean);
   const base = [...new Set(label)].join(" · ") || schedule.tool;
-  const details = scheduleHeaderParameters(schedule, agent);
+  const details = scheduleHeaderParameters(schedule, agent, showAgentDetails);
   return [base, ...details].filter(Boolean).join(" · ");
 }
 
-function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent): string[] {
+function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent, showAgentDetails = true): string[] {
   const args = schedule.args ?? {};
   const details: string[] = [];
   const protocol = args.protocol?.toUpperCase();
@@ -758,7 +783,7 @@ function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent): string
   if (schedule.tool === "dns" && args.type) {
     details.push(args.type.toUpperCase());
   }
-  if (schedule.agent_id) {
+  if (showAgentDetails && schedule.agent_id) {
     details.push(agent ? agentLocationProviderLabel(agent) : schedule.agent_id);
   }
   return details.filter(Boolean);
@@ -773,32 +798,37 @@ function scheduleTargetLabel(schedule: ScheduledJob): string {
 }
 
 function SchedulePingDashboard({
+  compact,
   durationSeries,
   history,
   loading,
   lossSeries,
   schedule,
   timeRange,
+  onCompactChange,
   onTimeRangeChange,
   t
 }: {
+  compact: boolean;
   durationSeries: ScheduleMetricSeries[];
   history: Job[];
   loading: boolean;
   lossSeries: ScheduleMetricSeries[];
   schedule: ScheduledJob;
   timeRange: ScheduleTimeRange;
+  onCompactChange: (value: boolean) => void;
   onTimeRangeChange: (value: ScheduleTimeRange) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   return (
     <div className="schedule-dashboard">
-      <ScheduleResultHeader runCount={history.length} schedule={schedule} timeRange={timeRange} onTimeRangeChange={onTimeRangeChange} t={t} />
+      <ScheduleResultHeader compact={compact} runCount={history.length} schedule={schedule} timeRange={timeRange} onCompactChange={onCompactChange} onTimeRangeChange={onTimeRangeChange} t={t} />
       <div className="schedule-metrics-grid schedule-ping-grid">
         <ScheduleMetricCard
           columns={["min", "max", "mean", "stdev"]}
           formatValue={formatMS}
           loading={loading}
+          compact={compact}
           series={durationSeries}
           title={t("schedule.icmpDuration")}
           tool={schedule.tool}
@@ -808,6 +838,7 @@ function SchedulePingDashboard({
           columns={["mean", "max"]}
           formatValue={formatPercent}
           loading={loading}
+          compact={compact}
           series={lossSeries}
           title={t("schedule.packetLoss")}
           tool={schedule.tool}
@@ -827,26 +858,30 @@ interface ScheduleMetricCardModel {
 }
 
 function ScheduleHTTPDashboard({
+  compact,
   history,
   loading,
   metrics,
   schedule,
   timeRange,
+  onCompactChange,
   onTimeRangeChange,
   t
 }: {
+  compact: boolean;
   history: Job[];
   loading: boolean;
   metrics: ScheduleMetricCardModel[];
   schedule: ScheduledJob;
   timeRange: ScheduleTimeRange;
+  onCompactChange: (value: boolean) => void;
   onTimeRangeChange: (value: ScheduleTimeRange) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const visibleMetrics = loading ? metrics.slice(0, 4) : metrics.filter((metric) => metric.series.some((series) => series.points.length));
   return (
     <div className="schedule-dashboard">
-      <ScheduleResultHeader runCount={history.length} schedule={schedule} timeRange={timeRange} onTimeRangeChange={onTimeRangeChange} t={t} />
+      <ScheduleResultHeader compact={compact} runCount={history.length} schedule={schedule} timeRange={timeRange} onCompactChange={onCompactChange} onTimeRangeChange={onTimeRangeChange} t={t} />
       {visibleMetrics.length ? (
         <div className="schedule-metrics-grid">
           {visibleMetrics.map((metric) => (
@@ -855,6 +890,7 @@ function ScheduleHTTPDashboard({
               formatValue={metric.formatValue}
               key={metric.kind}
               loading={loading}
+              compact={compact}
               series={metric.series}
               title={metric.title}
               tool={schedule.tool}
@@ -872,50 +908,54 @@ function ScheduleHTTPDashboard({
 }
 
 function ScheduleDNSHistoryPanel({
+  compact,
   geoIPByIP,
   loading,
   rows,
   schedule,
   timeRange,
+  onCompactChange,
   onTimeRangeChange,
   t
 }: {
+  compact: boolean;
   geoIPByIP: GeoIPLookup;
   loading: boolean;
   rows: ScheduleDNSHistoryRow[];
   schedule: ScheduledJob;
   timeRange: ScheduleTimeRange;
+  onCompactChange: (value: boolean) => void;
   onTimeRangeChange: (value: ScheduleTimeRange) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   return (
     <div className="schedule-dashboard">
-      <ScheduleResultHeader runCount={rows.length} schedule={schedule} timeRange={timeRange} onTimeRangeChange={onTimeRangeChange} t={t} />
-      <Paper className="schedule-panel schedule-history-panel" withBorder>
+      <ScheduleResultHeader compact={compact} runCount={rows.length} schedule={schedule} timeRange={timeRange} onCompactChange={onCompactChange} onTimeRangeChange={onTimeRangeChange} t={t} />
+      <Paper className="schedule-panel schedule-history-panel schedule-dns-history-panel" withBorder>
         {loading ? (
           <Text c="dimmed" py="lg">{t("schedule.loadingHistory")}</Text>
         ) : rows.length ? (
           <ScrollArea>
-            <Table className="schedule-dns-history-table" striped highlightOnHover verticalSpacing="xs">
+            <Table className={`schedule-dns-history-table ${compact ? "compact-schedule-table" : ""}`} striped highlightOnHover verticalSpacing={compact ? 4 : "xs"}>
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>{t("results.region")}</Table.Th>
                 <Table.Th>{t("results.provider")}</Table.Th>
                 <Table.Th>{t("results.records")}</Table.Th>
-                <Table.Th className="dns-history-status-column">{t("results.status")}</Table.Th>
                 <Table.Th>{t("schedule.runAt")}</Table.Th>
+                <Table.Th className="dns-history-status-column">{t("results.status")}</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {rows.map((row) => (
                 <Table.Tr key={`${row.jobId}-${row.agentId}`}>
                   <Table.Td><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-                  <Table.Td><ProviderCell provider={row.provider} isp={row.isp} /></Table.Td>
+                  <Table.Td><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
                   <Table.Td><DNSRecordsCell records={row.records} geoIPByIP={geoIPByIP} /></Table.Td>
-                  <Table.Td className="dns-history-status-column"><StatusBadge status={row.status} t={t} /></Table.Td>
                   <Table.Td title={row.runAt ? formatDateTime(row.runAt) : undefined}>
                     {formatScheduleRunAt(row.runAt, t)}
                   </Table.Td>
+                  <Table.Td className="dns-history-status-column"><StatusBadge status={row.status} t={t} /></Table.Td>
                 </Table.Tr>
               ))}
             </Table.Tbody>
@@ -930,27 +970,32 @@ function ScheduleDNSHistoryPanel({
 }
 
 function ScheduleMetricSummaryPanel({
+  compact,
   loading,
   schedule,
   series,
   timeRange,
+  onCompactChange,
   onTimeRangeChange,
   t
 }: {
+  compact: boolean;
   loading: boolean;
   schedule: ScheduledJob;
   series: ScheduleMetricSeries[];
   timeRange: ScheduleTimeRange;
+  onCompactChange: (value: boolean) => void;
   onTimeRangeChange: (value: ScheduleTimeRange) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   return (
     <div className="schedule-dashboard">
-      <ScheduleResultHeader runCount={uniqueSchedulePointRuns(series)} schedule={schedule} timeRange={timeRange} onTimeRangeChange={onTimeRangeChange} t={t} />
+      <ScheduleResultHeader compact={compact} runCount={uniqueSchedulePointRuns(series)} schedule={schedule} timeRange={timeRange} onCompactChange={onCompactChange} onTimeRangeChange={onTimeRangeChange} t={t} />
       <ScheduleMetricCard
         columns={["min", "max", "mean", "stdev"]}
         formatValue={scheduleMetricFormatter(schedule.tool)}
         loading={loading}
+        compact={compact}
         series={series}
         title={schedule.tool === "port" ? t("results.rtt") : t("schedule.summary")}
         tool={schedule.tool}
@@ -962,6 +1007,7 @@ function ScheduleMetricSummaryPanel({
 
 function ScheduleMetricCard({
   columns = ["last", "min", "max", "mean", "stdev"],
+  compact,
   formatValue,
   loading,
   series,
@@ -970,6 +1016,7 @@ function ScheduleMetricCard({
   t
 }: {
   columns?: ScheduleStatColumn[];
+  compact: boolean;
   formatValue: (value?: number) => string;
   loading: boolean;
   series: ScheduleMetricSeries[];
@@ -985,9 +1032,9 @@ function ScheduleMetricCard({
         <Text c="dimmed" ta="center" py="xl">{t("schedule.loadingTrend")}</Text>
       ) : points.length ? (
         <>
-          <ScheduleLineChart formatValue={formatValue} series={series} tool={tool} />
+          <ScheduleLineChart compact={compact} formatValue={formatValue} series={series} tool={tool} />
           <ScrollArea>
-            <ScheduleMetricStatsTable columns={columns} formatValue={formatValue} series={series} t={t} />
+            <ScheduleMetricStatsTable columns={columns} compact={compact} formatValue={formatValue} series={series} t={t} />
           </ScrollArea>
         </>
       ) : (
@@ -999,18 +1046,20 @@ function ScheduleMetricCard({
 
 function ScheduleMetricStatsTable({
   columns,
+  compact,
   formatValue,
   series,
   t
 }: {
   columns: ScheduleStatColumn[];
+  compact: boolean;
   formatValue: (value?: number) => string;
   series: ScheduleMetricSeries[];
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const rows = series.map((item) => ({ ...seriesStats(item), color: item.color, label: item.label }));
   return (
-    <Table className={`schedule-metric-table stats-${columns.length}`} verticalSpacing={6}>
+    <Table className={`schedule-metric-table stats-${columns.length} ${compact ? "compact-schedule-table" : ""}`} verticalSpacing={compact ? 4 : 6}>
       <Table.Thead>
         <Table.Tr>
           <Table.Th className="name-column">{t("schedule.nameColumn")}</Table.Th>
@@ -1039,10 +1088,12 @@ function ScheduleMetricStatsTable({
 }
 
 function ScheduleLineChart({
+  compact,
   formatValue,
   series,
   tool
 }: {
+  compact: boolean;
   formatValue: (value?: number) => string;
   series: ScheduleMetricSeries[];
   tool?: Tool;
@@ -1059,8 +1110,10 @@ function ScheduleLineChart({
   const minY = Math.max(0, minValue - yPadding);
   const maxY = maxValue + yPadding;
   const width = 960;
-  const height = 280;
-  const padding = { top: 18, right: 24, bottom: 38, left: 74 };
+  const height = compact ? 210 : 280;
+  const padding = compact
+    ? { top: 12, right: 18, bottom: 30, left: 64 }
+    : { top: 18, right: 24, bottom: 38, left: 74 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const x = (timestamp: number) => padding.left + (maxX === minX ? plotWidth / 2 : ((timestamp - minX) / (maxX - minX)) * plotWidth);
@@ -1091,7 +1144,7 @@ function ScheduleLineChart({
             <g key={item.agentId}>
               <path className="schedule-chart-line" d={path} stroke={item.color} />
               {sorted.map((point) => {
-                const tooltipLines = scheduleChartTooltipLines(item.label, point, formatValue, tool);
+                const tooltipLines = scheduleChartTooltipLines(point.agentTooltipLabel, point, formatValue, tool);
                 return (
                   <circle
                     className="schedule-chart-point"
@@ -1101,7 +1154,7 @@ function ScheduleLineChart({
                     key={`${point.jobId}-${point.timestamp}`}
                     onPointerEnter={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
                     onPointerMove={(event) => setHover({ label: item.label, point, x: event.clientX, y: event.clientY })}
-                    r="3.5"
+                    r={compact ? 3 : 3.5}
                   >
                     <title>{tooltipLines.join(" · ")}</title>
                   </circle>
@@ -1113,7 +1166,7 @@ function ScheduleLineChart({
       </svg>
       {hover && (
         <div className="schedule-chart-tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
-          {scheduleChartTooltipLines(hover.label, hover.point, formatValue, tool).map((line, index) => (
+          {scheduleChartTooltipLines(hover.point.agentTooltipLabel, hover.point, formatValue, tool).map((line, index) => (
             <div className={index === 0 ? "schedule-chart-tooltip-title" : undefined} key={`${line}-${index}`}>
               {line}
             </div>
@@ -1222,11 +1275,17 @@ function buildScheduleMetricSeries(
         continue;
       }
       const agentId = row.agentId || job.agent_id || "default";
-      const agentLabel = row.provider && row.region ? `${agentLocationLabel(row.region, row.protocols)} · ${row.provider}` : row.provider || agentId;
+      const agentName = row.region
+        ? `${row.region} · ${ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols })}`
+        : ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols });
+      const agentTooltipLabel = row.region
+        ? `${row.region} · ${ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols })}`
+        : ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols });
       const targetIP = chartTooltipIP(row.ip) || chartTooltipIP(job.resolved_target);
       const point: ScheduleMetricPoint = {
         agentId,
-        agentLabel,
+        agentLabel: agentName,
+        agentTooltipLabel,
         jobId: job.id,
         status: row.status,
         targetIP,
@@ -1258,7 +1317,8 @@ function scheduleMetricRows(job: Job, events: JobEvent[], agents: Agent[]): Retu
       ...lastHop,
       agentId: job.agent_id || "default",
       target: job.target,
-      provider: agent?.provider || agent?.name || job.agent_id || "-",
+      provider: agent?.provider,
+      isp: agent?.isp,
       protocols: agent?.protocols
     }]
     : [];
@@ -1354,8 +1414,7 @@ function scheduleTimeRangeOptions(t: (key: string) => string): Array<{ value: Sc
     { value: "6h", label: t("schedule.range6h") },
     { value: "24h", label: t("schedule.range24h") },
     { value: "7d", label: t("schedule.range7d") },
-    { value: "30d", label: t("schedule.range30d") },
-    { value: "all", label: t("schedule.rangeAll") }
+    { value: "30d", label: t("schedule.range30d") }
   ];
 }
 
@@ -1406,6 +1465,7 @@ function ScheduleList({
 }
 
 function ScheduleHistory({
+  compact,
   jobs,
   loading,
   selectedID,
@@ -1414,6 +1474,7 @@ function ScheduleHistory({
   onSelect,
   t
 }: {
+  compact: boolean;
   jobs: Job[];
   loading: boolean;
   selectedID: string;
@@ -1430,13 +1491,13 @@ function ScheduleHistory({
   }
   const visibleJobs = jobs.slice(0, visibleCount);
   return (
-    <Stack gap="sm">
+    <Stack gap={0} m={0}>
       <ScrollArea>
-        <Table className="schedule-table schedule-history-table" highlightOnHover verticalSpacing="xs">
+        <Table className={`schedule-table schedule-history-table ${compact ? "compact-schedule-table" : ""}`} highlightOnHover verticalSpacing={compact ? 4 : "xs"}>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th className="schedule-history-status-column">{t("results.status")}</Table.Th>
               <Table.Th className="schedule-history-time-column">{t("schedule.runAt")}</Table.Th>
+              <Table.Th className="schedule-history-status-column">{t("results.status")}</Table.Th>
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -1446,17 +1507,17 @@ function ScheduleHistory({
                 key={job.id}
                 onClick={() => onSelect(job.id)}
               >
-                <Table.Td className="schedule-history-status-column"><StatusBadge status={scheduleDisplayStatus(job)} t={t} /></Table.Td>
                 <Table.Td className="schedule-history-time-column" title={scheduleRunAt(job) ? formatDateTime(scheduleRunAt(job)) : undefined}>
                   {formatScheduleRunAt(scheduleRunAt(job), t)}
                 </Table.Td>
+                <Table.Td className="schedule-history-status-column"><StatusBadge status={scheduleDisplayStatus(job)} t={t} /></Table.Td>
               </Table.Tr>
             ))}
           </Table.Tbody>
         </Table>
       </ScrollArea>
       {visibleJobs.length < jobs.length && (
-        <Button size="xs" variant="default" onClick={onLoadMore}>
+        <Button size="xs" variant="default" onClick={onLoadMore} style={{ borderRadius: 0, border: "none", borderTop: "1px solid var(--mantine-color-default-border)" }}>
           {t("schedule.loadMore")}
         </Button>
       )}

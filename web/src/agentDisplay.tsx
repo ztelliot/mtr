@@ -1,13 +1,18 @@
 import { Badge, Stack, Text } from "@mantine/core";
 import type { Agent } from "./types";
 
-export function ProviderCell({ provider, isp }: { provider: string; isp?: string }) {
+export function ProviderCell({ provider, isp, fallback = "-", protocols }: { provider?: string; isp?: string; fallback?: string; protocols?: number }) {
+  const label = primaryISPLabel(isp, fallback);
+  const note = providerNote(provider, label);
   return (
-    <Stack gap={0}>
-      <Text className="mono-label">{provider}</Text>
-      {isp && (
-        <Text c="dimmed" size="xs">
-          {isp}
+    <Stack className="provider-cell" gap={0}>
+      <Text className="mono-label provider-primary">
+        {label}
+        <ProtocolSuffix protocols={protocols} />
+      </Text>
+      {note && (
+        <Text c="dimmed" className="provider-note">
+          {note}
         </Text>
       )}
     </Stack>
@@ -15,11 +20,28 @@ export function ProviderCell({ provider, isp }: { provider: string; isp?: string
 }
 
 export function agentSelectLabel(agent: Agent): string {
-  return `${agent.provider || agent.id} · ${agentLocationLabel(agent.region || agent.status, agent.protocols)}`;
+  return `${agent.region || agent.status} · ${agentISPLabel(agent)}`;
 }
 
 export function agentLocationProviderLabel(agent: Agent): string {
-  return `${agentLocationLabel(agent.region || agent.id, agent.protocols)} · ${agent.provider || agent.name || agent.id}`;
+  return `${agentLocationLabel(agent.region || agent.id, agent.protocols)} · ${agentISPProviderLabel(agent)}`;
+}
+
+export function agentISPProviderLabel(agent: Agent): string {
+  return withProviderNote(primaryISPLabel(agent.isp, agent.name || agent.id), agent.provider);
+}
+
+export function ispProviderLabel({ isp, provider, fallback = "-" }: { isp?: string; provider?: string; fallback?: string }): string {
+  return withProviderNote(primaryISPLabel(isp, fallback), provider);
+}
+
+export function ispProtocolLabel({ isp, fallback = "-", protocols }: { isp?: string; fallback?: string; protocols?: number }): string {
+  return withProtocolSuffix(primaryISPLabel(isp, fallback), protocols);
+}
+
+export function ispProtocolProviderLabel({ isp, provider, fallback = "-", protocols }: { isp?: string; provider?: string; fallback?: string; protocols?: number }): string {
+  const label = primaryISPLabel(isp, fallback);
+  return withProviderNote(withProtocolSuffix(label, protocols), provider, label);
 }
 
 export function agentLocationLabel(label: string, protocols?: number): string {
@@ -40,9 +62,43 @@ function agentProtocolSuffix(protocols?: number): "v4" | "v6" | null {
   return null;
 }
 
+function agentISPLabel(agent: Agent): string {
+  return withProtocolSuffix(primaryISPLabel(agent.isp, agent.name || agent.id), agent.protocols);
+}
+
+function ProtocolSuffix({ protocols }: { protocols?: number }) {
+  const suffix = agentProtocolSuffix(protocols);
+  return suffix ? <span className="agent-protocol-suffix">[{suffix}]</span> : null;
+}
+
+function primaryISPLabel(isp: string | undefined, fallback: string): string {
+  return cleanLabel(isp) || cleanLabel(fallback) || "-";
+}
+
+function providerNote(provider: string | undefined, label: string): string | null {
+  const normalizedProvider = cleanLabel(provider);
+  if (!normalizedProvider || normalizedProvider.toLowerCase() === cleanLabel(label).toLowerCase()) {
+    return null;
+  }
+  return normalizedProvider;
+}
+
+function withProtocolSuffix(label: string, protocols?: number): string {
+  const suffix = agentProtocolSuffix(protocols);
+  return suffix ? `${label} [${suffix}]` : label;
+}
+
+function withProviderNote(label: string, provider: string | undefined, compareLabel = label): string {
+  const note = providerNote(provider, compareLabel);
+  return note ? `${label} (${note})` : label;
+}
+
+function cleanLabel(value: string | undefined): string {
+  return value?.trim() ?? "";
+}
+
 export function RegionCell({ country, region, protocols }: { country?: string; region: string; protocols?: number }) {
   const flagCountry = flagCountryCode(country);
-  const suffix = agentProtocolSuffix(protocols);
   return (
     <span className="region-cell">
       {flagCountry && (
@@ -61,7 +117,6 @@ export function RegionCell({ country, region, protocols }: { country?: string; r
       )}
       <span>
         {region}
-        {suffix && <span className="agent-protocol-suffix">[{suffix}]</span>}
       </span>
     </span>
   );

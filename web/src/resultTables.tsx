@@ -30,7 +30,7 @@ export function NodeResultTable({
   if (tool === "ping") {
     return (
       <ScrollArea>
-        <Table className={ipWidthClass} striped highlightOnHover verticalSpacing={compact ? "xs" : "md"} miw={hasIPv6 ? 1490 : 1270}>
+        <Table className={tableClass(ipWidthClass, compact)} striped highlightOnHover verticalSpacing="xs" miw={pingTableMinWidth(hasIPv6, compact)}>
           <Table.Thead>
             <Table.Tr>
               <Table.Th className="region-column">{t("results.region")}</Table.Th>
@@ -49,7 +49,7 @@ export function NodeResultTable({
           <Table.Tbody>{nodeRows(rows, 11, t("results.noPingRows"), (row) => (
             <>
               <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} /></Table.Td>
+              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
               <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>
               <Table.Td className="metric-column">{formatPercent(row.lossPct)}</Table.Td>
               <Table.Td className="sent-column">{row.sent ?? "-"}</Table.Td>
@@ -69,7 +69,8 @@ export function NodeResultTable({
   const tableClassName = [
     tool === "dns" ? "dns-result-table" : undefined,
     tool === "http" ? "http-result-table" : undefined,
-    ipWidthClass
+    ipWidthClass,
+    compact ? "compact-result-table" : undefined
   ].filter(Boolean).join(" ");
   return (
     <ScrollArea>
@@ -77,8 +78,8 @@ export function NodeResultTable({
         className={tableClassName}
         striped
         highlightOnHover
-        verticalSpacing={compact ? "xs" : "md"}
-        miw={tableMinWidth(tool, hasIPv6, showHTTPDownloadMetrics)}
+        verticalSpacing="xs"
+        miw={tableMinWidth(tool, hasIPv6, showHTTPDownloadMetrics, compact)}
       >
         <Table.Thead>
           <Table.Tr>
@@ -103,7 +104,7 @@ export function NodeResultTable({
           {nodeRows(rows, tool === "dns" ? 3 : tool === "port" ? 5 : showHTTPDownloadMetrics ? 11 : 9, t("results.noPingRows"), (row) => (
             <>
               <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} /></Table.Td>
+              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
               {tool === "dns" && <Table.Td className="ip-column"><DNSRecordsCell records={row.records} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>}
               {tool === "port" && <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>}
               {tool === "port" && <Table.Td className="time-column">{formatMS(row.connectMS)}</Table.Td>}
@@ -146,7 +147,7 @@ export function MtrResultTable({
   const ipWidthClass = hasIPv6 ? "has-ipv6" : "has-ipv4";
   const isTraceroute = tool === "traceroute";
   const colSpan = isTraceroute ? 3 : 10;
-  const minWidth = isTraceroute ? (hasIPv6 ? 700 : 540) : (hasIPv6 ? 1130 : 950);
+  const minWidth = routeTableMinWidth(isTraceroute, hasIPv6, compact);
   return (
     <>
       <div className="mtr-summary">
@@ -162,7 +163,7 @@ export function MtrResultTable({
             {agent ? (
               <>
                 <RegionCell country={agent.country} region={agent.region || "-"} protocols={agent.protocols} />
-                <ProviderCell provider={agent.provider || agent.name || agent.id} isp={agent.isp} />
+                <ProviderCell provider={agent.provider} isp={agent.isp} fallback={agent.name || agent.id} protocols={agent.protocols} />
               </>
             ) : (
               <span>-</span>
@@ -171,7 +172,7 @@ export function MtrResultTable({
         </div>
       </div>
       <ScrollArea>
-        <Table className={`route-result-table ${isTraceroute ? "traceroute-result-table" : "mtr-result-table"} ${ipWidthClass}`} striped highlightOnHover verticalSpacing={compact ? "xs" : "md"} miw={minWidth}>
+        <Table className={tableClass(`route-result-table ${isTraceroute ? "traceroute-result-table" : "mtr-result-table"} ${ipWidthClass}`, compact)} striped highlightOnHover verticalSpacing="xs" miw={minWidth}>
           <Table.Thead>
             <Table.Tr>
               <Table.Th className="hop-column">{t("results.hop")}</Table.Th>
@@ -216,6 +217,10 @@ export function MtrResultTable({
       </ScrollArea>
     </>
   );
+}
+
+function tableClass(className: string, compact: boolean): string {
+  return compact ? `${className} compact-result-table` : className;
 }
 
 export function collectGeoIPTargets(
@@ -370,17 +375,31 @@ function GeoIPValue({
   );
 }
 
-function tableMinWidth(tool: Tool, hasIPv6: boolean, showHTTPDownloadMetrics = false): number {
+function pingTableMinWidth(hasIPv6: boolean, compact: boolean): number {
+  if (compact) {
+    return hasIPv6 ? 1110 : 900;
+  }
+  return hasIPv6 ? 1490 : 1270;
+}
+
+function routeTableMinWidth(isTraceroute: boolean, hasIPv6: boolean, compact: boolean): number {
+  if (isTraceroute) {
+    return compact ? (hasIPv6 ? 520 : 390) : (hasIPv6 ? 700 : 540);
+  }
+  return compact ? (hasIPv6 ? 820 : 650) : (hasIPv6 ? 1130 : 950);
+}
+
+function tableMinWidth(tool: Tool, hasIPv6: boolean, showHTTPDownloadMetrics = false, compact = false): number {
   if (tool === "http") {
     if (showHTTPDownloadMetrics) {
-      return hasIPv6 ? 1540 : 1320;
+      return compact ? (hasIPv6 ? 1160 : 960) : (hasIPv6 ? 1540 : 1320);
     }
-    return hasIPv6 ? 1380 : 1180;
+    return compact ? (hasIPv6 ? 980 : 800) : (hasIPv6 ? 1380 : 1180);
   }
   if (tool === "dns") {
-    return hasIPv6 ? 1120 : 880;
+    return compact ? (hasIPv6 ? 760 : 560) : (hasIPv6 ? 1120 : 880);
   }
-  return hasIPv6 ? 1040 : 820;
+  return compact ? (hasIPv6 ? 760 : 570) : (hasIPv6 ? 1040 : 820);
 }
 
 function rowsContainIPv6(rows: Array<{ ip?: string; records?: string[] }>): boolean {

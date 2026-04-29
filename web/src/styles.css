@@ -40,6 +40,15 @@
   transform: translateY(-50%) !important;
 }
 
+.mantine-Select-dropdown {
+  padding-block: var(--mantine-spacing-sm) !important;
+  padding-inline: 0 !important;
+}
+
+.mantine-Select-dropdown .mantine-ScrollArea-viewport {
+  padding-inline-start: 4px !important;
+}
+
 body {
   background: light-dark(#ffffff, #111318);
   margin: 0;
@@ -259,11 +268,21 @@ body,
 }
 
 .query-grid {
+  --query-agent-column: clamp(190px, 15vw, 260px);
+  --query-action-column: clamp(96px, 8vw, 128px);
+  --query-small-column: clamp(108px, 9vw, 144px);
+  --query-target-column: minmax(260px, 1fr);
   align-items: end;
   display: grid;
   column-gap: 24px;
   row-gap: 20px;
-  grid-template-columns: minmax(260px, 1fr) repeat(4, minmax(112px, 160px)) minmax(104px, 128px);
+  grid-template-columns:
+    var(--query-target-column)
+    var(--query-small-column)
+    var(--query-small-column)
+    var(--query-agent-column)
+    var(--query-small-column)
+    var(--query-action-column);
   margin-bottom: 0;
 }
 
@@ -317,6 +336,7 @@ body,
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 20px;
   grid-column: 6;
+  justify-self: end;
   height: 56px;
   min-width: 0;
   padding-inline: 12px;
@@ -391,6 +411,109 @@ body,
   white-space: nowrap;
 }
 
+.result-table .provider-cell,
+.schedule-dns-history-table .provider-cell {
+  line-height: 1.2;
+}
+
+.result-table .provider-cell .mantine-Text-root,
+.schedule-dns-history-table .provider-cell .mantine-Text-root {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.result-table .provider-cell .provider-note,
+.schedule-dns-history-table .provider-cell .provider-note {
+  font-size: 0.72em;
+  line-height: 1.15;
+}
+
+.result-table .compact-result-table th {
+  font-size: 13px;
+  padding: 3px 6px;
+}
+
+.result-table .compact-result-table td {
+  font-size: 14px;
+  padding: 3px 6px;
+}
+
+.result-table .compact-result-table .mantine-Text-root {
+  font-size: 14px;
+}
+
+.result-table .compact-result-table .provider-cell .provider-note {
+  font-size: 10px;
+}
+
+.result-table .compact-result-table .region-cell {
+  gap: 6px;
+}
+
+.result-table .compact-result-table .region-flag {
+  height: 11px;
+  width: 14px;
+}
+
+.result-table .compact-result-table .ping-rtt-chart {
+  height: 22px;
+  width: 48px;
+}
+
+.result-table .compact-result-table .ip-column {
+  max-width: clamp(150px, 16vw, 220px);
+  min-width: clamp(128px, 14vw, 180px);
+  width: clamp(150px, 16vw, 220px);
+}
+
+.result-table .compact-result-table.has-ipv6 .ip-column {
+  max-width: clamp(230px, 24vw, 340px);
+  min-width: clamp(210px, 21vw, 300px);
+  width: clamp(230px, 24vw, 340px);
+}
+
+.result-table .compact-result-table .region-column {
+  max-width: 116px;
+  min-width: 88px;
+  width: 104px;
+}
+
+.result-table .compact-result-table .provider-column {
+  max-width: 96px;
+  min-width: 72px;
+  width: 84px;
+}
+
+.result-table .compact-result-table .hop-column {
+  min-width: 36px;
+  width: 40px;
+}
+
+.result-table .compact-result-table .metric-column {
+  min-width: 48px;
+  width: 54px;
+}
+
+.result-table .compact-result-table .sent-column {
+  min-width: 34px;
+  width: 38px;
+}
+
+.result-table .compact-result-table .time-column {
+  min-width: 64px;
+  width: 72px;
+}
+
+.result-table .compact-result-table .chart-column {
+  min-width: 48px;
+  width: 54px;
+}
+
+.result-table .compact-result-table .status-column {
+  min-width: 62px;
+  width: 72px;
+}
+
 .result-table .ip-column {
   max-width: clamp(220px, 24vw, 320px);
   min-width: clamp(180px, 20vw, 240px);
@@ -404,9 +527,9 @@ body,
 }
 
 .result-table .region-column {
-  max-width: 108px;
-  min-width: 80px;
-  width: 96px;
+  max-width: 176px;
+  min-width: 128px;
+  width: 150px;
 }
 
 .result-table .provider-column {
@@ -486,9 +609,9 @@ body,
 .schedule-form-grid {
   --schedule-name-column: clamp(100px, 8vw, 140px);
   --schedule-tool-column: clamp(82px, 6vw, 104px);
-  --schedule-target-column: clamp(172px, 16vw, 280px);
-  --schedule-small-column: clamp(84px, 6vw, 106px);
-  --schedule-agent-column: clamp(86px, 8vw, 120px);
+  --schedule-target-column: clamp(156px, 13vw, 240px);
+  --schedule-small-column: clamp(88px, 6vw, 112px);
+  --schedule-agent-column: clamp(160px, 12vw, 220px);
   align-items: end;
   display: grid;
   column-gap: 10px;
@@ -674,7 +797,7 @@ body,
 
 @container (max-width: 1900px) {
   .schedule-form-grid {
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(9, minmax(0, 1fr));
   }
 
   .schedule-name-field,
@@ -682,9 +805,12 @@ body,
   .schedule-interval-field,
   .schedule-ip-field,
   .schedule-form-grid .dynamic-field,
-  .schedule-form-grid.tool-dns .dynamic-field,
-  .schedule-agent-field {
+  .schedule-form-grid.tool-dns .dynamic-field {
     grid-column: span 1;
+  }
+
+  .schedule-agent-field {
+    grid-column: span 2;
   }
 
   .schedule-target-field {
@@ -715,10 +841,11 @@ body,
 }
 
 .schedule-history-table .schedule-history-status-column {
-  width: 74px;
+  width: 65px;
 }
 
 .schedule-history-table .schedule-history-time-column {
+  padding-left: 16px;
   width: auto;
 }
 
@@ -730,6 +857,16 @@ body,
   padding-right: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.compact-schedule-table th,
+.compact-schedule-table td {
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.compact-schedule-table .mantine-Text-root {
+  font-size: 12px;
 }
 
 .schedule-table .name-column,
@@ -756,7 +893,7 @@ body,
   align-items: start;
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+  grid-template-columns: minmax(160px, 210px) minmax(0, 1fr);
 }
 
 .schedule-route-history-panel,
@@ -766,7 +903,8 @@ body,
 }
 
 .schedule-route-history-panel {
-  padding: 12px;
+  overflow: hidden;
+  padding: 0;
 }
 
 .schedule-dashboard-header {
@@ -776,6 +914,10 @@ body,
 
 .schedule-dashboard-header > div {
   min-width: 0;
+}
+
+.schedule-dashboard-controls {
+  flex: 0 0 auto;
 }
 
 .schedule-header-detail {
@@ -919,10 +1061,44 @@ body,
   width: 36%;
 }
 
+.schedule-dns-history-panel {
+  overflow: hidden;
+  padding: 0;
+}
+
 .schedule-dns-history-table {
-  margin-top: 10px;
   min-width: 720px;
   width: 100%;
+}
+
+.schedule-dns-history-table th {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 16px;
+}
+
+.schedule-dns-history-table td {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 18px;
+}
+
+.schedule-dns-history-table .mantine-Text-root {
+  font-size: inherit;
+}
+
+.schedule-dns-history-table.compact-schedule-table th {
+  font-size: 13px;
+}
+
+.schedule-dns-history-table.compact-schedule-table td {
+  font-size: 14px;
+}
+
+.schedule-dns-history-table.compact-schedule-table .mantine-Text-root {
+  font-size: inherit;
+}
+
+.schedule-dns-history-table.compact-schedule-table .provider-cell .provider-note {
+  font-size: 10px;
 }
 
 .schedule-dashboard .mantine-ScrollArea-viewport,
@@ -931,9 +1107,7 @@ body,
 }
 
 .schedule-metric-table th,
-.schedule-metric-table td,
-.schedule-dns-history-table th,
-.schedule-dns-history-table td {
+.schedule-metric-table td {
   font-size: 13px;
   white-space: nowrap;
 }
@@ -1160,14 +1334,59 @@ body,
   .target-input,
   .ip-version-field,
   .dynamic-field,
-  .agent-field,
-  .remote-dns-field,
+  .agent-field {
+    grid-column: auto;
+  }
+
   .run-button {
     grid-column: auto;
+    width: 100%;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.remote-dns-field) .run-button {
+    grid-column: 2;
+    grid-row: 2;
+    width: calc(50% - 8px);
+  }
+
+  .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button {
+    grid-row: 3;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field {
+    align-items: center;
+    column-gap: 12px;
+    display: grid;
+    grid-template-columns: max-content max-content;
+    justify-self: start;
+    min-height: 56px;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field .mantine-InputWrapper-label {
+    margin-bottom: 0;
+    min-height: 0;
+    white-space: nowrap;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field .mantine-InputWrapper-input,
+  .query-grid:has(.remote-dns-field) .remote-dns-switch {
+    height: auto;
+  }
+
+  .query-grid:has(.remote-dns-field) .run-button {
+    justify-self: end;
   }
 
   .query-grid.tool-dns .dynamic-field {
     grid-column: auto;
+  }
+
+  .query-grid.tool-dns .run-button {
+    grid-column: 2;
+    justify-self: end;
+    width: calc(50% - 8px);
   }
 
   .mobile-settings-footer {
@@ -1278,16 +1497,70 @@ body,
     grid-template-columns: 1fr;
   }
 
+  .schedule-dashboard-header {
+    align-items: flex-start !important;
+    gap: 12px;
+  }
+
+  .schedule-dashboard-controls {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: max-content max-content;
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .schedule-dashboard-controls .compact-switch {
+    align-self: center;
+    white-space: nowrap;
+  }
+
+  .schedule-dashboard-controls .schedule-range-select {
+    justify-self: end;
+    width: clamp(132px, 42vw, 160px);
+  }
+
+  .agent-field {
+    grid-column: auto;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.remote-dns-field) .run-button,
+  .query-grid.tool-dns .run-button,
+  .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button {
+    grid-column: auto;
+    grid-row: auto;
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field {
+    align-items: center;
+    column-gap: 12px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    min-height: 46px;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field .mantine-InputWrapper-label {
+    margin-bottom: 0;
+    min-height: 0;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .query-grid:has(.remote-dns-field) .remote-dns-field .mantine-InputWrapper-input {
+    justify-content: flex-end;
+  }
+
   .schedule-form-grid {
     grid-template-columns: 1fr;
   }
 
   .schedule-form-grid > * {
     grid-column: 1 / -1 !important;
-  }
-
-  .compact-switch {
-    display: none;
   }
 
   .schedule-controls-group {
@@ -1380,9 +1653,9 @@ body,
   }
 
   .result-table .dns-result-table .region-column {
-    max-width: 72px;
-    min-width: 64px;
-    width: 68px;
+    max-width: 116px;
+    min-width: 104px;
+    width: 112px;
   }
 
   .result-table .dns-result-table .provider-column {
@@ -1481,14 +1754,36 @@ body,
   .schedule-list-panel .schedule-table th,
   .schedule-list-panel .schedule-table td,
   .schedule-metric-table th,
-  .schedule-metric-table td,
-  .schedule-dns-history-table th,
-  .schedule-dns-history-table td {
+  .schedule-metric-table td {
     font-size: 12px;
     overflow: hidden;
     padding: 6px 7px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .schedule-dns-history-table th {
+    font-size: 14px;
+  }
+
+  .schedule-dns-history-table td {
+    font-size: 15px;
+  }
+
+  .schedule-dns-history-table th,
+  .schedule-dns-history-table td {
+    overflow: hidden;
+    padding: 6px 7px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .schedule-dns-history-table.compact-schedule-table th {
+    font-size: 13px;
+  }
+
+  .schedule-dns-history-table.compact-schedule-table td {
+    font-size: 14px;
   }
 
   .schedule-metric-table,
@@ -1532,7 +1827,7 @@ body,
   }
 
   .schedule-history-table .schedule-history-status-column {
-    width: 74px;
+    width: 65px;
   }
 
   .schedule-history-table .schedule-history-time-column {

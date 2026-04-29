@@ -5,7 +5,7 @@ export interface NodeResultRow {
   agentId: string;
   country?: string;
   region: string;
-  provider: string;
+  provider?: string;
   isp?: string;
   protocols?: number;
   target: string;
@@ -89,7 +89,7 @@ function nodeRowForJob(
     agentId: agentID,
     country: normalizeCountry(agent?.country),
     region: agent?.region || "-",
-    provider: agent?.provider || agent?.name || agentID || "-",
+    provider: agent?.provider,
     isp: agent?.isp,
     protocols: singleProtocolMask(agent?.protocols),
     target: parsed?.target || job.target,
@@ -221,7 +221,7 @@ export function buildMtrRows(
       hop: hop.index,
       country: normalizeCountry(agent?.country),
       region: agent?.region || "-",
-      provider: agent?.provider || agent?.name || agentID || "-",
+      provider: agent?.provider,
       isp: agent?.isp,
       protocols: singleProtocolMask(agent?.protocols),
       status: lossPct !== undefined ? (lossPct >= 100 ? "timeout" : "running") : sent > 0 && received === 0 ? "timeout" : "running",
@@ -258,8 +258,8 @@ function compareNodeRows(left: NodeResultRow, right: NodeResultRow): number {
   return (
     compareSortText(left.country, right.country) ||
     compareSortText(left.region, right.region) ||
-    compareSortText(left.provider, right.provider) ||
-    compareSortText(left.isp, right.isp)
+    compareSortText(left.isp, right.isp) ||
+    compareSortText(left.provider, right.provider)
   );
 }
 
