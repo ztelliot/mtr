@@ -36,7 +36,7 @@ spec:
       containers:
         - name: web
           image: ghcr.io/ztelliot/mtr-web:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 80

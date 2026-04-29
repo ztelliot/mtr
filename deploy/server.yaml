@@ -96,7 +96,7 @@ spec:
       containers:
         - name: server
           image: ghcr.io/ztelliot/mtr-server:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - -config
             - /etc/mtr/server.yaml

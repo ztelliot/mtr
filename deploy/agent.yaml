@@ -250,7 +250,7 @@ spec:
       containers:
         - name: agent
           image: ghcr.io/ztelliot/mtr-agent:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - -config
             - /etc/mtr/agent.yaml
