@@ -32,7 +32,6 @@ LABEL org.opencontainers.image.title="mtr-server" \
       org.opencontainers.image.created="${BUILT_AT}"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/mtr-server /usr/local/bin/mtr-server
-COPY configs/server.yaml /etc/mtr/server.yaml
 EXPOSE 8080 8443
 ENTRYPOINT ["/usr/local/bin/mtr-server"]
 CMD ["-config", "/etc/mtr/server.yaml"]

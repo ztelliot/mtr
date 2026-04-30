@@ -380,6 +380,7 @@ Server 不需要额外 capability；Agent 的 ICMP `ping`、`traceroute`、`mtr`
 
 示例中的 `65532:65532` 是容器内非特权 UID/GID。挂载到容器里的配置和证书文件需要对这个
 UID/GID 可读；私钥建议使用 `0640` 并让 group 为 `65532`，或使用 Docker/Compose secret。
+发布的容器镜像不内置 Server 或 Agent 运行时配置，请显式挂载这些文件。
 
 ```sh
 docker network create mtr-net

@@ -37,7 +37,6 @@ jobs:
               - "Dockerfile.agent"
               - "Dockerfile.server"
               - "cmd/**"
-              - "configs/**"
               - "go.mod"
               - "go.sum"
               - "internal/**"

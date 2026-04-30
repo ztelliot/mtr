@@ -418,7 +418,9 @@ for ICMP-backed `ping`, `traceroute`, and `mtr`.
 
 The examples use `65532:65532` as an unprivileged container UID/GID. Mounted
 config and certificate files must be readable by that UID/GID. For private
-keys, prefer mode `0640` with group `65532`, or use Docker/Compose secrets.
+keys, prefer mode `0640` with group `65532`, or use Docker/Compose secrets. The
+published container images do not include Server or Agent runtime config;
+mount those files explicitly.
 
 ```sh
 docker network create mtr-net
