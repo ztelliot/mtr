@@ -32,7 +32,7 @@ import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFiel
 import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
 import { normalizeIPAddress } from "./geoip";
-import { jobEventFailureType, shouldSuppressFanoutFailure } from "./jobFailures";
+import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailures";
 import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
@@ -380,14 +380,14 @@ export function App() {
         }
         eventsByJobIdRef.current = { [job.id]: events };
         setEventsByJobId({ [job.id]: events });
-        const eventFailureMessage = events.map((event) => jobErrorEventMessage(event, events)).find(Boolean);
-        setError(eventFailureMessage ?? jobFailureMessage(job, events));
+        const eventFailureMessage = events.map((event) => jobErrorEventMessage(event)).find(Boolean);
+        setError(eventFailureMessage ?? jobFailureMessage(job));
         return;
       }
 
       eventsByJobIdRef.current = {};
       setEventsByJobId({});
-      setError(jobFailureMessage(job, []));
+      setError(jobFailureMessage(job));
       openStream(api, job.id, job.agent_id);
     } catch (err) {
       if (requestID === restoreJobRequestRef.current) {
@@ -445,12 +445,9 @@ export function App() {
     const onEvent = (message: MessageEvent<string>) => {
       try {
         const event = jobEventFromStreamMessage(message, jobID, agentID);
-        const nextJobEvents = mergeEvent(eventsByJobIdRef.current[event.job_id] ?? [], event);
-        const eventFailureMessage = jobErrorEventMessage(event, nextJobEvents);
+        const eventFailureMessage = jobErrorEventMessage(event);
         if (eventFailureMessage) {
           setError(eventFailureMessage);
-        } else if (isSuppressedFanoutFailureEvent(event, nextJobEvents)) {
-          clearSuppressedFanoutFailureError();
         }
         clearStatusFallback(streamErrorFallbackTimersRef, event.job_id);
         setEventsByJobId((current) => {
@@ -480,7 +477,7 @@ export function App() {
   function handleCreatedJob(api: ApiClient, job: Job, agentID?: string) {
     activeJobsRef.current = [job];
     setActiveJobs([job]);
-    const failureMessage = jobFailureMessage(job, eventsByJobIdRef.current[job.id] ?? []);
+    const failureMessage = jobFailureMessage(job);
     if (failureMessage) {
       setError(failureMessage);
       notifications.show({ color: "red", title: t("statusValues.error"), message: failureMessage });
@@ -489,45 +486,23 @@ export function App() {
     openStream(api, job.id, agentID);
   }
 
-  function jobFailureMessage(job: Job, events: JobEvent[] = []): string | null {
+  function jobFailureMessage(job: Job): string | null {
     if (job.status !== "failed") {
-      return null;
-    }
-    if (shouldSuppressFanoutFailure(job, events, visibleAgents)) {
       return null;
     }
     return jobErrorTypeMessage(job.error_type || "job_failed");
   }
 
-  function jobErrorEventMessage(event: JobEvent, events: JobEvent[] = eventsByJobIdRef.current[event.job_id] ?? []): string | null {
+  function jobErrorEventMessage(event: JobEvent): string | null {
     const failureType = jobEventFailureType(event);
     if (failureType) {
       const job = activeJobsRef.current.find((item) => item.id === event.job_id);
-      if (job && shouldSuppressFanoutFailure(job, events, visibleAgents)) {
+      if (job && shouldSuppressFanoutNodeFailure(job, event)) {
         return null;
       }
       return jobErrorTypeMessage(failureType);
     }
     return null;
-  }
-
-  function isSuppressedFanoutFailureEvent(event: JobEvent, events: JobEvent[]): boolean {
-    const job = activeJobsRef.current.find((item) => item.id === event.job_id);
-    return Boolean(job && jobEventFailureType(event) && shouldSuppressFanoutFailure(job, events, visibleAgents));
-  }
-
-  function clearSuppressedFanoutFailureError() {
-    const ignoredMessages = new Set([
-      jobErrorTypeMessage("target_blocked"),
-      jobErrorTypeMessage("unsupported_tool"),
-      jobErrorTypeMessage("unsupported_protocol"),
-      jobErrorTypeMessage("agent_disconnected"),
-      jobErrorTypeMessage("job_timeout"),
-      jobErrorTypeMessage("tool_failed"),
-      jobErrorTypeMessage("fanout_failed"),
-      jobErrorTypeMessage("job_failed")
-    ]);
-    setError((current) => (current && ignoredMessages.has(current) ? null : current));
   }
 
   function jobErrorTypeMessage(type: string): string {

@@ -222,6 +222,148 @@ func TestFailTimedOutJobsFailsFanoutParentAfterOverallLimit(t *testing.T) {
 	}
 }
 
+func TestFailTimedOutJobsSucceedsFanoutParentWhenSomeChildrenSucceeded(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	runtime := config.DefaultRuntime()
+	runtime.Count = 1
+	runtime.ProbeStepTimeoutSec = 1
+	runtime.MaxToolTimeoutSec = 3
+	policies := policy.PoliciesWithRuntime(runtime)
+	hub := NewHub(st, policies, "", time.Minute, time.Millisecond, 4, slog.Default())
+
+	old := time.Now().UTC().Add(-5 * time.Second)
+	done := time.Now().UTC().Add(-1 * time.Second)
+	parent := model.Job{
+		ID:        "parent-partial-timeout",
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		Status:    model.JobRunning,
+		CreatedAt: old,
+		UpdatedAt: old,
+		StartedAt: &old,
+	}
+	succeededChild := model.Job{
+		ID:          "child-succeeded",
+		ParentID:    parent.ID,
+		Tool:        model.ToolPing,
+		Target:      "1.1.1.1",
+		AgentID:     "edge-ok",
+		Status:      model.JobSucceeded,
+		CreatedAt:   old,
+		UpdatedAt:   done,
+		StartedAt:   &old,
+		CompletedAt: &done,
+	}
+	activeChild := model.Job{
+		ID:        "child-still-active",
+		ParentID:  parent.ID,
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		AgentID:   "edge-timeout",
+		Status:    model.JobRunning,
+		CreatedAt: old,
+		UpdatedAt: old,
+		StartedAt: &old,
+	}
+	if err := st.CreateJobs(ctx, []model.Job{parent, succeededChild, activeChild}); err != nil {
+		t.Fatal(err)
+	}
+
+	hub.failTimedOutJobs(ctx)
+
+	gotParent, err := st.GetJob(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotParent.Status != model.JobSucceeded || gotParent.Error != "" {
+		t.Fatalf("fanout parent with partial success should succeed: %#v", gotParent)
+	}
+	gotChild, err := st.GetJob(ctx, activeChild.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotChild.Status != model.JobFailed || gotChild.Error != model.JobErrorTimeout {
+		t.Fatalf("active fanout child should still be timed out: %#v", gotChild)
+	}
+	events, err := st.ListJobEvents(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 && len(events) != 2 {
+		t.Fatalf("stored parent events = %#v", events)
+	}
+	if len(events) == 2 && (events[0].AgentID != activeChild.AgentID || events[0].Event == nil || events[0].Event.Message != model.JobErrorTimeout) {
+		t.Fatalf("child timeout event = %#v", events[0])
+	}
+	terminal := events[len(events)-1]
+	if terminal.Event == nil || terminal.Event.Message != "completed" {
+		t.Fatalf("terminal event = %#v", terminal)
+	}
+}
+
+func TestCompleteParentIfDoneSucceedsWhenSomeChildrenFailed(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+
+	now := time.Now().UTC()
+	parent := model.Job{
+		ID:        "parent-partial-failed",
+		Tool:      model.ToolHTTP,
+		Target:    "https://example.com",
+		Status:    model.JobRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: &now,
+	}
+	succeededChild := model.Job{
+		ID:          "child-ok",
+		ParentID:    parent.ID,
+		Tool:        parent.Tool,
+		Target:      parent.Target,
+		AgentID:     "edge-ok",
+		Status:      model.JobSucceeded,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		StartedAt:   &now,
+		CompletedAt: &now,
+	}
+	failedChild := model.Job{
+		ID:          "child-failed",
+		ParentID:    parent.ID,
+		Tool:        parent.Tool,
+		Target:      parent.Target,
+		AgentID:     "edge-failed",
+		Status:      model.JobFailed,
+		Error:       model.JobErrorToolFailed,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		StartedAt:   &now,
+		CompletedAt: &now,
+	}
+	if err := st.CreateJobs(ctx, []model.Job{parent, succeededChild, failedChild}); err != nil {
+		t.Fatal(err)
+	}
+
+	hub.completeParentIfDone(ctx, parent.ID)
+
+	gotParent, err := st.GetJob(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotParent.Status != model.JobSucceeded || gotParent.Error != "" {
+		t.Fatalf("fanout parent with partial child failure should succeed: %#v", gotParent)
+	}
+	events, err := st.ListJobEvents(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Event == nil || events[0].Event.Message != "completed" {
+		t.Fatalf("stored parent events = %#v", events)
+	}
+}
+
 func TestHubInflightLimitsSeparateTransports(t *testing.T) {
 	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 9, slog.Default())
 

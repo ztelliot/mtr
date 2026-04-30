@@ -431,6 +431,10 @@ func (h *Hub) handleResult(ctx context.Context, agentID string, ev grpcwire.Resu
 }
 
 func (h *Hub) completeParentIfDone(ctx context.Context, parentID string) {
+	h.completeParentIfDoneWithFailure(ctx, parentID, "", false)
+}
+
+func (h *Hub) completeParentIfDoneWithFailure(ctx context.Context, parentID string, failureMsg string, emitFailure bool) {
 	parent, err := h.store.GetJob(ctx, parentID)
 	if err != nil {
 		h.log.Warn("load fanout parent failed", "parent_job_id", parentID, "err", err)
@@ -447,22 +451,29 @@ func (h *Hub) completeParentIfDone(ctx context.Context, parentID string) {
 	if len(children) == 0 {
 		return
 	}
-	status := model.JobSucceeded
+	succeeded := false
 	for _, child := range children {
 		if !terminalJobStatus(child.Status) {
 			return
 		}
-		if child.Status != model.JobSucceeded {
-			status = model.JobFailed
+		if child.Status == model.JobSucceeded {
+			succeeded = true
 		}
 	}
-	msg := ""
-	if status == model.JobFailed {
+	status := model.JobFailed
+	msg := failureMsg
+	if succeeded {
+		status = model.JobSucceeded
+		msg = ""
+	} else if msg == "" {
 		msg = "one or more fanout jobs failed"
 	}
 	if err := h.store.UpdateJobStatus(ctx, parentID, status, msg); err != nil {
 		h.log.Warn("update fanout parent status failed", "parent_job_id", parentID, "status", status, "err", err)
 		return
+	}
+	if status == model.JobFailed && emitFailure && msg != "" {
+		h.emitFailureMessage(ctx, parentID, "", msg)
 	}
 	h.emitProgress(ctx, parentID, progressMessageForStatus(status))
 }
@@ -521,12 +532,18 @@ func (h *Hub) failTimedOutJobs(ctx context.Context) {
 		if !h.jobTimedOut(job, now) {
 			continue
 		}
-		h.failFanoutChildren(ctx, job)
-		h.failJob(ctx, job.AgentID, job.ID, model.JobErrorTimeout)
+		if h.failFanoutChildren(ctx, job) {
+			h.completeParentIfDoneWithFailure(ctx, job.ID, model.JobErrorTimeout, true)
+		} else {
+			h.failJob(ctx, job.AgentID, job.ID, model.JobErrorTimeout)
+		}
 		if job.ParentID != "" {
 			continue
 		}
-		h.log.Warn("job timed out", "job_id", job.ID, "agent_id", job.AgentID, "tool", job.Tool, "status", job.Status)
+		updated, err := h.store.GetJob(ctx, job.ID)
+		if err != nil || updated.Status == model.JobFailed {
+			h.log.Warn("job timed out", "job_id", job.ID, "agent_id", job.AgentID, "tool", job.Tool, "status", job.Status)
+		}
 	}
 }
 
@@ -577,14 +594,17 @@ func (h *Hub) jobTimedOut(job model.Job, now time.Time) bool {
 	return !now.Before(start.Add(timeout))
 }
 
-func (h *Hub) failFanoutChildren(ctx context.Context, parent model.Job) {
+func (h *Hub) failFanoutChildren(ctx context.Context, parent model.Job) bool {
 	if parent.ParentID != "" || parent.AgentID != "" {
-		return
+		return false
 	}
 	children, err := h.store.ListChildJobs(ctx, parent.ID)
 	if err != nil {
 		h.log.Warn("list fanout children for parent timeout failed", "parent_job_id", parent.ID, "err", err)
-		return
+		return false
+	}
+	if len(children) == 0 {
+		return false
 	}
 	for _, child := range children {
 		if terminalJobStatus(child.Status) {
@@ -599,6 +619,7 @@ func (h *Hub) failFanoutChildren(ctx context.Context, parent model.Job) {
 			h.log.Warn("mark fanout child timed out failed", "parent_job_id", parent.ID, "child_job_id", child.ID, "agent_id", child.AgentID, "err", err)
 		}
 	}
+	return true
 }
 
 func (h *Hub) emitFailureMessage(ctx context.Context, jobID string, agentID string, msg string) {
