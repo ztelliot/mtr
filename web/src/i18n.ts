@@ -121,9 +121,10 @@ export const resources = {
       },
       token: {
         title: "调试",
+        apiBaseUrl: "API 地址",
         apiToken: "API Token",
         savedTitle: "Token 已更新",
-        savedMessage: "后续请求将使用新的 API Token"
+        savedMessage: "后续请求将使用新的 API 设置"
       },
       schedule: {
         name: "名称",
@@ -367,9 +368,10 @@ export const resources = {
       },
       token: {
         title: "Debug",
+        apiBaseUrl: "API URL",
         apiToken: "API Token",
-        savedTitle: "Token updated",
-        savedMessage: "New requests will use the updated API token"
+        savedTitle: "API settings updated",
+        savedMessage: "New requests will use the updated API settings"
       },
       schedule: {
         name: "Name",

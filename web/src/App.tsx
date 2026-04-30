@@ -27,7 +27,7 @@ import type React from "react";
 import { useTranslation } from "react-i18next";
 import { agentSelectLabel } from "./agentDisplay";
 import { ApiClient } from "./api";
-import { loadConfig, saveStoredApiToken } from "./config";
+import { brandUrlTargetsCurrentApp, loadConfig, normalizeBaseUrl, saveStoredApiBaseUrl, saveStoredApiToken } from "./config";
 import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
@@ -73,6 +73,7 @@ export function App() {
   const [geoIPByIP, setGeoIPByIP] = useState<Record<string, GeoIPInfo | null>>({});
   const [serverVersion, setServerVersion] = useState<VersionInfo | null>(null);
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
+  const [apiBaseUrlDraft, setApiBaseUrlDraft] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState("");
   const sourcesRef = useRef<EventSource[]>([]);
   const activeJobsRef = useRef<Job[]>([]);
@@ -129,6 +130,8 @@ export function App() {
   const showFormError = attemptedSubmit && Boolean(formError) && !error && !permissionsLoadFailed;
   const showNoFanoutAgents = attemptedSubmit && noFanoutAgents && !error && !formError && !permissionsLoadFailed;
   const runDisabled = !client || permissionsLoadFailed || !canSubmitCurrentTool || controlsLocked;
+  const brandText = config?.brand?.trim() || t("brand");
+  const brandHref = config?.brandUrl === null ? "" : config?.brandUrl ?? "/";
 
   useEffect(() => {
     loadConfig()
@@ -654,6 +657,9 @@ export function App() {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
     }
+    if (config?.brandUrl && !brandUrlTargetsCurrentApp(config.brandUrl, window.location.href)) {
+      return;
+    }
     event.preventDefault();
     goHome();
   }
@@ -691,6 +697,7 @@ export function App() {
   }
 
   function openTokenDialog() {
+    setApiBaseUrlDraft(config?.apiBaseUrl ?? "");
     setApiTokenDraft(config?.apiToken ?? "");
     setTokenDialogOpen(true);
   }
@@ -713,7 +720,9 @@ export function App() {
   }
 
   function saveApiTokenOverride() {
+    const apiBaseUrl = normalizeBaseUrl(apiBaseUrlDraft);
     const apiToken = apiTokenDraft.trim();
+    saveStoredApiBaseUrl(apiBaseUrl);
     saveStoredApiToken(apiToken);
     closeStreams();
     setStreaming(false);
@@ -727,10 +736,7 @@ export function App() {
     setPermissions(null);
     setPermissionsLoadFailed(false);
     setAgents([]);
-    setConfig((current) => ({
-      apiBaseUrl: current?.apiBaseUrl ?? "",
-      apiToken
-    }));
+    setConfig((current) => (current ? { ...current, apiBaseUrl, apiToken } : { apiBaseUrl, apiToken }));
     setError(null);
     setTokenDialogOpen(false);
     notifications.show({
@@ -768,11 +774,19 @@ export function App() {
     <Box className="page">
       <Container className="page-shell" size="xl" px="md">
         <header className="top-nav">
-          <Anchor href="/" underline="never" className="brand" c="inherit" onClick={onBrandClick}>
-            <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
-              {t("brand")}
-            </Title>
-          </Anchor>
+          {brandHref ? (
+            <Anchor href={brandHref} underline="never" className="brand" c="inherit" onClick={onBrandClick}>
+              <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
+                {brandText}
+              </Title>
+            </Anchor>
+          ) : (
+            <Box component="span" className="brand" c="inherit">
+              <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
+                {brandText}
+              </Title>
+            </Box>
+          )}
           <Group gap="lg" justify="flex-end" className="nav-actions">
             <Tabs className="tool-tabs-root" value={activeNavValue} onChange={(value) => value && changeNav(value)}>
               <Tabs.List className="tool-tabs">
@@ -905,7 +919,7 @@ export function App() {
           </div>
           <div className="footer-meta-row">
             <Text c="dimmed" size="sm" className="footer-copyright">
-              {t("footer.copyright", { year: new Date().getFullYear(), brand: t("brand") })}
+              {t("footer.copyright", { year: new Date().getFullYear(), brand: brandText })}
             </Text>
             <Group gap="sm" className="footer-version-group">
               <Anchor href="https://github.com/ztelliot/mtr" target="_blank" c="dimmed" size="sm" underline="never" className="footer-repo-link">
@@ -926,8 +940,15 @@ export function App() {
           saveApiTokenOverride();
         }}>
           <Stack gap="md">
-            <PasswordInput
+            <TextInput
               autoFocus
+              className="token-field"
+              label={t("token.apiBaseUrl")}
+              placeholder="https://mtr-api.example.com"
+              value={apiBaseUrlDraft}
+              onChange={(event) => setApiBaseUrlDraft(event.currentTarget.value)}
+            />
+            <PasswordInput
               className="token-field"
               label={t("token.apiToken")}
               placeholder="api-token"

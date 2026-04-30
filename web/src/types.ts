@@ -6,6 +6,8 @@ export type AgentStatus = "online" | "offline";
 export interface RuntimeConfig {
   apiBaseUrl: string;
   apiToken: string;
+  brand?: string;
+  brandUrl?: string | null;
 }
 
 export interface VersionInfo {

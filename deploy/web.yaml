@@ -7,7 +7,8 @@ data:
   config.json: |
     {
       "apiBaseUrl": "",
-      "apiToken": ""
+      "apiToken": "",
+      "brand": "QwQ MTR"
     }
 ---
 apiVersion: apps/v1
