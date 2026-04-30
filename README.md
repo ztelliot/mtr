@@ -65,6 +65,13 @@ upper-case underscores, for example `tls.ca_files` becomes `MTR_TLS_CA_FILES`,
 when both sources set the same field. Lists of strings may be comma-separated
 or YAML/JSON arrays, and map/list fields such as `outbound_agents`,
 `tool_policies`, and `rate_limit.tools` may be supplied as YAML/JSON fragments.
+When Server runs behind a reverse proxy, set `trusted_proxies` to the proxy IPs
+or CIDRs allowed to supply standard proxy headers; otherwise `X-Forwarded-For`
+and `X-Real-IP` are ignored for logging and rate limiting. `client_ip_headers`
+is an ordered list of custom single-IP headers trusted unconditionally before
+proxy headers, for example a long private header name or `Eo-Connecting-Ip`.
+Set `rate_limit.exempt_cidrs` to client IPs or CIDRs that should bypass global,
+CIDR, IP, and per-tool rate limits.
 
 Server scheduling controls live in the server config under `scheduler`: `agent_offline_after_sec` marks stale gRPC Agents offline, `grpc_max_inflight_per_agent` controls concurrent jobs per connected gRPC Agent, and `outbound_max_inflight_per_agent` does the same for HTTP outbound Agents. Runtime knobs live under `runtime`, including probe `count`, `max_hops`, per-hop `probe_step_timeout_sec`, tool timeout presets, DNS resolve timeout, HTTP outbound invoke attempts, and outbound recovery health-check backoff. Set `log_level: debug` in the Server or Agent config for verbose scheduling and execution logs.
 

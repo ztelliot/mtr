@@ -58,6 +58,11 @@ Server 和 Agent 的每个配置字段也都可以通过环境变量提供。环
 `speedtest.max_bytes` 对应 `MTR_SPEEDTEST_MAX_BYTES`。当配置文件和环境变量同时设置同一字段时，
 配置文件优先。字符串列表可以使用逗号分隔，也可以使用 YAML/JSON 数组；`outbound_agents`、
 `tool_policies` 和 `rate_limit.tools` 等 map/list 字段可使用 YAML/JSON 片段提供。
+当 Server 位于反向代理后面时，将 `trusted_proxies` 设置为允许提供标准代理 header 的
+代理 IP 或 CIDR；否则 `X-Forwarded-For` 和 `X-Real-IP` 不会用于日志和限流。
+`client_ip_headers` 是一个自定义单 IP header 的有序列表，会在代理 header 之前被无条件信任，
+例如较长的私有 header 名或 `Eo-Connecting-Ip`。
+将 `rate_limit.exempt_cidrs` 设置为需要跳过全局、CIDR、IP 和按工具限流的客户端 IP 或 CIDR。
 
 Server 的调度控制位于服务端配置的 `scheduler` 下：`agent_offline_after_sec`
 用于将长时间未上报的 gRPC Agent 标记为离线，`grpc_max_inflight_per_agent` 控制单个

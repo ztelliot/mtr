@@ -1,7 +1,10 @@
 package abuse
 
 import (
+	"fmt"
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,10 +17,11 @@ type Limit struct {
 }
 
 type RateLimitConfig struct {
-	Global Limit
-	IP     Limit
-	CIDR   CIDRLimit
-	Tools  map[string]ToolLimit
+	Global      Limit
+	IP          Limit
+	CIDR        CIDRLimit
+	Tools       map[string]ToolLimit
+	ExemptCIDRs []string
 }
 
 type CIDRLimit struct {
@@ -33,15 +37,16 @@ type ToolLimit struct {
 }
 
 type Limiter struct {
-	mu         sync.Mutex
-	global     Limit
-	ip         Limit
-	cidrLimit  Limit
-	tools      map[string]ToolLimit
-	cidr       CIDRLimit
-	items      map[string]*entry
-	maxAge     time.Duration
-	cleanupDue time.Time
+	mu          sync.Mutex
+	global      Limit
+	ip          Limit
+	cidrLimit   Limit
+	tools       map[string]ToolLimit
+	cidr        CIDRLimit
+	exemptCIDRs []netip.Prefix
+	items       map[string]*entry
+	maxAge      time.Duration
+	cleanupDue  time.Time
 }
 
 type entry struct {
@@ -50,10 +55,22 @@ type entry struct {
 }
 
 func NewConfiguredLimiter(cfg RateLimitConfig) *Limiter {
+	limiter, err := NewConfiguredLimiterWithError(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return limiter
+}
+
+func NewConfiguredLimiterWithError(cfg RateLimitConfig) (*Limiter, error) {
 	cfg.Global = normalizeLimit(cfg.Global, 600, 200)
 	cfg.IP = normalizeLimit(cfg.IP, 60, 20)
 	cfg.CIDR = normalizeCIDR(cfg.CIDR)
 	cfg.CIDR.Limit = normalizeLimit(cfg.CIDR.Limit, 300, 100)
+	exemptCIDRs, err := parseExemptCIDRs(cfg.ExemptCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	tools := make(map[string]ToolLimit, len(cfg.Tools))
 	for tool, limit := range cfg.Tools {
 		tools[tool] = ToolLimit{
@@ -63,18 +80,22 @@ func NewConfiguredLimiter(cfg RateLimitConfig) *Limiter {
 		}
 	}
 	return &Limiter{
-		global:    cfg.Global,
-		ip:        cfg.IP,
-		cidrLimit: cfg.CIDR.Limit,
-		tools:     tools,
-		cidr:      cfg.CIDR,
-		items:     map[string]*entry{},
-		maxAge:    10 * time.Minute,
-	}
+		global:      cfg.Global,
+		ip:          cfg.IP,
+		cidrLimit:   cfg.CIDR.Limit,
+		tools:       tools,
+		cidr:        cfg.CIDR,
+		exemptCIDRs: exemptCIDRs,
+		items:       map[string]*entry{},
+		maxAge:      10 * time.Minute,
+	}, nil
 }
 
 func (l *Limiter) AllowRequest(clientIP string) bool {
 	if l == nil {
+		return true
+	}
+	if l.isExempt(clientIP) {
 		return true
 	}
 	if !l.allow("global", l.global) {
@@ -88,6 +109,9 @@ func (l *Limiter) AllowRequest(clientIP string) bool {
 
 func (l *Limiter) AllowTool(tool string, clientIP ...string) bool {
 	if l == nil {
+		return true
+	}
+	if len(clientIP) > 0 && l.isExempt(clientIP[0]) {
 		return true
 	}
 	limit, ok := l.tools[tool]
@@ -187,4 +211,50 @@ func normalizeLimit(limit Limit, defaultRPM, defaultBurst int) Limit {
 		limit.Burst = 1
 	}
 	return limit
+}
+
+func parseExemptCIDRs(rawCIDRs []string) ([]netip.Prefix, error) {
+	exemptCIDRs := make([]netip.Prefix, 0, len(rawCIDRs))
+	for _, raw := range rawCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		prefix, err := parseExemptCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid exempt CIDR %q: %w", raw, err)
+		}
+		exemptCIDRs = append(exemptCIDRs, prefix)
+	}
+	return exemptCIDRs, nil
+}
+
+func parseExemptCIDR(raw string) (netip.Prefix, error) {
+	if strings.Contains(raw, "/") {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+func (l *Limiter) isExempt(raw string) bool {
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, prefix := range l.exemptCIDRs {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

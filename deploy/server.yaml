@@ -15,6 +15,8 @@ data:
     http_addr: ":8080"
     grpc_addr: ":8443"
     log_level: "info"
+    trusted_proxies: []
+    client_ip_headers: []
     tls:
       enabled: true
       ca_files:
@@ -22,6 +24,7 @@ data:
       cert_file: "/var/run/mtr/tls/tls.crt"
       key_file: "/var/run/mtr/tls/tls.key"
     rate_limit:
+      exempt_cidrs: []
       global:
         requests_per_minute: 600
         burst: 200

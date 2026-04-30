@@ -211,6 +211,117 @@ func TestHealthIncludesVersion(t *testing.T) {
 	}
 }
 
+func TestClientIPIgnoresForwardedHeadersFromUntrustedPeer(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+
+	if got := resolver.Resolve(req); got != "203.0.113.10" {
+		t.Fatalf("client ip = %q, want remote peer", got)
+	}
+}
+
+func TestClientIPUsesForwardedForFromTrustedProxy(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+
+	if got := resolver.Resolve(req); got != "198.51.100.20" {
+		t.Fatalf("client ip = %q, want forwarded client", got)
+	}
+}
+
+func TestClientIPWalksForwardedForFromRight(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8", "172.16.0.0/12"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:1234"
+	req.Header.Set("X-Forwarded-For", "192.0.2.99, 198.51.100.20, 172.16.1.5")
+
+	if got := resolver.Resolve(req); got != "198.51.100.20" {
+		t.Fatalf("client ip = %q, want nearest untrusted forwarded address", got)
+	}
+}
+
+func TestClientIPUsesXRealIPFromTrustedProxy(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:1234"
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+
+	if got := resolver.Resolve(req); got != "198.51.100.21" {
+		t.Fatalf("client ip = %q, want x-real-ip client", got)
+	}
+}
+
+func TestClientIPUsesConfiguredHeaderFromUntrustedPeer(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, []string{"Eo-Connecting-Ip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
+
+	if got := resolver.Resolve(req); got != "198.51.100.22" {
+		t.Fatalf("client ip = %q, want configured header client", got)
+	}
+}
+
+func TestClientIPUsesConfiguredSingleIPHeaderOrder(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, []string{"Cf-Connecting-Ip", "Eo-Connecting-Ip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
+	req.Header.Set("Cf-Connecting-Ip", "198.51.100.23")
+
+	if got := resolver.Resolve(req); got != "198.51.100.23" {
+		t.Fatalf("client ip = %q, want first configured single-ip header", got)
+	}
+}
+
+func TestClientIPHeadersExcludeXRealIP(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, []string{"X-Real-IP", "Eo-Connecting-Ip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
+
+	if got := resolver.Resolve(req); got != "198.51.100.22" {
+		t.Fatalf("client ip = %q, want configured header after ignoring x-real-ip", got)
+	}
+}
+
+func TestNewWithOptionsRejectsInvalidTrustedProxy(t *testing.T) {
+	st := store.NewMemory()
+	_, err := NewWithOptions(st, policy.DefaultPolicies(), nil, nil, "", slog.Default(), Options{
+		TrustedProxies: []string{"not-an-ip"},
+	})
+	if err == nil {
+		t.Fatal("expected invalid trusted proxy to be rejected")
+	}
+}
+
 func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

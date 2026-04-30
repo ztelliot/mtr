@@ -155,7 +155,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		AgentID:        strings.TrimSpace(req.AgentID),
 		ResolveOnAgent: req.ResolveOnAgent,
 	}
-	if !s.limiter.AllowTool(string(req.Tool), clientIP(r)) {
+	if !s.limiter.AllowTool(string(req.Tool), s.clientIP.Resolve(r)) {
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return scheduleRequestDetails{}, false
 	}

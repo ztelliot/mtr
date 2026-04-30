@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ type Server struct {
 	tokens   map[string]TokenScope
 	geoIPURL string
 	log      *slog.Logger
+	clientIP clientIPResolver
 }
 
 type dispatchTarget struct {
@@ -36,14 +39,31 @@ type dispatchTarget struct {
 	IPVersion      model.IPVersion
 }
 
+type Options struct {
+	TrustedProxies  []string
+	ClientIPHeaders []string
+}
+
 var (
 	errAgentNotFound = errors.New("agent not found")
 	errAgentOffline  = errors.New("agent is offline")
 )
 
 func New(st store.Store, policies policy.Set, limiter *abuse.Limiter, hub *scheduler.Hub, geoIPURL string, log *slog.Logger, tokenConfigs ...TokenConfig) http.Handler {
+	handler, err := NewWithOptions(st, policies, limiter, hub, geoIPURL, log, Options{}, tokenConfigs...)
+	if err != nil {
+		panic(err)
+	}
+	return handler
+}
+
+func NewWithOptions(st store.Store, policies policy.Set, limiter *abuse.Limiter, hub *scheduler.Hub, geoIPURL string, log *slog.Logger, opts Options, tokenConfigs ...TokenConfig) (http.Handler, error) {
 	if log == nil {
 		log = slog.Default()
+	}
+	resolver, err := newClientIPResolver(opts.TrustedProxies, opts.ClientIPHeaders)
+	if err != nil {
+		return nil, err
 	}
 	s := &Server{
 		store:    st,
@@ -53,6 +73,7 @@ func New(st store.Store, policies policy.Set, limiter *abuse.Limiter, hub *sched
 		tokens:   map[string]TokenScope{},
 		geoIPURL: strings.TrimSpace(geoIPURL),
 		log:      log,
+		clientIP: resolver,
 	}
 	for _, config := range tokenConfigs {
 		if config.Token != "" {
@@ -81,12 +102,12 @@ func New(st store.Store, policies policy.Set, limiter *abuse.Limiter, hub *sched
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": version.Current()})
 	})
-	return r
+	return r, nil
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientIP := clientIP(r)
+		clientIP := s.clientIP.Resolve(r)
 		s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "client_ip", clientIP, "remote_addr", r.RemoteAddr)
 		if len(s.tokens) > 0 {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -124,7 +145,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if !s.limiter.AllowTool(string(req.Tool), clientIP(r)) {
+	if !s.limiter.AllowTool(string(req.Tool), s.clientIP.Resolve(r)) {
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return
 	}
@@ -485,13 +506,150 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+type clientIPResolver struct {
+	trustedProxies  []netip.Prefix
+	clientIPHeaders []string
+}
+
+func newClientIPResolver(trustedProxies []string, clientIPHeaders []string) (clientIPResolver, error) {
+	resolver := clientIPResolver{
+		clientIPHeaders: normalizeClientIPHeaders(clientIPHeaders),
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	for _, raw := range trustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		prefix, err := parseTrustedProxy(raw)
+		if err != nil {
+			return clientIPResolver{}, fmt.Errorf("invalid trusted proxy %q: %w", raw, err)
+		}
+		resolver.trustedProxies = append(resolver.trustedProxies, prefix)
+	}
+	return resolver, nil
+}
+
+func normalizeClientIPHeaders(headers []string) []string {
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(headers))
+	for _, raw := range headers {
+		header := http.CanonicalHeaderKey(strings.TrimSpace(raw))
+		if header == "" {
+			continue
+		}
+		key := strings.ToLower(header)
+		if key == "x-real-ip" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, header)
+	}
+	return normalized
+}
+
+func parseTrustedProxy(raw string) (netip.Prefix, error) {
+	if strings.Contains(raw, "/") {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(raw)
 	if err != nil {
-		return r.RemoteAddr
+		return netip.Prefix{}, err
 	}
-	return host
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+func (r clientIPResolver) Resolve(req *http.Request) string {
+	if ip, ok := r.configuredHeaderClientIP(req.Header); ok {
+		return ip.String()
+	}
+	remote, ok := requestRemoteIP(req.RemoteAddr)
+	if !ok {
+		return req.RemoteAddr
+	}
+	if !r.isTrustedProxy(remote) {
+		return remote.String()
+	}
+	if ip, ok := r.forwardedForClientIP(req.Header.Values("X-Forwarded-For")); ok {
+		return ip.String()
+	}
+	if ip, ok := headerIP(req.Header.Get("X-Real-IP")); ok {
+		return ip.String()
+	}
+	return remote.String()
+}
+
+func (r clientIPResolver) configuredHeaderClientIP(header http.Header) (netip.Addr, bool) {
+	for _, name := range r.clientIPHeaders {
+		if ip, ok := headerIP(header.Get(name)); ok {
+			return ip, true
+		}
+	}
+	return netip.Addr{}, false
+}
+
+func (r clientIPResolver) forwardedForClientIP(values []string) (netip.Addr, bool) {
+	var ips []netip.Addr
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			ip, ok := headerIP(part)
+			if ok {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	if len(ips) == 0 {
+		return netip.Addr{}, false
+	}
+	for i := len(ips) - 1; i >= 0; i-- {
+		if !r.isTrustedProxy(ips[i]) {
+			return ips[i], true
+		}
+	}
+	return ips[0], true
+}
+
+func (r clientIPResolver) isTrustedProxy(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	for _, prefix := range r.trustedProxies {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestRemoteIP(remoteAddr string) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = strings.Trim(remoteAddr, "[]")
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ip.Unmap(), true
+}
+
+func headerIP(raw string) (netip.Addr, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return netip.Addr{}, false
+	}
+	ip, ok := requestRemoteIP(raw)
+	if ok {
+		return ip, true
+	}
+	ip, err := netip.ParseAddr(strings.Trim(raw, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ip.Unmap(), true
 }

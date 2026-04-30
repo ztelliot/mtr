@@ -58,9 +58,12 @@ func TestLoadServerUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", "7")
 	t.Setenv("MTR_RATE_LIMIT_GLOBAL_BURST", "8")
+	t.Setenv("MTR_RATE_LIMIT_EXEMPT_CIDRS", "127.0.0.1,10.0.0.0/8")
 	t.Setenv("MTR_RUNTIME_HTTP_TIMEOUT_SEC", "9")
 	t.Setenv("MTR_OUTBOUND_TLS_ENABLED", "true")
 	t.Setenv("MTR_OUTBOUND_TLS_CA_FILES", "/env/edge-ca.pem")
+	t.Setenv("MTR_TRUSTED_PROXIES", "127.0.0.1,10.0.0.0/8")
+	t.Setenv("MTR_CLIENT_IP_HEADERS", "Eo-Connecting-Ip,X-Client-IP-Secret")
 	t.Setenv("MTR_OUTBOUND_AGENTS", `[{id: edge-env, base_url: "http://edge", http_token: secret}]`)
 	t.Setenv("MTR_TOOL_POLICIES", `{ping: {enabled: true, allowed_args: {protocol: "^(icmp)$"}, hide_first_hops: 2}}`)
 	t.Setenv("MTR_API_TOKENS", `[{secret: token-env, schedule_access: read, tools: {http: {allowed_args: {method: "^(HEAD)$"}}}, agents: [edge-1]}]`)
@@ -85,8 +88,17 @@ runtime:
 	if cfg.RateLimit.Global.RequestsPerMinute != 7 || cfg.RateLimit.Global.Burst != 11 {
 		t.Fatalf("nested rate limit merge failed: %#v", cfg.RateLimit.Global)
 	}
+	if !reflect.DeepEqual(cfg.RateLimit.ExemptCIDRs, []string{"127.0.0.1", "10.0.0.0/8"}) {
+		t.Fatalf("rate limit exempt cidrs env not loaded: %#v", cfg.RateLimit.ExemptCIDRs)
+	}
 	if cfg.Runtime.HTTPTimeoutSec != 5 {
 		t.Fatalf("runtime yaml should override env: %#v", cfg.Runtime)
+	}
+	if !reflect.DeepEqual(cfg.TrustedProxies, []string{"127.0.0.1", "10.0.0.0/8"}) {
+		t.Fatalf("trusted proxies env not loaded: %#v", cfg.TrustedProxies)
+	}
+	if !reflect.DeepEqual(cfg.ClientIPHeaders, []string{"Eo-Connecting-Ip", "X-Client-IP-Secret"}) {
+		t.Fatalf("client ip headers env not loaded: %#v", cfg.ClientIPHeaders)
 	}
 	if cfg.Runtime.ProbeStepTimeoutSec != 1 {
 		t.Fatalf("runtime probe step default = %d, want 1", cfg.Runtime.ProbeStepTimeoutSec)

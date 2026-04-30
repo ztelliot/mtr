@@ -16,6 +16,8 @@ type Server struct {
 	LogLevel            string               `yaml:"log_level"`
 	DatabaseURL         string               `yaml:"database_url"`
 	GeoIPURL            string               `yaml:"geoip_url"`
+	TrustedProxies      []string             `yaml:"trusted_proxies"`
+	ClientIPHeaders     []string             `yaml:"client_ip_headers"`
 	APITokenPermissions []APITokenPermission `yaml:"api_tokens"`
 	RegisterToken       string               `yaml:"register_token"`
 	TLS                 TLS                  `yaml:"tls"`
@@ -70,10 +72,11 @@ type TLS struct {
 }
 
 type RateLimit struct {
-	Global LimitSpec                `yaml:"global"`
-	IP     LimitSpec                `yaml:"ip"`
-	CIDR   CIDRSpec                 `yaml:"cidr"`
-	Tools  map[string]ToolLimitSpec `yaml:"tools"`
+	Global      LimitSpec                `yaml:"global"`
+	IP          LimitSpec                `yaml:"ip"`
+	CIDR        CIDRSpec                 `yaml:"cidr"`
+	Tools       map[string]ToolLimitSpec `yaml:"tools"`
+	ExemptCIDRs []string                 `yaml:"exempt_cidrs"`
 }
 
 type CIDRSpec struct {

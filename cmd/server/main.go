@@ -101,7 +101,7 @@ func main() {
 	}
 	hub.SetOutboundAgents(outboundAgents)
 	go hub.Start(ctx)
-	limiter := abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+	limiter, err := abuse.NewConfiguredLimiterWithError(abuse.RateLimitConfig{
 		Global: abuse.Limit{
 			RequestsPerMinute: cfg.RateLimit.Global.RequestsPerMinute,
 			Burst:             cfg.RateLimit.Global.Burst,
@@ -118,8 +118,13 @@ func main() {
 			IPv4Prefix: cfg.RateLimit.CIDR.IPv4Prefix,
 			IPv6Prefix: cfg.RateLimit.CIDR.IPv6Prefix,
 		},
-		Tools: toAbuseToolLimits(cfg.RateLimit.Tools),
+		Tools:       toAbuseToolLimits(cfg.RateLimit.Tools),
+		ExemptCIDRs: cfg.RateLimit.ExemptCIDRs,
 	})
+	if err != nil {
+		log.Error("configure rate limit", "err", err)
+		os.Exit(1)
+	}
 	creds, err := tlsutil.ServerCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Enabled)
 	if err != nil {
 		log.Error("load grpc tls", "err", err)
@@ -139,9 +144,17 @@ func main() {
 		}
 	}()
 
+	handler, err := api.NewWithOptions(st, policies, limiter, hub, cfg.GeoIPURL, log, api.Options{
+		TrustedProxies:  cfg.TrustedProxies,
+		ClientIPHeaders: cfg.ClientIPHeaders,
+	}, toAPITokenConfigs(cfg.APITokenPermissions)...)
+	if err != nil {
+		log.Error("configure http client ip", "err", err)
+		os.Exit(1)
+	}
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.New(st, policies, limiter, hub, cfg.GeoIPURL, log, toAPITokenConfigs(cfg.APITokenPermissions)...),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
