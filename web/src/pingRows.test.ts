@@ -597,4 +597,25 @@ describe("ping rows", () => {
       "agent-3"
     ]);
   });
+
+  it("sorts by the original country code for HK, MO, and TW", () => {
+    const sortingAgents: Agent[] = [
+      { ...agents[0], id: "agent-tw", country: "TW", region: "taipei", provider: "Alpha", isp: "Net" },
+      { ...agents[0], id: "agent-cn", country: "CN", region: "beijing", provider: "Alpha", isp: "Net" },
+      { ...agents[0], id: "agent-mo", country: "MO", region: "macau", provider: "Alpha", isp: "Net" },
+      { ...agents[0], id: "agent-hk", country: "HK", region: "hongkong", provider: "Alpha", isp: "Net" }
+    ];
+    const sortingJobs: Job[] = sortingAgents.map((agent) => ({
+      ...job,
+      id: `job-${agent.id}`,
+      agent_id: agent.id
+    }));
+
+    expect(buildNodeRows("dns", sortingAgents, sortingJobs, {}).map((row) => row.agentId)).toEqual([
+      "agent-cn",
+      "agent-hk",
+      "agent-mo",
+      "agent-tw"
+    ]);
+  });
 });

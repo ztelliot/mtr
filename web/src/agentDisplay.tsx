@@ -122,12 +122,12 @@ export function RegionCell({ country, region, protocols }: { country?: string; r
   );
 }
 
-function flagCountryCode(value: string | undefined): string | null {
+export function flagCountryCode(value: string | undefined): string | null {
   const country = value?.trim().toUpperCase();
   if (!country || !/^[A-Z]{2}$/.test(country)) {
     return null;
   }
-  return ["HK", "MO", "TW"].includes(country) ? "CN" : country;
+  return country;
 }
 
 export function StatusBadge({ status, t }: { status: string; t: (key: string) => string }) {
