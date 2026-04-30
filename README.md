@@ -34,7 +34,7 @@ Both binaries support `-version`. Build metadata can be injected with Go
 ldflags, for example:
 
 ```sh
-go build -ldflags "-X github.com/ztelliot/mtr/internal/version.Version=v1.2.3 -X github.com/ztelliot/mtr/internal/version.Commit=$(git rev-parse --short HEAD)" ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/ztelliot/mtr/internal/version.Version=v1.2.3 -X github.com/ztelliot/mtr/internal/version.Commit=$(git rev-parse --short HEAD) -X github.com/ztelliot/mtr/internal/version.BuiltAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/server
 ```
 
 Docker images accept the same metadata through build args:

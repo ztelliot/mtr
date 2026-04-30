@@ -30,7 +30,7 @@ Agent 同样通过 `-config` 读取配置：
 两个二进制都支持 `-version`。可通过 Go ldflags 注入构建元数据，例如：
 
 ```sh
-go build -ldflags "-X github.com/ztelliot/mtr/internal/version.Version=v1.2.3 -X github.com/ztelliot/mtr/internal/version.Commit=$(git rev-parse --short HEAD)" ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/ztelliot/mtr/internal/version.Version=v1.2.3 -X github.com/ztelliot/mtr/internal/version.Commit=$(git rev-parse --short HEAD) -X github.com/ztelliot/mtr/internal/version.BuiltAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/server
 ```
 
 Docker 镜像也支持通过构建参数注入同样的元数据：
