@@ -36,23 +36,24 @@ type OutboundAgent struct {
 }
 
 type Agent struct {
-	ID            string    `yaml:"id"`
-	Mode          string    `yaml:"mode"`
-	LogLevel      string    `yaml:"log_level"`
-	Country       string    `yaml:"country"`
-	Region        string    `yaml:"region"`
-	Provider      string    `yaml:"provider"`
-	ISP           string    `yaml:"isp"`
-	ServerAddr    string    `yaml:"server_addr"`
-	RegisterToken string    `yaml:"register_token"`
-	HTTPToken     string    `yaml:"http_token"`
-	HTTPAddr      string    `yaml:"http_addr"`
-	Capabilities  []string  `yaml:"capabilities"`
-	Protocols     uint8     `yaml:"protocols"`
-	HideFirstHops int       `yaml:"hide_first_hops"`
-	TLS           TLS       `yaml:"tls"`
-	HTTPTLS       TLS       `yaml:"http_tls"`
-	Speedtest     Speedtest `yaml:"speedtest"`
+	ID             string    `yaml:"id"`
+	Mode           string    `yaml:"mode"`
+	LogLevel       string    `yaml:"log_level"`
+	Country        string    `yaml:"country"`
+	Region         string    `yaml:"region"`
+	Provider       string    `yaml:"provider"`
+	ISP            string    `yaml:"isp"`
+	ServerAddr     string    `yaml:"server_addr"`
+	RegisterToken  string    `yaml:"register_token"`
+	HTTPToken      string    `yaml:"http_token"`
+	HTTPAddr       string    `yaml:"http_addr"`
+	HTTPPathPrefix string    `yaml:"http_path_prefix"`
+	Capabilities   []string  `yaml:"capabilities"`
+	Protocols      uint8     `yaml:"protocols"`
+	HideFirstHops  int       `yaml:"hide_first_hops"`
+	TLS            TLS       `yaml:"tls"`
+	HTTPTLS        TLS       `yaml:"http_tls"`
+	Speedtest      Speedtest `yaml:"speedtest"`
 }
 
 type Speedtest struct {
@@ -266,7 +267,29 @@ func LoadAgent(path string) (Agent, error) {
 		return cfg, err
 	}
 	defaultAgent(&cfg)
+	var err error
+	cfg.HTTPPathPrefix, err = NormalizePathPrefix(cfg.HTTPPathPrefix)
+	if err != nil {
+		return cfg, fmt.Errorf("http_path_prefix: %w", err)
+	}
 	return cfg, nil
+}
+
+func NormalizePathPrefix(raw string) (string, error) {
+	prefix := strings.TrimSpace(raw)
+	if prefix == "" || prefix == "/" {
+		return "", nil
+	}
+	if strings.ContainsAny(prefix, "?#") {
+		return "", fmt.Errorf("must not contain query or fragment")
+	}
+	if strings.ContainsAny(prefix, " \t\r\n") {
+		return "", fmt.Errorf("must not contain whitespace")
+	}
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	return strings.TrimRight(prefix, "/"), nil
 }
 
 func defaultAgent(cfg *Agent) {

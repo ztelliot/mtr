@@ -13,6 +13,7 @@ func TestLoadAgentUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_HTTP_ADDR", ":9100")
 	t.Setenv("MTR_REGISTER_TOKEN", "env-register-token")
 	t.Setenv("MTR_HTTP_TOKEN", "env-http-token")
+	t.Setenv("MTR_HTTP_PATH_PREFIX", "/env-api/")
 	t.Setenv("MTR_TLS_ENABLED", "true")
 	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
 	t.Setenv("MTR_HTTP_TLS_ENABLED", "true")
@@ -34,7 +35,7 @@ http_tls:
 	if cfg.ID != "file-agent" {
 		t.Fatalf("config file should override env id: %#v", cfg)
 	}
-	if cfg.Mode != "http" || cfg.HTTPAddr != ":9100" || cfg.RegisterToken != "env-register-token" || cfg.HTTPToken != "env-http-token" {
+	if cfg.Mode != "http" || cfg.HTTPAddr != ":9100" || cfg.HTTPPathPrefix != "/env-api" || cfg.RegisterToken != "env-register-token" || cfg.HTTPToken != "env-http-token" {
 		t.Fatalf("env values not loaded: %#v", cfg)
 	}
 	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) || cfg.TLS.CertFile != "/file/cert.pem" {
@@ -48,6 +49,22 @@ http_tls:
 	}
 	if cfg.Protocols != 2 || cfg.Speedtest.MaxBytes != 2048 {
 		t.Fatalf("numeric env values not loaded: %#v", cfg)
+	}
+}
+
+func TestLoadAgentNormalizesHTTPPathPrefix(t *testing.T) {
+	cfg, err := LoadAgent(writeConfig(t, `http_path_prefix: "api/v1/"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPPathPrefix != "/api/v1" {
+		t.Fatalf("http path prefix = %q", cfg.HTTPPathPrefix)
+	}
+}
+
+func TestLoadAgentRejectsInvalidHTTPPathPrefix(t *testing.T) {
+	if _, err := LoadAgent(writeConfig(t, `http_path_prefix: "/api?token=x"`)); err == nil {
+		t.Fatal("expected invalid http path prefix to be rejected")
 	}
 }
 

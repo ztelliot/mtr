@@ -77,7 +77,9 @@ Server scheduling controls live in the server config under `scheduler`: `agent_o
 
 Server can also actively invoke HTTP Agents configured under `outbound_agents`
 with `id`, `base_url`, and `http_token`. Each outbound Agent exposes `/invoke`
-when Agent config sets `mode: http` or `mode: grpc,http`; Server probes
+when Agent config sets `mode: http` or `mode: grpc,http`. Set Agent
+`http_path_prefix` to serve these HTTP endpoints below a prefix such as `/api`
+or `/v1`; then include the same prefix in the Server `base_url`. Server probes
 `/healthz` once at startup to learn version, region, provider, capabilities,
 protocols, and redaction settings, then uses `/healthz` again only during
 recovery after connection failures.
@@ -95,6 +97,7 @@ mode: "http"
 id: "edge-fc-1"
 http_addr: ":9000"
 http_token: "change-me-http-token"
+http_path_prefix: ""
 http_tls:
   enabled: true
   ca_files:
@@ -180,7 +183,9 @@ Configure the runtime API connection in `web/public/config.json`:
 ```json
 {
   "apiBaseUrl": "",
-  "apiToken": "frontend-token"
+  "apiToken": "frontend-token",
+  "brand": "QwQ MTR",
+  "brandUrl": null
 }
 ```
 
@@ -223,9 +228,15 @@ Server API origin:
 ```json
 {
   "apiBaseUrl": "https://mtr-api.example.com",
-  "apiToken": "frontend-token"
+  "apiToken": "frontend-token",
+  "brand": "QwQ MTR",
+  "brandUrl": "https://mtr.example.com"
 }
 ```
+
+Omit `brandUrl` to keep the header brand as an in-app home link, set it to a
+URL to send every deployment to one canonical brand address, or set it to
+`null`/`""` to render the brand without a link.
 
 The Kubernetes examples include `deploy/web.yaml`, which deploys
 `ghcr.io/ztelliot/mtr-web:latest`, exposes it as the `mtr-web` Service, and

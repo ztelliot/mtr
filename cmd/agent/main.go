@@ -343,7 +343,13 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			log.Warn("http job failed", "job_id", spec.ID, "err", runErr)
 		}
 	})
-	return logHTTPRequests(log, mux)
+	handler := http.Handler(mux)
+	if cfg.HTTPPathPrefix != "" {
+		prefixed := http.NewServeMux()
+		prefixed.Handle(cfg.HTTPPathPrefix+"/", http.StripPrefix(cfg.HTTPPathPrefix, mux))
+		handler = prefixed
+	}
+	return logHTTPRequests(log, handler)
 }
 
 func logHTTPRequests(log *slog.Logger, next http.Handler) http.Handler {

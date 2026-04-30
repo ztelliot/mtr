@@ -9,6 +9,7 @@ server_addr: "localhost:8443"
 register_token: "change-me-agent-token"
 http_token: "change-me-agent-http-token"
 http_addr: ":9000"
+http_path_prefix: ""
 protocols: 3
 hide_first_hops: 0
 capabilities:

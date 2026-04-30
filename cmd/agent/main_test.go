@@ -158,6 +158,38 @@ func TestHTTPAgentHealthIncludesVersion(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentPathPrefix(t *testing.T) {
+	handler := newHTTPAgentHandler(config.Agent{
+		ID:             "edge-http-1",
+		HTTPToken:      "secret",
+		HTTPPathPrefix: "/api/v1",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil)
+	healthRec := httptest.NewRecorder()
+	handler.ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("prefixed health status = %d, body = %s", healthRec.Code, healthRec.Body.String())
+	}
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rootRec := httptest.NewRecorder()
+	handler.ServeHTTP(rootRec, rootReq)
+	if rootRec.Code != http.StatusNotFound {
+		t.Fatalf("unprefixed health status = %d, want 404", rootRec.Code)
+	}
+
+	body := `{"id":"job-1","tool":"ping","target":"127.0.0.1","ip_version":4,"args":{"count":"1"},"timeout_seconds":1}`
+	invokeReq := httptest.NewRequest(http.MethodPost, "/api/v1/invoke", strings.NewReader(body))
+	invokeReq.Header.Set("Authorization", "Bearer secret")
+	invokeReq.Header.Set("Content-Type", "application/json")
+	invokeRec := httptest.NewRecorder()
+	handler.ServeHTTP(invokeRec, invokeReq)
+	if invokeRec.Code != http.StatusOK {
+		t.Fatalf("prefixed invoke status = %d, body = %s", invokeRec.Code, invokeRec.Body.String())
+	}
+}
+
 func TestRedactHopsUsesTimeout(t *testing.T) {
 	result := &model.ToolResult{
 		Tool: model.ToolMTR,

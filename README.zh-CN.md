@@ -75,7 +75,9 @@ Agent 的并发任务数量。
 
 Server 也可以主动调用配置在 `outbound_agents` 下的 HTTP Agent。每个 outbound Agent
 需要配置 `id`、`base_url` 和 `http_token`。当 Agent 配置 `mode: http` 或
-`mode: grpc,http` 时，会暴露 `/invoke` 端点；Server 在启动时会探测一次 `/healthz`，
+`mode: grpc,http` 时，会暴露 `/invoke` 端点。可以设置 Agent 的
+`http_path_prefix`，把这些 HTTP 端点挂到 `/api` 或 `/v1` 之类的前缀下；此时
+Server 的 `base_url` 也要包含同样的前缀。Server 在启动时会探测一次 `/healthz`，
 用于获取版本、地域、服务商、能力、协议和脱敏设置，之后只会在连接失败后的恢复过程中再次使用 `/healthz`。
 HTTP Agent 的监听 TLS 由 Agent 配置里的 `http_tls` 控制；Server 调用 HTTPS Agent
 时，可在全局 `outbound_tls` 中设置 CA 和客户端证书，从而校验 Agent 服务端证书链
@@ -89,6 +91,7 @@ mode: "http"
 id: "edge-fc-1"
 http_addr: ":9000"
 http_token: "change-me-http-token"
+http_path_prefix: ""
 http_tls:
   enabled: true
   ca_files:
@@ -181,7 +184,9 @@ pnpm --dir web install
 ```json
 {
   "apiBaseUrl": "",
-  "apiToken": "frontend-token"
+  "apiToken": "frontend-token",
+  "brand": "QwQ MTR",
+  "brandUrl": null
 }
 ```
 
@@ -222,9 +227,14 @@ docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
 ```json
 {
   "apiBaseUrl": "https://mtr-api.example.com",
-  "apiToken": "frontend-token"
+  "apiToken": "frontend-token",
+  "brand": "QwQ MTR",
+  "brandUrl": "https://mtr.example.com"
 }
 ```
+
+不配置 `brandUrl` 时，页首 brand 保持为应用内首页链接；设置为 URL 时，不同部署地址
+都会跳到同一个 canonical brand 地址；设置为 `null` 或 `""` 时则关闭 brand 链接。
 
 Kubernetes 示例包含 `deploy/web.yaml`，会部署
 `ghcr.io/ztelliot/mtr-web:latest`，创建 `mtr-web` Service，并通过
