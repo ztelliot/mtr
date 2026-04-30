@@ -490,6 +490,9 @@ export function App() {
     if (job.status !== "failed") {
       return null;
     }
+    if (job.error_type === "fanout_failed") {
+      return null;
+    }
     return jobErrorTypeMessage(job.error_type || "job_failed");
   }
 
@@ -498,6 +501,9 @@ export function App() {
     if (failureType) {
       const job = activeJobsRef.current.find((item) => item.id === event.job_id);
       if (job && shouldSuppressFanoutNodeFailure(job, event)) {
+        return null;
+      }
+      if (failureType === "fanout_failed") {
         return null;
       }
       return jobErrorTypeMessage(failureType);
@@ -619,6 +625,39 @@ export function App() {
     changeTool(value as Tool);
   }
 
+  function goHome() {
+    if (controlsLocked) {
+      return;
+    }
+    const tool = toolAllowed(permissions, defaultFormState.tool) ? defaultFormState.tool : allowedNavTools[0] ?? defaultFormState.tool;
+    const next: JobFormState = {
+      ...defaultFormState,
+      tool,
+      agentId: requiresAgentForTool(permissions, tool) ? capableAgents(visibleAgents, tool)[0]?.id ?? "" : ""
+    };
+    closeStreams();
+    setStreaming(false);
+    cancelRouteRestore();
+    setRouteJobID("");
+    activeJobsRef.current = [];
+    setActiveJobs([]);
+    eventsByJobIdRef.current = {};
+    setEventsByJobId({});
+    setError(null);
+    setAttemptedSubmit(false);
+    setPage("diagnostics");
+    setForm(next);
+    window.history.pushState(null, "", "/");
+  }
+
+  function onBrandClick(event: React.MouseEvent<HTMLAnchorElement>) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    goHome();
+  }
+
   function jumpToMtr(ip: string, agentId: string) {
     if (controlsLocked || !toolAllowed(permissions, "mtr")) {
       return;
@@ -729,7 +768,7 @@ export function App() {
     <Box className="page">
       <Container className="page-shell" size="xl" px="md">
         <header className="top-nav">
-          <Anchor href="/" underline="never" className="brand" c="inherit">
+          <Anchor href="/" underline="never" className="brand" c="inherit" onClick={onBrandClick}>
             <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
               {t("brand")}
             </Title>
