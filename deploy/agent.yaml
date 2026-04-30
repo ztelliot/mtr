@@ -48,27 +48,45 @@ data:
     token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
     ca_file="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-    label() {
-      key="$1"
+    get_node_labels() {
       kubectl \
         --server="${api_server}" \
         --certificate-authority="${ca_file}" \
         --token="${token}" \
         get node "${MTR_NODE_NAME}" \
-        -o "go-template={{ index .metadata.labels \"${key}\" }}"
+        -o 'go-template={{range $key, $value := .metadata.labels}}{{printf "%s=%s\n" $key $value}}{{end}}'
+    }
+
+    read_node_labels() {
+      max_attempts="${MTR_KUBERNETES_API_RETRIES:-5}"
+      retry_delay="${MTR_KUBERNETES_API_RETRY_SECONDS:-2}"
+      attempt=1
+      err_file="/tmp/node-labels.err"
+
+      while :; do
+        if labels="$(get_node_labels 2>"${err_file}")"; then
+          rm -f "${err_file}"
+          printf '%s' "${labels}"
+          return 0
+        fi
+
+        err="$(cat "${err_file}")"
+        if [ "${attempt}" -ge "${max_attempts}" ]; then
+          log "failed to read node labels after ${attempt} attempt(s): ${err}"
+          rm -f "${err_file}"
+          return 1
+        fi
+
+        log "failed to read node labels on attempt ${attempt}/${max_attempts}: ${err}"
+        log "retrying in ${retry_delay}s"
+        sleep "${retry_delay}"
+        attempt=$((attempt + 1))
+      done
     }
 
     log_matching_labels() {
       log "matching node labels:"
-      labels="$(
-        kubectl \
-          --server="${api_server}" \
-          --certificate-authority="${ca_file}" \
-          --token="${token}" \
-          get node "${MTR_NODE_NAME}" \
-          -o 'go-template={{range $key, $value := .metadata.labels}}{{printf "%s=%s\n" $key $value}}{{end}}'
-      )"
-      matching="$(printf '%s\n' "${labels}" | grep '^mtr\.ztelliot\.dev/' || true)"
+      matching="$(printf '%s\n' "${node_labels}" | grep '^mtr\.ztelliot\.dev/' || true)"
       if [ -n "${matching}" ]; then
         printf '%s\n' "${matching}" | while IFS= read -r line; do
           log "  ${line}"
@@ -81,23 +99,24 @@ data:
     read_label() {
       key="$1"
       name="$2"
-      err_file="/tmp/${name}.label.err"
-      if value="$(label "${key}" 2>"${err_file}")"; then
-        if [ "${value}" = "<no value>" ]; then
-          value=""
-        fi
-        if [ -n "${value}" ]; then
-          log "${name}: read ${key}=${value}"
-        else
-          log "${name}: label ${key} is not set"
-        fi
-        rm -f "${err_file}"
-        printf '%s' "${value}"
-        return 0
+      value=""
+      while IFS= read -r line; do
+        case "${line}" in
+          "${key}="*)
+            value="${line#*=}"
+            break
+            ;;
+        esac
+      done <<EOF_LABELS
+    ${node_labels}
+    EOF_LABELS
+
+      if [ -n "${value}" ]; then
+        log "${name}: read ${key}=${value}"
+      else
+        log "${name}: label ${key} is not set"
       fi
-      log "${name}: failed to read label ${key}: $(cat "${err_file}")"
-      rm -f "${err_file}"
-      return 1
+      printf '%s' "${value}"
     }
 
     value_or_default() {
@@ -116,6 +135,7 @@ data:
     log "rendering agent config"
     log "node=${MTR_NODE_NAME}"
     log "api_server=${api_server}"
+    node_labels="$(read_node_labels)"
     log_matching_labels
 
     country="$(read_label mtr.ztelliot.dev/country country || true)"
@@ -128,7 +148,7 @@ data:
 
     country="$(value_or_default country "${country}" CN)"
     region="$(value_or_default region "${region}" k8s)"
-    provider="$(value_or_default provider "${provider}" kubernetes)"
+    provider="$(value_or_default provider "${provider}" "")"
     isp="$(value_or_default isp "${isp}" bgp)"
     protocols="$(value_or_default protocols "${protocols}" 3)"
     hide_first_hops="$(value_or_default hide_first_hops "${hide_first_hops}" 0)"
