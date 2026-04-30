@@ -32,6 +32,7 @@ import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFiel
 import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
 import { normalizeIPAddress } from "./geoip";
+import { jobEventFailureType, shouldSuppressFanoutFailure } from "./jobFailures";
 import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
@@ -39,7 +40,7 @@ import { canReadSchedules, dnsTypeOptions, filterAgentsByPermissions, formWithPe
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTables";
 import { SchedulePage } from "./SchedulePage";
-import { jobEventFromStreamMessage, knownJobErrorType, mergeEvent, targetResolvedIP } from "./streamEvents";
+import { jobEventFromStreamMessage, mergeEvent, targetResolvedIP } from "./streamEvents";
 import type { Agent, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, RuntimeConfig, Tool, VersionInfo } from "./types";
 import { appVersionLabel } from "./version";
 
@@ -448,8 +449,8 @@ export function App() {
         const eventFailureMessage = jobErrorEventMessage(event, nextJobEvents);
         if (eventFailureMessage) {
           setError(eventFailureMessage);
-        } else if (isIgnoredPingTargetBlockedEvent(event, nextJobEvents)) {
-          clearIgnoredPingTargetBlockedError();
+        } else if (isSuppressedFanoutFailureEvent(event, nextJobEvents)) {
+          clearSuppressedFanoutFailureError();
         }
         clearStatusFallback(streamErrorFallbackTimersRef, event.job_id);
         setEventsByJobId((current) => {
@@ -492,32 +493,17 @@ export function App() {
     if (job.status !== "failed") {
       return null;
     }
-    if (shouldReportPingTargetBlockedFailure(job, job.error_type, events)) {
-      return jobErrorTypeMessage("target_blocked");
-    }
-    if (shouldIgnorePingTargetBlockedFailure(job, job.error_type, events)) {
+    if (shouldSuppressFanoutFailure(job, events, visibleAgents)) {
       return null;
     }
     return jobErrorTypeMessage(job.error_type || "job_failed");
   }
 
   function jobErrorEventMessage(event: JobEvent, events: JobEvent[] = eventsByJobIdRef.current[event.job_id] ?? []): string | null {
-    if (isTargetBlockedEvent(event)) {
-      const job = activeJobsRef.current.find((item) => item.id === event.job_id);
-      if (job?.tool === "ping") {
-        return pingTargetBlockedState(job, events) === "all" ? jobErrorTypeMessage("target_blocked") : null;
-      }
-      return jobErrorTypeMessage("target_blocked");
-    }
-    const eventType = typeof event.event?.type === "string" ? event.event.type : event.stream;
-    const eventMessage = typeof event.event?.message === "string" ? event.event.message : "";
-    const failureType = knownJobErrorType(eventMessage) || knownJobErrorType(eventType);
+    const failureType = jobEventFailureType(event);
     if (failureType) {
       const job = activeJobsRef.current.find((item) => item.id === event.job_id);
-      if (job && shouldReportPingTargetBlockedFailure(job, failureType, events)) {
-        return jobErrorTypeMessage("target_blocked");
-      }
-      if (job && shouldIgnorePingTargetBlockedFailure(job, failureType, events)) {
+      if (job && shouldSuppressFanoutFailure(job, events, visibleAgents)) {
         return null;
       }
       return jobErrorTypeMessage(failureType);
@@ -525,53 +511,23 @@ export function App() {
     return null;
   }
 
-  function shouldIgnorePingTargetBlockedFailure(job: Job, failureType: unknown, events: JobEvent[]): boolean {
-    return (
-      job.tool === "ping" &&
-      isPingTargetBlockedFailureType(failureType) &&
-      pingTargetBlockedState(job, events) === "partial"
-    );
-  }
-
-  function shouldReportPingTargetBlockedFailure(job: Job, failureType: unknown, events: JobEvent[]): boolean {
-    return job.tool === "ping" && isPingTargetBlockedFailureType(failureType) && pingTargetBlockedState(job, events) === "all";
-  }
-
-  function isPingTargetBlockedFailureType(failureType: unknown): boolean {
-    return failureType === "target_blocked" || failureType === "tool_failed" || failureType === "fanout_failed";
-  }
-
-  function isIgnoredPingTargetBlockedEvent(event: JobEvent, events: JobEvent[]): boolean {
+  function isSuppressedFanoutFailureEvent(event: JobEvent, events: JobEvent[]): boolean {
     const job = activeJobsRef.current.find((item) => item.id === event.job_id);
-    return Boolean(job && isTargetBlockedEvent(event) && pingTargetBlockedState(job, events) === "partial");
+    return Boolean(job && jobEventFailureType(event) && shouldSuppressFanoutFailure(job, events, visibleAgents));
   }
 
-  function clearIgnoredPingTargetBlockedError() {
+  function clearSuppressedFanoutFailureError() {
     const ignoredMessages = new Set([
       jobErrorTypeMessage("target_blocked"),
+      jobErrorTypeMessage("unsupported_tool"),
+      jobErrorTypeMessage("unsupported_protocol"),
+      jobErrorTypeMessage("agent_disconnected"),
+      jobErrorTypeMessage("job_timeout"),
       jobErrorTypeMessage("tool_failed"),
-      jobErrorTypeMessage("fanout_failed")
+      jobErrorTypeMessage("fanout_failed"),
+      jobErrorTypeMessage("job_failed")
     ]);
     setError((current) => (current && ignoredMessages.has(current) ? null : current));
-  }
-
-  function isTargetBlockedEvent(event: JobEvent): boolean {
-    return event.event?.type === "target_blocked" || event.event?.message === "target_blocked" || event.stream === "target_blocked";
-  }
-
-  function pingTargetBlockedState(job: Job, events: JobEvent[]): "none" | "partial" | "all" {
-    if (job.tool !== "ping") {
-      return "none";
-    }
-    const blockedAgentIDs = new Set(events.filter(isTargetBlockedEvent).map((event) => event.agent_id).filter(Boolean));
-    if (blockedAgentIDs.size === 0) {
-      return "none";
-    }
-    const expectedAgentIDs = job.agent_id ? [job.agent_id] : capableAgents(visibleAgents, "ping").map((agent) => agent.id);
-    if (expectedAgentIDs.length > 0 && expectedAgentIDs.every((id) => blockedAgentIDs.has(id))) {
-      return "all";
-    }
-    return "partial";
   }
 
   function jobErrorTypeMessage(type: string): string {
