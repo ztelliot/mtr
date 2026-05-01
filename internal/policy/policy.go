@@ -229,15 +229,20 @@ func (s Set) Get(tool model.Tool) (Policy, bool) {
 
 func (s Set) Validate(req model.CreateJobRequest) (Policy, error) {
 	req.Args = s.ServerArgs(req.Tool, req.Args)
-	return s.validate(req)
+	return s.validate(req, true)
+}
+
+func (s Set) ValidateSchedule(req model.CreateJobRequest) (Policy, error) {
+	req.Args = s.ServerArgs(req.Tool, req.Args)
+	return s.validate(req, false)
 }
 
 func (s Set) ValidateTrusted(req model.CreateJobRequest) (Policy, error) {
 	req.Args = s.AgentArgs(req.Tool, req.Args)
-	return s.validate(req)
+	return s.validate(req, true)
 }
 
-func (s Set) validate(req model.CreateJobRequest) (Policy, error) {
+func (s Set) validate(req model.CreateJobRequest, requirePinned bool) (Policy, error) {
 	p, ok := s.Get(req.Tool)
 	if !ok {
 		return Policy{}, fmt.Errorf("tool %q is not enabled", req.Tool)
@@ -245,7 +250,7 @@ func (s Set) validate(req model.CreateJobRequest) (Policy, error) {
 	if err := ValidateTarget(req.Tool, req.Target); err != nil {
 		return Policy{}, err
 	}
-	if requiresPinnedAgent(req.Tool) && strings.TrimSpace(req.AgentID) == "" {
+	if requirePinned && requiresPinnedAgent(req.Tool) && strings.TrimSpace(req.AgentID) == "" {
 		return Policy{}, fmt.Errorf("%s requires agent_id", req.Tool)
 	}
 	if requiresPortArg(req.Tool) && strings.TrimSpace(req.Args["port"]) == "" {

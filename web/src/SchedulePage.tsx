@@ -5,6 +5,7 @@ import {
   Group,
   Input,
   Loader,
+  MultiSelect,
   NumberInput,
   Paper,
   ScrollArea,
@@ -13,7 +14,8 @@ import {
   Switch,
   Table,
   Text,
-  TextInput
+  TextInput,
+  Tooltip
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { AlertTriangle, Pencil, Play, Trash2, X } from "lucide-react";
@@ -29,7 +31,9 @@ import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVers
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, DNSRecordsCell, MtrResultTable, type GeoIPLookup } from "./resultTables";
 import { targetResolvedIP } from "./streamEvents";
-import type { Agent, CreateScheduledJobRequest, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, ScheduledJob, Tool } from "./types";
+import type { Agent, CreateScheduledJobRequest, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, ScheduledJob, ScheduleTarget, ScheduleTargetRequest, Tool } from "./types";
+
+type ScheduleLabelOption = { value: string; label: string };
 
 type ScheduleTimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 type ScheduleMetricKind =
@@ -60,6 +64,8 @@ export function SchedulePage({
   const [form, setForm] = useState<JobFormState>(defaultFormState);
   const [name, setName] = useState("");
   const [intervalSeconds, setIntervalSeconds] = useState<number | string>(300);
+  const [scheduleLabels, setScheduleLabels] = useState<string[]>(["agent"]);
+  const [scheduleTargetIntervals, setScheduleTargetIntervals] = useState<Record<string, number | string>>({});
   const [enabled, setEnabled] = useState(true);
   const [editingScheduleId, setEditingScheduleId] = useState("");
   const [timeRange, setTimeRange] = useState<ScheduleTimeRange>("24h");
@@ -85,6 +91,7 @@ export function SchedulePage({
   const allowedTools = useMemo(() => navTools.filter((tool) => toolAllowed(permissions, tool)), [permissions]);
   const scheduleWriteAllowed = canWriteSchedules(permissions);
   const routeAgents = useMemo(() => capableAgents(agents, form.tool), [agents, form.tool]);
+  const scheduleLabelOptions = useMemo(() => scheduleLabelsForAgents(routeAgents, t), [routeAgents, t]);
   const selectedSchedule = schedules.find((schedule) => schedule.id === selectedScheduleId);
   const editingSchedule = schedules.find((schedule) => schedule.id === editingScheduleId);
   const isEditingSchedule = Boolean(editingSchedule);
@@ -124,10 +131,15 @@ export function SchedulePage({
     },
     [scheduleDNSRows, scheduleMtrRows, scheduleTargetIP, selectedJob, selectedSchedule?.tool]
   );
-  const intervalNumber = typeof intervalSeconds === "number" ? intervalSeconds : Number(intervalSeconds);
-  const intervalError = Number.isFinite(intervalNumber) && intervalNumber >= 10 && intervalNumber <= 86400 ? null : t("errors.intervalRequired");
-  const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, t);
-  const showFormError = attemptedSubmit && (formError || intervalError);
+  const scheduleTargetDrafts = useMemo(
+    () => buildScheduleTargetDrafts(scheduleLabels, intervalSeconds, scheduleTargetIntervals),
+    [intervalSeconds, scheduleLabels, scheduleTargetIntervals]
+  );
+  const intervalError = scheduleTargetDrafts.every((target) => intervalIsValid(target.interval_seconds)) ? null : t("errors.intervalRequired");
+  const scheduleTargetError = scheduleTargetFormError(scheduleLabels, scheduleLabelOptions, t);
+  const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...form, agentId: "schedule-target" } : form;
+  const formError = localizedFormError(validationForm, permissions, t) || permissionFormError(form, permissions, t);
+  const showFormError = attemptedSubmit && (formError || scheduleTargetError || intervalError);
 
   useEffect(() => {
     if (!allowedTools.length || allowedTools.includes(form.tool)) {
@@ -137,16 +149,15 @@ export function SchedulePage({
   }, [allowedTools, form.tool]);
 
   useEffect(() => {
-    if (!requiresAgentForTool(permissions, form.tool)) {
-      if (form.agentId) {
-        setForm((current) => ({ ...current, agentId: "" }));
+    const validValues = new Set(flatScheduleLabelOptions(scheduleLabelOptions).map((option) => option.value));
+    setScheduleLabels((current) => {
+      const next = current.filter((label) => validValues.has(label));
+      if (next.length > 0) {
+        return arraysEqual(next, current) ? current : next;
       }
-      return;
-    }
-    if (!form.agentId || !routeAgents.some((agent) => agent.id === form.agentId)) {
-      setForm((current) => ({ ...current, agentId: routeAgents[0]?.id ?? "" }));
-    }
-  }, [form.agentId, form.tool, permissions, routeAgents]);
+      return validValues.has("agent") ? ["agent"] : [];
+    });
+  }, [scheduleLabelOptions]);
 
   useEffect(() => {
     if (!client || !canReadSchedules(permissions)) {
@@ -339,19 +350,23 @@ export function SchedulePage({
     setForm((current) => ({
       ...current,
       tool,
-      agentId: requiresAgentForTool(permissions, tool) ? capableAgents(agents, tool)[0]?.id ?? "" : "",
+      agentId: "",
       target: normalizeTargetForTool(current.target, tool)
     }));
   }
 
   function schedulePayload(): CreateScheduledJobRequest {
-    const requestForm = formWithPermissionDefaults(form, permissions);
+    const scheduleTargets = scheduleTargetDrafts.map((target) => ({
+      ...target,
+      interval_seconds: Number(target.interval_seconds)
+    }));
+    const requestForm = formWithPermissionDefaults({ ...form, agentId: "" }, permissions);
     const jobRequest = buildCreateJobRequest(requestForm);
     return {
       ...jobRequest,
       name: name.trim() || undefined,
       enabled,
-      interval_seconds: intervalNumber
+      schedule_targets: scheduleTargets
     };
   }
 
@@ -360,6 +375,8 @@ export function SchedulePage({
     setEditingScheduleId("");
     setName("");
     setIntervalSeconds(300);
+    setScheduleLabels(["agent"]);
+    setScheduleTargetIntervals({});
     setEnabled(true);
     setAttemptedSubmit(false);
     setForm({ ...defaultFormState, tool: nextTool, target: "" });
@@ -371,8 +388,15 @@ export function SchedulePage({
     setError(null);
     setName(schedule.name ?? "");
     setIntervalSeconds(schedule.interval_seconds);
+    fillScheduleTargets(schedule);
     setEnabled(schedule.enabled);
     setForm(scheduleFormState(schedule));
+  }
+
+  function fillScheduleTargets(schedule: ScheduledJob) {
+    const targets = effectiveScheduleTargets(schedule);
+    setScheduleLabels(targets.map((target) => target.label));
+    setScheduleTargetIntervals(Object.fromEntries(targets.map((target) => [scheduleTargetKey(target.label), target.interval_seconds])));
   }
 
   function startEditSchedule(schedule: ScheduledJob) {
@@ -427,7 +451,7 @@ export function SchedulePage({
   async function saveSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAttemptedSubmit(true);
-    if (!client || !canWriteSchedules(permissions) || formError || intervalError || submitting) {
+    if (!client || !canWriteSchedules(permissions) || formError || scheduleTargetError || intervalError || submitting) {
       return;
     }
     setSubmitting(true);
@@ -499,7 +523,7 @@ export function SchedulePage({
               <NumberInput
                 className="schedule-interval-field"
                 disabled={submitting}
-                label={t("schedule.interval")}
+                label={t("schedule.defaultInterval")}
                 min={10}
                 max={86400}
                 value={intervalSeconds}
@@ -517,20 +541,21 @@ export function SchedulePage({
                 />
               )}
               <DynamicFields form={form} permissions={permissions} updateForm={updateForm} disabled={submitting} t={t} />
-              {requiresAgentForTool(permissions, form.tool) && (
-                <Select
-                  className="schedule-agent-field"
-                  checkIconPosition="left"
-                  disabled={submitting}
-                  label={t("form.agent")}
-                  data={routeAgents.map((agent) => ({
-                    value: agent.id,
-                    label: agentSelectLabel(agent)
-                  }))}
-                  value={form.agentId || null}
-                  onChange={(value) => updateForm("agentId", value ?? routeAgents[0]?.id ?? "")}
-                />
-              )}
+              <MultiSelect
+                className="schedule-label-field"
+                checkIconPosition="left"
+                clearable
+                data={scheduleLabelOptions}
+                disabled={submitting}
+                label={t("schedule.tags")}
+                leftSection={<span className="schedule-label-summary">{scheduleLabels.length > 0 ? t("schedule.selectedCount", { count: scheduleLabels.length }) : t("schedule.tagsPlaceholder")}</span>}
+                leftSectionPointerEvents="none"
+                leftSectionWidth="calc(100% - 76px)"
+                placeholder=""
+                renderPill={() => null}
+                value={scheduleLabels}
+                onChange={setScheduleLabels}
+              />
               <div className={`schedule-controls-group ${form.tool === "dns" ? "dns-controls" : ""}`}>
                 <div className="schedule-switch-stack">
                   {form.tool !== "dns" && (
@@ -565,6 +590,24 @@ export function SchedulePage({
                 </div>
               </div>
             </div>
+            {scheduleLabels.length > 1 && (
+              <div className="schedule-label-interval-panel">
+                <Text className="schedule-label-interval-title">{t("schedule.labelIntervals")}</Text>
+                <div className="schedule-group-intervals">
+                  {scheduleLabels.map((label) => (
+                    <NumberInput
+                      key={label}
+                      disabled={submitting}
+                      label={scheduleLabelDisplay(label, routeAgents, t)}
+                      min={10}
+                      max={86400}
+                      value={scheduleTargetIntervals[scheduleTargetKey(label)] ?? intervalSeconds}
+                      onChange={(value) => setScheduleTargetIntervals((current) => ({ ...current, [scheduleTargetKey(label)]: value }))}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </form>
         </Paper>
       )}
@@ -576,7 +619,7 @@ export function SchedulePage({
       )}
       {showFormError && (
         <Alert color="yellow" radius="md">
-          {formError || intervalError}
+          {formError || scheduleTargetError || intervalError}
         </Alert>
       )}
 
@@ -588,6 +631,7 @@ export function SchedulePage({
           </Button>
         </Group>
         <ScheduleList
+          agents={agents}
           schedules={schedules}
           selectedID={selectedScheduleId}
           onSelect={(schedule) => scheduleWriteAllowed ? startEditSchedule(schedule) : setSelectedScheduleId(schedule.id)}
@@ -654,7 +698,7 @@ export function SchedulePage({
       {selectedSchedule && isRouteTool(selectedSchedule.tool) && (
         <div className="schedule-dashboard schedule-route-dashboard">
           <ScheduleResultHeader
-            agent={agents.find((agent) => agent.id === selectedSchedule.agent_id)}
+            agent={agents.find((agent) => agent.id === singleAgentIDFromSchedule(selectedSchedule))}
             runCount={history.length}
             schedule={selectedSchedule}
             showAgentDetails={false}
@@ -667,6 +711,7 @@ export function SchedulePage({
           <div className="schedule-route-layout">
             <Paper className="schedule-panel schedule-history-panel schedule-route-history-panel" withBorder>
               <ScheduleHistory
+                agents={agents}
                 compact={compact}
                 jobs={history}
                 loading={loadingHistory}
@@ -711,7 +756,7 @@ interface ScheduleMetricSeries {
   points: ScheduleMetricPoint[];
 }
 
-type ScheduleDNSHistoryRow = ReturnType<typeof buildNodeRows>[number] & { jobId: string; runAt?: string };
+type ScheduleDNSHistoryRow = ReturnType<typeof buildNodeRows>[number] & { jobId: string; runAt?: string; sortKey: string };
 
 const chartColors = ["#60a5fa", "#34d399", "#f59e0b", "#f472b6", "#a78bfa", "#22d3ee", "#f87171", "#c4b5fd"];
 
@@ -783,10 +828,117 @@ function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent, showAge
   if (schedule.tool === "dns" && args.type) {
     details.push(args.type.toUpperCase());
   }
-  if (showAgentDetails && schedule.agent_id) {
-    details.push(agent ? agentLocationProviderLabel(agent) : schedule.agent_id);
+  const pinnedAgentID = singleAgentIDFromSchedule(schedule);
+  if (showAgentDetails && pinnedAgentID) {
+    details.push(agent ? agentLocationProviderLabel(agent) : pinnedAgentID);
   }
   return details.filter(Boolean);
+}
+
+function singleAgentIDFromSchedule(schedule: ScheduledJob): string {
+  const targets = effectiveScheduleTargets(schedule);
+  if (targets.length !== 1) {
+    return "";
+  }
+  const label = targets[0].label;
+  return label.startsWith("id:") ? label.slice(3) : "";
+}
+
+type ScheduleLabelOptionGroup = { group: string; items: ScheduleLabelOption[] };
+type ScheduleLabelOptionData = ScheduleLabelOption | ScheduleLabelOptionGroup;
+
+function scheduleLabelsForAgents(agents: Agent[], t: (key: string, options?: Record<string, unknown>) => string): ScheduleLabelOptionData[] {
+  const groups = new Set<string>();
+  agents.forEach((agent) => {
+    (agent.labels ?? []).forEach((label) => {
+      const trimmed = label.trim();
+      if (trimmed && !isReservedScheduleLabel(trimmed)) {
+        groups.add(trimmed);
+      }
+    });
+  });
+  const options: ScheduleLabelOptionData[] = [];
+  if (agents.length > 0) {
+    options.push({ value: "agent", label: scheduleLabelDisplay("agent", agents, t) });
+  }
+  const groupItems = [...groups].sort().map((label) => ({ value: label, label: scheduleLabelDisplay(label, agents, t) }));
+  if (groupItems.length > 0) {
+    options.push({ group: t("schedule.groups"), items: groupItems });
+  }
+  const nodeItems = agents
+    .map((agent) => ({ value: `id:${agent.id}`, label: agentSelectLabel(agent) }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+  if (nodeItems.length > 0) {
+    options.push({ group: t("schedule.nodes"), items: nodeItems });
+  }
+  return options;
+}
+
+function flatScheduleLabelOptions(options: ScheduleLabelOptionData[]): ScheduleLabelOption[] {
+  return options.flatMap((option) => "items" in option ? option.items : [option]);
+}
+
+function arraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function isReservedScheduleLabel(label: string): boolean {
+  return label === "agent" || label.startsWith("id:");
+}
+
+function scheduleLabelDisplay(label: string, agents: Agent[], t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (label === "agent") {
+    return t("schedule.allNodes");
+  }
+  const agentID = label.startsWith("id:") ? label.slice(3) : "";
+  if (!agentID) {
+    return label;
+  }
+  const agent = agents.find((item) => item.id === agentID);
+  return agent ? agentSelectLabel(agent) : agentID;
+}
+
+function buildScheduleTargetDrafts(
+  labels: string[],
+  intervalSeconds: number | string,
+  intervals: Record<string, number | string>
+): ScheduleTargetRequest[] {
+  if (labels.length <= 1) {
+    return labels.map((label) => ({
+      label,
+      interval_seconds: Number(intervalSeconds)
+    }));
+  }
+  return labels.map((label) => ({
+    label,
+    interval_seconds: Number(intervals[scheduleTargetKey(label)] ?? intervalSeconds)
+  }));
+}
+
+function scheduleTargetKey(label: string): string {
+  return label;
+}
+
+function intervalIsValid(value: number): boolean {
+  return Number.isFinite(value) && value >= 10 && value <= 86400;
+}
+
+function scheduleTargetFormError(
+  labels: string[],
+  options: ScheduleLabelOptionData[],
+  t: (key: string, options?: Record<string, unknown>) => string
+): string | null {
+  if (flatScheduleLabelOptions(options).length === 0) {
+    return t("errors.noAvailableNodes");
+  }
+  if (labels.length === 0) {
+    return t("errors.groupRequired");
+  }
+  return null;
+}
+
+function effectiveScheduleTargets(schedule: ScheduledJob): ScheduleTarget[] {
+  return schedule.schedule_targets ?? [];
 }
 
 function scheduleTargetLabel(schedule: ScheduledJob): string {
@@ -795,6 +947,36 @@ function scheduleTargetLabel(schedule: ScheduledJob): string {
     return `${host}:${schedule.args.port}`;
   }
   return schedule.target;
+}
+
+function scheduleNodesLabel(schedule: ScheduledJob, agents: Agent[], t: (key: string, options?: Record<string, unknown>) => string): string {
+  const targets = effectiveScheduleTargets(schedule);
+  return targets.map((target) => scheduleLabelDisplay(target.label, agents, t)).join(" / ");
+}
+
+function ScheduleNodesCell({
+  schedule,
+  agents,
+  t
+}: {
+  schedule: ScheduledJob;
+  agents: Agent[];
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const label = scheduleNodesLabel(schedule, agents, t);
+  return (
+    <Table.Td className="schedule-nodes-column">
+      <Tooltip label={label} disabled={!label} multiline withArrow>
+        <span className="schedule-nodes-label">{label || "-"}</span>
+      </Tooltip>
+    </Table.Td>
+  );
+}
+
+function scheduleIntervalLabel(schedule: ScheduledJob): string {
+  const targets = effectiveScheduleTargets(schedule);
+  const intervals = [...new Set(targets.map((target) => target.interval_seconds))];
+  return intervals.length === 1 ? formatInterval(intervals[0]) : intervals.map(formatInterval).join(" / ");
 }
 
 function SchedulePingDashboard({
@@ -1363,9 +1545,38 @@ function buildScheduleDNSRows(
       return scheduleMetricRows(job, events, agents).map((row) => ({
         ...row,
         jobId: job.id,
-        runAt: scheduleRunAt(job)
+        runAt: scheduleRunAt(job),
+        sortKey: scheduleDNSRowSortKey(row)
       }));
-    });
+    })
+    .sort(compareScheduleDNSRows);
+}
+
+function scheduleDNSRowSortKey(row: ReturnType<typeof buildNodeRows>[number]): string {
+  return [row.country, row.region, row.isp, row.provider, row.agentId]
+    .map((value) => sortScheduleDNSRowText(value))
+    .join("\u0000");
+}
+
+function compareScheduleDNSRows(left: ScheduleDNSHistoryRow, right: ScheduleDNSHistoryRow): number {
+  return left.sortKey.localeCompare(right.sortKey, undefined, { numeric: true, sensitivity: "base" }) || compareScheduleRunAtDesc(left.runAt, right.runAt);
+}
+
+function compareScheduleRunAtDesc(left: string | undefined, right: string | undefined): number {
+  return scheduleRunAtTime(right) - scheduleRunAtTime(left);
+}
+
+function scheduleRunAtTime(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function sortScheduleDNSRowText(value: string | undefined): string {
+  const normalized = value?.trim();
+  return normalized && normalized !== "-" ? normalized : "\uffff";
 }
 
 function scheduleMetricValue(_tool: Tool, row: ReturnType<typeof buildNodeRows>[number], metric: ScheduleMetricKind): number | undefined {
@@ -1442,11 +1653,13 @@ function scheduleTimeRangeOptions(t: (key: string) => string): Array<{ value: Sc
 }
 
 function ScheduleList({
+  agents,
   schedules,
   selectedID,
   onSelect,
   t
 }: {
+  agents: Agent[];
   schedules: ScheduledJob[];
   selectedID: string;
   onSelect: (schedule: ScheduledJob) => void;
@@ -1463,6 +1676,7 @@ function ScheduleList({
             <Table.Th className="name-column">{t("schedule.name")}</Table.Th>
             <Table.Th>{t("schedule.tool")}</Table.Th>
             <Table.Th className="schedule-target-column">{t("form.target")}</Table.Th>
+            <Table.Th>{t("schedule.nodes")}</Table.Th>
             <Table.Th>{t("schedule.intervalShort")}</Table.Th>
             <Table.Th>{t("results.status")}</Table.Th>
           </Table.Tr>
@@ -1477,7 +1691,8 @@ function ScheduleList({
               <Table.Td className="name-column">{schedule.name || "-"}</Table.Td>
               <Table.Td>{t(`nav.${schedule.tool}`)}</Table.Td>
               <Table.Td className="mono-label schedule-target-column">{scheduleTargetLabel(schedule)}</Table.Td>
-              <Table.Td>{formatInterval(schedule.interval_seconds)}</Table.Td>
+              <ScheduleNodesCell schedule={schedule} agents={agents} t={t} />
+              <Table.Td>{scheduleIntervalLabel(schedule)}</Table.Td>
               <Table.Td><StatusBadge status={schedule.enabled ? "enabled" : "disabled"} t={t} /></Table.Td>
             </Table.Tr>
           ))}
@@ -1488,6 +1703,7 @@ function ScheduleList({
 }
 
 function ScheduleHistory({
+  agents,
   compact,
   jobs,
   loading,
@@ -1497,6 +1713,7 @@ function ScheduleHistory({
   onSelect,
   t
 }: {
+  agents: Agent[];
   compact: boolean;
   jobs: Job[];
   loading: boolean;
@@ -1519,8 +1736,8 @@ function ScheduleHistory({
         <Table className={`schedule-table schedule-history-table ${compact ? "compact-schedule-table" : ""}`} highlightOnHover verticalSpacing={compact ? 4 : "xs"}>
           <Table.Thead>
             <Table.Tr>
+              <Table.Th className="schedule-history-node-column">{t("schedule.nodes")}</Table.Th>
               <Table.Th className="schedule-history-time-column">{t("schedule.runAt")}</Table.Th>
-              <Table.Th className="schedule-history-status-column">{t("results.status")}</Table.Th>
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -1530,10 +1747,12 @@ function ScheduleHistory({
                 key={job.id}
                 onClick={() => onSelect(job.id)}
               >
+                <Table.Td className="schedule-history-node-column" title={scheduleHistoryNodeLabel(job, agents, t)}>
+                  {scheduleHistoryNodeLabel(job, agents, t)}
+                </Table.Td>
                 <Table.Td className="schedule-history-time-column" title={scheduleRunAt(job) ? formatDateTime(scheduleRunAt(job)) : undefined}>
                   {formatScheduleRunAt(scheduleRunAt(job), t)}
                 </Table.Td>
-                <Table.Td className="schedule-history-status-column"><StatusBadge status={scheduleDisplayStatus(job)} t={t} /></Table.Td>
               </Table.Tr>
             ))}
           </Table.Tbody>
@@ -1548,6 +1767,14 @@ function ScheduleHistory({
   );
 }
 
+function scheduleHistoryNodeLabel(job: Job, agents: Agent[], t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (!job.agent_id) {
+    return t("schedule.allNodes");
+  }
+  const agent = agents.find((item) => item.id === job.agent_id);
+  return agent ? agentSelectLabel(agent) : job.agent_id;
+}
+
 function scheduleFormState(schedule: ScheduledJob): JobFormState {
   const args = schedule.args ?? {};
   return {
@@ -1555,7 +1782,7 @@ function scheduleFormState(schedule: ScheduledJob): JobFormState {
     tool: schedule.tool,
     target: scheduleTargetForForm(schedule),
     ipVersion: (schedule.ip_version ?? 0) as IPVersion,
-    agentId: schedule.agent_id ?? "",
+    agentId: "",
     protocol: args.protocol === "tcp" ? "tcp" : "icmp",
     method: args.method === "GET" ? "GET" : "HEAD",
     dnsType: scheduleDNSType(args.type),
@@ -1594,7 +1821,7 @@ function jobFromScheduleSummary(schedule: ScheduledJob, event: JobEvent): Job {
     resolved_target: metricString(metric.target_ip),
     args: schedule.args,
     ip_version: schedule.ip_version,
-    agent_id: event.agent_id || schedule.agent_id,
+    agent_id: event.agent_id,
     resolve_on_agent: schedule.resolve_on_agent,
     status,
     created_at: createdAt,
@@ -1605,10 +1832,6 @@ function jobFromScheduleSummary(schedule: ScheduledJob, event: JobEvent): Job {
 
 function scheduleRunAt(job: Job): string | undefined {
   return job.started_at || undefined;
-}
-
-function scheduleDisplayStatus(job: Job): Job["status"] {
-  return scheduleRunAt(job) ? job.status : "queued";
 }
 
 function formatScheduleRunAt(value: string | undefined, t: (key: string) => string): string {

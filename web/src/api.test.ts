@@ -81,8 +81,8 @@ describe("api client", () => {
     vi.stubGlobal("fetch", fetcher);
 
     const client = new ApiClient({ apiBaseUrl: "/api", apiToken: "token" });
-    await expect(client.createSchedule({ tool: "ping", target: "1.1.1.1", interval_seconds: 60 })).resolves.toMatchObject({ id: "sched-1" });
-    await expect(client.updateSchedule("sched-1", { tool: "ping", target: "8.8.8.8", enabled: false, interval_seconds: 120 })).resolves.toMatchObject({ target: "8.8.8.8", enabled: false });
+    await expect(client.createSchedule({ tool: "ping", target: "1.1.1.1", schedule_targets: [{ label: "agent", interval_seconds: 60 }] })).resolves.toMatchObject({ id: "sched-1" });
+    await expect(client.updateSchedule("sched-1", { tool: "ping", target: "8.8.8.8", enabled: false, schedule_targets: [{ label: "agent", interval_seconds: 120 }] })).resolves.toMatchObject({ target: "8.8.8.8", enabled: false });
     await expect(client.deleteSchedule("sched-1")).resolves.toBeUndefined();
     await expect(client.listJobEvents("job-1")).resolves.toMatchObject([{ job_id: "job-1", agent_id: "edge-1", event: { type: "summary" } }]);
     await expect(client.listScheduleHistory("sched-1", "24h")).resolves.toMatchObject([{ id: "job-1" }]);

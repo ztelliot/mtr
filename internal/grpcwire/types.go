@@ -30,6 +30,7 @@ type AgentHello struct {
 	Provider     string             `json:"provider,omitempty"`
 	ISP          string             `json:"isp,omitempty"`
 	Version      string             `json:"version,omitempty"`
+	Labels       []string           `json:"labels,omitempty"`
 	Token        string             `json:"token"`
 	Capabilities []model.Tool       `json:"capabilities"`
 	Protocols    model.ProtocolMask `json:"protocols"`

@@ -30,6 +30,7 @@ type OutboundAgent struct {
 	Token        string
 	HTTPClient   *http.Client
 	Version      string
+	Labels       []string
 	Capabilities []model.Tool
 	Protocols    model.ProtocolMask
 }
@@ -61,6 +62,7 @@ type outboundHealth struct {
 	Provider     string
 	ISP          string
 	Version      string
+	Labels       []string
 	Capabilities []model.Tool
 	Protocols    model.ProtocolMask
 }
@@ -212,6 +214,9 @@ func (a *OutboundAgent) applyHealth(health outboundHealth) {
 	if health.Version != "" {
 		a.Version = health.Version
 	}
+	if len(health.Labels) > 0 {
+		a.Labels = health.Labels
+	}
 	if len(health.Capabilities) > 0 {
 		a.Capabilities = health.Capabilities
 	}
@@ -229,6 +234,7 @@ func (h *Hub) upsertOutboundAgent(ctx context.Context, agent OutboundAgent, stat
 		Provider:     agent.Provider,
 		ISP:          agent.ISP,
 		Version:      agent.Version,
+		Labels:       agent.Labels,
 		TokenHash:    hashToken(agent.Token),
 		Capabilities: agent.Capabilities,
 		Protocols:    agent.Protocols,
@@ -315,6 +321,7 @@ func decodeOutboundHealth(body []byte) outboundHealth {
 			Region       string             `json:"region"`
 			Provider     string             `json:"provider"`
 			ISP          string             `json:"isp"`
+			Labels       []string           `json:"labels"`
 			Capabilities []model.Tool       `json:"capabilities"`
 			Protocols    model.ProtocolMask `json:"protocols"`
 		} `json:"agent"`
@@ -329,6 +336,7 @@ func decodeOutboundHealth(body []byte) outboundHealth {
 		Provider:     raw.Agent.Provider,
 		ISP:          raw.Agent.ISP,
 		Version:      outboundHealthVersion(raw.Version),
+		Labels:       raw.Agent.Labels,
 		Capabilities: raw.Agent.Capabilities,
 		Protocols:    raw.Agent.Protocols,
 	}

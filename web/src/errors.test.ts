@@ -13,6 +13,7 @@ describe("localized errors", () => {
   it("translates patterned API errors", () => {
     expect(apiErrorMessage('agent "edge-1" is not allowed', "zh-CN")).toBe("无权限使用节点 edge-1");
     expect(apiErrorMessage('ip_version 6 is not allowed for traceroute', "en-US")).toBe("traceroute does not allow IP version 6");
+    expect(apiErrorMessage('schedule target "blue" has no allowed online agents for ping', "zh-CN")).toBe("节点组 blue 没有可用节点");
   });
 
   it("keeps unknown API errors inspectable", () => {

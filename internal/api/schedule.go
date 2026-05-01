@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,13 +42,13 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		Target:          details.createReq.Target,
 		Args:            details.createReq.Args,
 		IPVersion:       details.scheduleVersion,
-		AgentID:         details.createReq.AgentID,
 		ResolveOnAgent:  details.createReq.ResolveOnAgent,
-		IntervalSeconds: req.IntervalSeconds,
 		NextRunAt:       now,
+		ScheduleTargets: details.scheduleTargets,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	normalizeScheduleRunFields(&sched)
 	if err := s.store.CreateScheduledJob(r.Context(), sched); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -81,7 +82,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	nextRunAt := existing.NextRunAt
 	definitionChanged := scheduleDefinitionChanged(existing, req, details)
-	intervalChanged := existing.IntervalSeconds != req.IntervalSeconds
+	intervalChanged := scheduleIntervalsChanged(existing, details.scheduleTargets)
 	if nextRunAt.IsZero() || (details.enabled && (!existing.Enabled || definitionChanged || intervalChanged)) {
 		nextRunAt = now
 	}
@@ -101,14 +102,17 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		Target:          details.createReq.Target,
 		Args:            details.createReq.Args,
 		IPVersion:       details.scheduleVersion,
-		AgentID:         details.createReq.AgentID,
 		ResolveOnAgent:  details.createReq.ResolveOnAgent,
-		IntervalSeconds: req.IntervalSeconds,
 		NextRunAt:       nextRunAt,
 		LastRunAt:       existing.LastRunAt,
+		ScheduleTargets: details.scheduleTargets,
 		CreatedAt:       existing.CreatedAt,
 		UpdatedAt:       now,
 	}
+	if len(sched.ScheduleTargets) > 0 && !definitionChanged {
+		mergeScheduleTargetRunState(sched.ScheduleTargets, existing.EffectiveScheduleTargets(), intervalChanged || !existing.Enabled)
+	}
+	normalizeScheduleRunFields(&sched)
 	if err := s.store.UpdateScheduledJob(r.Context(), sched); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -140,27 +144,29 @@ type scheduleRequestDetails struct {
 	createReq       model.CreateJobRequest
 	scheduleVersion model.IPVersion
 	enabled         bool
+	scheduleTargets []model.ScheduleTarget
 }
 
 func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request, req model.CreateScheduledJobRequest, defaultEnabled bool) (scheduleRequestDetails, bool) {
-	if req.IntervalSeconds < 10 || req.IntervalSeconds > 86400 {
-		writeError(w, http.StatusBadRequest, "interval_seconds must be between 10 and 86400")
-		return scheduleRequestDetails{}, false
-	}
+	now := time.Now().UTC()
 	createReq := model.CreateJobRequest{
 		Tool:           req.Tool,
 		Target:         req.Target,
 		Args:           req.Args,
 		IPVersion:      req.IPVersion,
-		AgentID:        strings.TrimSpace(req.AgentID),
 		ResolveOnAgent: req.ResolveOnAgent,
+	}
+	scheduleTargets, err := scheduleTargetsFromRequest(req, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return scheduleRequestDetails{}, false
 	}
 	if !s.limiter.AllowTool(string(req.Tool), s.clientIP.Resolve(r)) {
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return scheduleRequestDetails{}, false
 	}
 	createReq.Args = s.policies.ServerArgs(createReq.Tool, createReq.Args)
-	if _, err := s.policies.Validate(createReq); err != nil {
+	if _, err := s.policies.ValidateSchedule(createReq); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
 	}
@@ -168,16 +174,9 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusForbidden, err.Error())
 		return scheduleRequestDetails{}, false
 	}
-	options, err := s.dispatchOptions(r.Context(), createReq)
-	if err != nil {
+	if _, err := s.dispatchOptions(r.Context(), createReq); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
-	}
-	if createReq.AgentID != "" {
-		if _, _, err := s.pinnedDispatchTarget(r.Context(), createReq.AgentID, createReq.Tool, options); err != nil {
-			writeError(w, agentDispatchErrorStatus(err), err.Error())
-			return scheduleRequestDetails{}, false
-		}
 	}
 	scheduleVersion := createReq.IPVersion
 	if scheduleVersion == model.IPAny {
@@ -190,20 +189,185 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 			scheduleVersion = literalVersion
 		}
 	}
+	scheduleTargets, err = s.authorizeScheduleTargets(r.Context(), createReq.Tool, scheduleVersion, scheduleTargets)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return scheduleRequestDetails{}, false
+	}
 	enabled := defaultEnabled
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	return scheduleRequestDetails{createReq: createReq, scheduleVersion: scheduleVersion, enabled: enabled}, true
+	return scheduleRequestDetails{createReq: createReq, scheduleVersion: scheduleVersion, enabled: enabled, scheduleTargets: scheduleTargets}, true
+}
+
+func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
+	scope := principalFromContext(ctx).scope
+	if scope.All {
+		return targets, nil
+	}
+	agents, err := s.store.ListAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.ScheduleTarget, 0, len(targets))
+	for _, target := range targets {
+		matched := false
+		for _, agent := range agents {
+			if !scheduleTargetMatchesAgent(target.Label, agent) {
+				continue
+			}
+			if !scopeAllowsAgent(scope, agent.ID) {
+				continue
+			}
+			if policy.AgentSupports(agent, tool, version) {
+				matched = true
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, tool)
+		}
+		target.AllowedAgentIDs = scheduleTargetAllowedAgentIDs(scope)
+		out = append(out, target)
+	}
+	return out, nil
+}
+
+func scheduleTargetAllowedAgentIDs(scope TokenScope) []string {
+	if !scopeRestrictsAgents(scope) {
+		return nil
+	}
+	out := append([]string(nil), scope.Agents...)
+	sort.Strings(out)
+	return out
+}
+
+func scheduleTargetMatchesAgent(label string, agent model.Agent) bool {
+	label = strings.TrimSpace(label)
+	for _, item := range agent.Labels {
+		if strings.TrimSpace(item) == label {
+			return true
+		}
+	}
+	return false
 }
 
 func scheduleDefinitionChanged(existing model.ScheduledJob, req model.CreateScheduledJobRequest, details scheduleRequestDetails) bool {
 	return existing.Tool != details.createReq.Tool ||
 		existing.Target != details.createReq.Target ||
 		existing.IPVersion != details.scheduleVersion ||
-		existing.AgentID != details.createReq.AgentID ||
 		existing.ResolveOnAgent != details.createReq.ResolveOnAgent ||
+		!scheduleTargetsSameDefinition(existing.EffectiveScheduleTargets(), details.scheduleTargets) ||
 		!maps.Equal(existing.Args, details.createReq.Args)
+}
+
+func scheduleTargetsFromRequest(req model.CreateScheduledJobRequest, now time.Time) ([]model.ScheduleTarget, error) {
+	targets := req.ScheduleTargets
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("schedule_targets is required")
+	}
+	out := make([]model.ScheduleTarget, 0, len(targets))
+	seen := map[string]struct{}{}
+	for i, target := range targets {
+		label := strings.TrimSpace(target.Label)
+		if label == "" {
+			return nil, fmt.Errorf("schedule_targets[%d].label is required", i)
+		}
+		if target.IntervalSeconds < 10 || target.IntervalSeconds > 86400 {
+			return nil, fmt.Errorf("schedule_targets[%d].interval_seconds must be between 10 and 86400", i)
+		}
+		if _, ok := seen[label]; ok {
+			return nil, fmt.Errorf("duplicate schedule target %q", label)
+		}
+		seen[label] = struct{}{}
+		out = append(out, model.ScheduleTarget{
+			ID:              uuid.NewString(),
+			Label:           label,
+			IntervalSeconds: target.IntervalSeconds,
+			NextRunAt:       now,
+		})
+	}
+	return out, nil
+}
+
+func scheduleTargetsSameDefinition(left []model.ScheduleTarget, right []model.ScheduleTarget) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftKeys := make([]string, 0, len(left))
+	rightKeys := make([]string, 0, len(right))
+	for _, target := range left {
+		leftKeys = append(leftKeys, scheduleTargetDefinitionKey(target))
+	}
+	for _, target := range right {
+		rightKeys = append(rightKeys, scheduleTargetDefinitionKey(target))
+	}
+	sort.Strings(leftKeys)
+	sort.Strings(rightKeys)
+	for i := range leftKeys {
+		if leftKeys[i] != rightKeys[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func scheduleTargetDefinitionKey(target model.ScheduleTarget) string {
+	return target.Label + "\x00" + strings.Join(target.AllowedAgentIDs, ",")
+}
+
+func scheduleIntervalsChanged(existing model.ScheduledJob, targets []model.ScheduleTarget) bool {
+	left := existing.EffectiveScheduleTargets()
+	if len(left) != len(targets) {
+		return true
+	}
+	leftByKey := map[string]int{}
+	for _, target := range left {
+		leftByKey[scheduleTargetDefinitionKey(target)] = target.IntervalSeconds
+	}
+	for _, target := range targets {
+		if leftByKey[scheduleTargetDefinitionKey(target)] != target.IntervalSeconds {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeScheduleTargetRunState(next []model.ScheduleTarget, existing []model.ScheduleTarget, reset bool) {
+	if reset {
+		return
+	}
+	byKey := map[string]model.ScheduleTarget{}
+	for _, target := range existing {
+		byKey[target.Label] = target
+	}
+	for i := range next {
+		if old, ok := byKey[next[i].Label]; ok {
+			next[i].ID = old.ID
+			next[i].NextRunAt = old.NextRunAt
+			next[i].LastRunAt = old.LastRunAt
+		}
+	}
+}
+
+func normalizeScheduleRunFields(sched *model.ScheduledJob) {
+	if len(sched.ScheduleTargets) == 0 {
+		return
+	}
+	earliest := sched.ScheduleTargets[0].NextRunAt
+	var latestLast *time.Time
+	for _, target := range sched.ScheduleTargets {
+		if target.NextRunAt.Before(earliest) {
+			earliest = target.NextRunAt
+		}
+		if target.LastRunAt != nil && (latestLast == nil || target.LastRunAt.After(*latestLast)) {
+			t := *target.LastRunAt
+			latestLast = &t
+		}
+	}
+	sched.NextRunAt = earliest
+	sched.LastRunAt = latestLast
+	sched.IntervalSeconds = sched.ScheduleTargets[0].IntervalSeconds
 }
 
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {

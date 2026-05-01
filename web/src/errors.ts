@@ -40,6 +40,7 @@ const apiErrorPatterns: ErrorPattern[] = [
   { pattern: /^ip_version (\d+) is not allowed for (.+)$/, key: "apiErrors.ipVersionNotAllowed", params: ([, version, tool]) => ({ version, tool }) },
   { pattern: /^resolve_on_agent=(true|false) is not allowed for (.+)$/, key: "apiErrors.resolveOnAgentNotAllowed", params: ([, value, tool]) => ({ value, tool }) },
   { pattern: /^agent "([^"]+)" is not allowed$/, key: "apiErrors.agentNotAllowed", params: ([, agent]) => ({ agent }) },
+  { pattern: /^schedule target "([^"]+)" has no allowed online agents for (.+)$/, key: "apiErrors.noAvailableScheduleNodes", params: ([, label, tool]) => ({ label, tool }) },
   { pattern: /^invalid resolved ip "([^"]+)"$/, key: "apiErrors.invalidResolvedIp", params: ([, ip]) => ({ ip }) },
   { pattern: /^resolve target: (.+)$/, key: "apiErrors.resolveTargetFailed", params: ([, error]) => ({ error }) },
   { pattern: /^target address (.+) is not allowed$/, key: "apiErrors.targetAddressNotAllowed", params: ([, address]) => ({ address }) },

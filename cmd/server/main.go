@@ -219,6 +219,7 @@ func toSchedulerOutboundAgents(in []config.OutboundAgent, tlsConfig config.TLS) 
 			ID:         agent.ID,
 			BaseURL:    agent.BaseURL,
 			Token:      agent.HTTPToken,
+			Labels:     agent.Labels,
 			HTTPClient: client,
 		})
 	}

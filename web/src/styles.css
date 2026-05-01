@@ -569,6 +569,53 @@ body,
   width: 76px;
 }
 
+.result-table .mtr-result-table.has-ipv4 {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.result-table .mtr-result-table.has-ipv4 th,
+.result-table .mtr-result-table.has-ipv4 td {
+  overflow: hidden;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.result-table .mtr-result-table.has-ipv4 .hop-column {
+  min-width: 0;
+  width: 44px;
+}
+
+.result-table .mtr-result-table.has-ipv4 .ip-column {
+  max-width: none;
+  min-width: 0;
+  width: 23%;
+}
+
+.result-table .mtr-result-table.has-ipv4 .metric-column {
+  min-width: 0;
+  width: 62px;
+}
+
+.result-table .mtr-result-table.has-ipv4 .sent-column {
+  min-width: 0;
+  width: 48px;
+}
+
+.result-table .mtr-result-table.has-ipv4 .time-column {
+  min-width: 0;
+  width: 9.5%;
+}
+
+.result-table .mtr-result-table.has-ipv4 .chart-column {
+  min-width: 0;
+  width: 76px;
+}
+
+.result-table .mtr-result-table.has-ipv4 .ping-rtt-chart {
+  width: 64px;
+}
+
 .ping-rtt-chart rect {
   fill: light-dark(#16a34a, #4ade80);
 }
@@ -660,8 +707,99 @@ body,
   grid-column: 5;
 }
 
-.schedule-agent-field {
-  grid-column: 7;
+.schedule-label-field,
+.schedule-label-interval-panel {
+  grid-column: 7 / span 1;
+}
+
+.schedule-label-field {
+  justify-self: stretch;
+  min-width: 0;
+}
+
+.schedule-label-field .mantine-MultiSelect-input {
+  height: 56px;
+  min-height: 56px;
+  overflow: hidden;
+}
+
+.schedule-label-summary {
+  align-items: center;
+  color: var(--input-placeholder-color);
+  display: flex;
+  font: inherit;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.schedule-label-field .mantine-PillGroup-group {
+  align-items: center;
+  flex-wrap: nowrap;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: hidden;
+}
+
+.schedule-label-field .mantine-MultiSelect-inputField {
+  height: 1px;
+  line-height: 1px;
+  padding: 0;
+  width: 1px;
+}
+
+.schedule-label-field .mantine-MultiSelect-inputField::placeholder {
+  color: transparent;
+}
+
+.schedule-label-field .mantine-Combobox-groupLabel {
+  border-top: 1px solid light-dark(#e5e7eb, #343943);
+  margin-top: 6px;
+  padding-top: 10px;
+}
+
+.schedule-label-interval-panel {
+  border-top: 1px solid light-dark(#e5e7eb, #343943);
+  margin-top: 18px;
+  padding-top: 0;
+}
+
+.schedule-label-interval-title {
+  background: light-dark(#ffffff, #202020);
+  background: var(--mantine-color-body);
+  color: light-dark(#374151, #cbd5e1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 8px;
+  padding-right: 10px;
+  position: relative;
+  top: -7px;
+  width: max-content;
+}
+
+.schedule-group-intervals {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 124px));
+}
+
+.schedule-group-intervals > * {
+  min-width: 0;
+}
+
+.schedule-group-intervals .mantine-InputWrapper-label {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .schedule-form-grid .schedule-tool-field input,
@@ -670,7 +808,8 @@ body,
 .schedule-form-grid .dynamic-field input,
 .schedule-form-grid .schedule-tool-field .mantine-Select-input,
 .schedule-form-grid .schedule-ip-field .mantine-Select-input,
-.schedule-form-grid .dynamic-field .mantine-Select-input {
+.schedule-form-grid .dynamic-field .mantine-Select-input,
+.schedule-form-grid .schedule-label-field .mantine-MultiSelect-input {
   padding-left: 10px;
   padding-right: 26px;
 }
@@ -797,24 +936,50 @@ body,
 
 @container (max-width: 1900px) {
   .schedule-form-grid {
-    grid-template-columns: repeat(9, minmax(0, 1fr));
+    grid-template-columns:
+      minmax(96px, 1fr)
+      minmax(82px, 1fr)
+      minmax(150px, 2fr)
+      minmax(82px, 1fr)
+      minmax(82px, 1fr)
+      minmax(82px, 1fr)
+      minmax(180px, 240px);
   }
 
-  .schedule-name-field,
-  .schedule-tool-field,
-  .schedule-interval-field,
-  .schedule-ip-field,
-  .schedule-form-grid .dynamic-field,
-  .schedule-form-grid.tool-dns .dynamic-field {
-    grid-column: span 1;
+  .schedule-name-field {
+    grid-column: 1;
   }
 
-  .schedule-agent-field {
-    grid-column: span 2;
+  .schedule-tool-field {
+    grid-column: 2;
   }
 
   .schedule-target-field {
-    grid-column: span 2;
+    grid-column: 3;
+  }
+
+  .schedule-interval-field {
+    grid-column: 4;
+  }
+
+  .schedule-ip-field {
+    grid-column: 5;
+  }
+
+  .schedule-form-grid .dynamic-field {
+    grid-column: 6;
+  }
+
+  .schedule-form-grid.tool-dns .dynamic-field {
+    grid-column: 5;
+  }
+
+  .schedule-label-field {
+    grid-column: 7;
+  }
+
+  .schedule-label-interval-panel {
+    grid-column: 1 / -1;
   }
 
   .schedule-controls-group {
@@ -840,13 +1005,13 @@ body,
   table-layout: fixed;
 }
 
-.schedule-history-table .schedule-history-status-column {
-  width: 65px;
+.schedule-history-table .schedule-history-node-column {
+  padding-left: 16px;
+  width: 58%;
 }
 
 .schedule-history-table .schedule-history-time-column {
-  padding-left: 16px;
-  width: auto;
+  width: 42%;
 }
 
 .schedule-history-table th,
@@ -876,6 +1041,14 @@ body,
   width: 190px;
 }
 
+.schedule-nodes-label {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .schedule-row {
   cursor: pointer;
 }
@@ -893,7 +1066,7 @@ body,
   align-items: start;
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(160px, 210px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
 }
 
 .schedule-route-history-panel,
@@ -1319,7 +1492,11 @@ body,
   .schedule-ip-field,
   .schedule-form-grid .dynamic-field,
   .schedule-form-grid.tool-dns .dynamic-field,
-  .schedule-agent-field {
+  .schedule-label-interval-panel {
+    grid-column: auto;
+  }
+
+  .schedule-label-field {
     grid-column: auto;
   }
 
@@ -1495,8 +1672,13 @@ body,
   .query-grid input,
   .query-grid .mantine-Select-input,
   .schedule-form-grid input,
-  .schedule-form-grid .mantine-Select-input {
+  .schedule-form-grid .mantine-Select-input,
+  .schedule-label-field .mantine-MultiSelect-input {
     min-height: 46px;
+  }
+
+  .schedule-label-field .mantine-MultiSelect-input {
+    height: 46px;
   }
 
   .query-grid {
@@ -1832,11 +2014,11 @@ body,
     grid-template-columns: 1fr;
   }
 
-  .schedule-history-table .schedule-history-status-column {
-    width: 65px;
+  .schedule-history-table .schedule-history-node-column {
+    width: 48%;
   }
 
   .schedule-history-table .schedule-history-time-column {
-    width: auto;
+    width: 52%;
   }
 }

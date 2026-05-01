@@ -48,55 +48,55 @@ data:
     token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
     ca_file="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-    get_node_labels() {
+    get_node_annotations() {
       kubectl \
         --server="${api_server}" \
         --certificate-authority="${ca_file}" \
         --token="${token}" \
         get node "${MTR_NODE_NAME}" \
-        -o 'go-template={{range $key, $value := .metadata.labels}}{{printf "%s=%s\n" $key $value}}{{end}}'
+        -o 'go-template={{range $key, $value := .metadata.annotations}}{{printf "%s=%s\n" $key $value}}{{end}}'
     }
 
-    read_node_labels() {
+    read_node_annotations() {
       max_attempts="${MTR_KUBERNETES_API_RETRIES:-5}"
       retry_delay="${MTR_KUBERNETES_API_RETRY_SECONDS:-2}"
       attempt=1
-      err_file="/tmp/node-labels.err"
+      err_file="/tmp/node-annotations.err"
 
       while :; do
-        if labels="$(get_node_labels 2>"${err_file}")"; then
+        if annotations="$(get_node_annotations 2>"${err_file}")"; then
           rm -f "${err_file}"
-          printf '%s' "${labels}"
+          printf '%s' "${annotations}"
           return 0
         fi
 
         err="$(cat "${err_file}")"
         if [ "${attempt}" -ge "${max_attempts}" ]; then
-          log "failed to read node labels after ${attempt} attempt(s): ${err}"
+          log "failed to read node annotations after ${attempt} attempt(s): ${err}"
           rm -f "${err_file}"
           return 1
         fi
 
-        log "failed to read node labels on attempt ${attempt}/${max_attempts}: ${err}"
+        log "failed to read node annotations on attempt ${attempt}/${max_attempts}: ${err}"
         log "retrying in ${retry_delay}s"
         sleep "${retry_delay}"
         attempt=$((attempt + 1))
       done
     }
 
-    log_matching_labels() {
-      log "matching node labels:"
-      matching="$(printf '%s\n' "${node_labels}" | grep '^mtr\.ztelliot\.dev/' || true)"
+    log_matching_annotations() {
+      log "matching node annotations:"
+      matching="$(printf '%s\n' "${node_annotations}" | grep '^mtr\.ztelliot\.dev/' || true)"
       if [ -n "${matching}" ]; then
         printf '%s\n' "${matching}" | while IFS= read -r line; do
           log "  ${line}"
         done
       else
-        log "  no mtr.ztelliot.dev/* labels found on node"
+        log "  no mtr.ztelliot.dev/* annotations found on node"
       fi
     }
 
-    read_label() {
+    read_annotation() {
       key="$1"
       name="$2"
       value=""
@@ -107,14 +107,14 @@ data:
             break
             ;;
         esac
-      done <<EOF_LABELS
-    ${node_labels}
-    EOF_LABELS
+      done <<EOF_ANNOTATIONS
+    ${node_annotations}
+    EOF_ANNOTATIONS
 
       if [ -n "${value}" ]; then
         log "${name}: read ${key}=${value}"
       else
-        log "${name}: label ${key} is not set"
+        log "${name}: annotation ${key} is not set"
       fi
       printf '%s' "${value}"
     }
@@ -124,10 +124,10 @@ data:
       value="$2"
       fallback="$3"
       if [ -n "${value}" ]; then
-        log "${name}: using node label value ${value}"
+        log "${name}: using node annotation value ${value}"
         printf '%s' "${value}"
       else
-        log "${name}: node label missing, using fallback ${fallback}"
+        log "${name}: node annotation missing, using fallback ${fallback}"
         printf '%s' "${fallback}"
       fi
     }
@@ -135,16 +135,17 @@ data:
     log "rendering agent config"
     log "node=${MTR_NODE_NAME}"
     log "api_server=${api_server}"
-    node_labels="$(read_node_labels)"
-    log_matching_labels
+    node_annotations="$(read_node_annotations)"
+    log_matching_annotations
 
-    country="$(read_label mtr.ztelliot.dev/country country || true)"
-    region="$(read_label mtr.ztelliot.dev/region region || true)"
-    provider="$(read_label mtr.ztelliot.dev/provider provider || true)"
-    isp="$(read_label mtr.ztelliot.dev/isp isp || true)"
-    protocols="$(read_label mtr.ztelliot.dev/protocols protocols || true)"
-    hide_first_hops="$(read_label mtr.ztelliot.dev/hide-first-hops hide_first_hops || true)"
-    capabilities="$(read_label mtr.ztelliot.dev/capabilities capabilities || true)"
+    country="$(read_annotation mtr.ztelliot.dev/country country || true)"
+    region="$(read_annotation mtr.ztelliot.dev/region region || true)"
+    provider="$(read_annotation mtr.ztelliot.dev/provider provider || true)"
+    isp="$(read_annotation mtr.ztelliot.dev/isp isp || true)"
+    protocols="$(read_annotation mtr.ztelliot.dev/protocols protocols || true)"
+    hide_first_hops="$(read_annotation mtr.ztelliot.dev/hide-first-hops hide_first_hops || true)"
+    capabilities="$(read_annotation mtr.ztelliot.dev/capabilities capabilities || true)"
+    labels="$(read_annotation mtr.ztelliot.dev/labels labels || true)"
 
     country="$(value_or_default country "${country}" CN)"
     region="$(value_or_default region "${region}" k8s)"
@@ -153,9 +154,15 @@ data:
     protocols="$(value_or_default protocols "${protocols}" 3)"
     hide_first_hops="$(value_or_default hide_first_hops "${hide_first_hops}" 0)"
     if [ -n "${capabilities}" ]; then
-      log "capabilities: using node label value ${capabilities}"
+      log "capabilities: using node annotation value ${capabilities}"
     else
-      log "capabilities: node label missing, using fallback ping,traceroute,mtr,http,dns,port"
+      log "capabilities: node annotation missing, using fallback ping,traceroute,mtr,http,dns,port"
+    fi
+    if [ -n "${labels}" ]; then
+      log "labels: using node annotation value ${labels}"
+    else
+      labels="${country},${region},${provider},${isp}"
+      log "labels: node annotation missing, using fallback ${labels}"
     fi
 
     write_capabilities() {
@@ -180,6 +187,28 @@ data:
       fi
     }
 
+    write_labels() {
+      old_ifs="${IFS}"
+      IFS=","
+      seen_file="/tmp/mtr-agent-labels.seen"
+      : > "${seen_file}"
+      for label in ${labels}; do
+        label="$(printf '%s' "${label}" | xargs)"
+        case "${label}" in
+          ""|"agent"|id:*)
+            continue
+            ;;
+        esac
+        if grep -Fxq "${label}" "${seen_file}"; then
+          continue
+        fi
+        printf '%s\n' "${label}" >> "${seen_file}"
+        printf '  - %s\n' "${label}"
+      done
+      rm -f "${seen_file}"
+      IFS="${old_ifs}"
+    }
+
     cat > /work/agent.yaml <<EOF
     mode: "grpc"
     log_level: "info"
@@ -189,6 +218,10 @@ data:
     isp: "${isp}"
     protocols: ${protocols}
     hide_first_hops: ${hide_first_hops}
+    labels:
+    EOF
+    write_labels >> /work/agent.yaml
+    cat >> /work/agent.yaml <<EOF
     capabilities:
     EOF
     write_capabilities >> /work/agent.yaml

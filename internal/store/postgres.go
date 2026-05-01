@@ -132,6 +132,7 @@ var postgresSchemaStatements = []string{
   provider text not null default '',
   isp text not null default '',
   version text not null default '',
+  labels jsonb not null default '[]',
   token_hash text not null default '',
   capabilities jsonb not null default '[]',
   protocols integer not null default 3,
@@ -148,11 +149,11 @@ var postgresSchemaStatements = []string{
   target text not null,
   args jsonb not null default '{}',
   ip_version integer not null default 0,
-  agent_id text null references agents(id) on delete set null,
   resolve_on_agent boolean not null default false,
   interval_seconds integer not null,
   next_run_at timestamptz not null,
   last_run_at timestamptz null,
+  schedule_targets jsonb not null default '[]',
   created_at timestamptz not null,
   updated_at timestamptz not null
 )`,
@@ -195,8 +196,10 @@ var postgresSchemaStatements = []string{
   created_at timestamptz not null default now()
 )`,
 	`alter table agents add column if not exists version text not null default ''`,
+	`alter table agents add column if not exists labels jsonb not null default '[]'`,
 	`alter table scheduled_jobs add column if not exists revision integer not null default 1`,
 	`alter table scheduled_jobs add column if not exists resolve_on_agent boolean not null default false`,
+	`alter table scheduled_jobs add column if not exists schedule_targets jsonb not null default '[]'`,
 	`alter table jobs add column if not exists parent_id text null references jobs(id) on delete cascade`,
 	`alter table jobs add column if not exists scheduled_id text null references scheduled_jobs(id) on delete set null`,
 	`alter table jobs add column if not exists scheduled_revision integer not null default 0`,
@@ -417,24 +420,28 @@ func (p *Postgres) CreateScheduledJob(ctx context.Context, sched model.Scheduled
 	if err != nil {
 		return err
 	}
+	targets, err := marshalJSONBytes(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
 	_, err = p.pool.Exec(ctx, `
-		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, agent_id, resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at)
+		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion, nullable(sched.AgentID),
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, sched.CreatedAt, sched.UpdatedAt)
+		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
+		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.CreatedAt, sched.UpdatedAt)
 	return err
 }
 
 func (p *Postgres) GetScheduledJob(ctx context.Context, id string) (model.ScheduledJob, error) {
 	row := p.pool.QueryRow(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs where id=$1`, id)
 	return scanSchedule(row)
 }
 
 func (p *Postgres) ListScheduledJobs(ctx context.Context) ([]model.ScheduledJob, error) {
 	rows, err := p.pool.Query(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs order by created_at asc`)
 	if err != nil {
 		return nil, err
@@ -456,7 +463,7 @@ func (p *Postgres) ListDueScheduledJobs(ctx context.Context, now time.Time, limi
 		limit = 50
 	}
 	rows, err := p.pool.Query(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs
 		where enabled=true and next_run_at <= $1
 		order by next_run_at asc
@@ -481,6 +488,10 @@ func (p *Postgres) UpdateScheduledJob(ctx context.Context, sched model.Scheduled
 	if err != nil {
 		return err
 	}
+	targets, err := marshalJSONBytes(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
 	tag, err := p.pool.Exec(ctx, `
 		update scheduled_jobs
 		set revision=$2,
@@ -490,15 +501,15 @@ func (p *Postgres) UpdateScheduledJob(ctx context.Context, sched model.Scheduled
 		    target=$6,
 		    args=$7,
 		    ip_version=$8,
-		    agent_id=$9,
-		    resolve_on_agent=$10,
-		    interval_seconds=$11,
-		    next_run_at=$12,
-		    last_run_at=$13,
+		    resolve_on_agent=$9,
+		    interval_seconds=$10,
+		    next_run_at=$11,
+		    last_run_at=$12,
+		    schedule_targets=$13,
 		    updated_at=$14
 		where id=$1`,
-		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion, nullable(sched.AgentID),
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, sched.UpdatedAt)
+		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
+		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -519,10 +530,14 @@ func (p *Postgres) DeleteScheduledJob(ctx context.Context, id string) error {
 	return nil
 }
 
-func (p *Postgres) UpdateScheduledJobRun(ctx context.Context, id string, lastRunAt time.Time, nextRunAt time.Time) error {
-	_, err := p.pool.Exec(ctx, `
-		update scheduled_jobs set last_run_at=$2, next_run_at=$3, updated_at=$4 where id=$1`,
-		id, lastRunAt, nextRunAt, time.Now().UTC())
+func (p *Postgres) UpdateScheduledJobRun(ctx context.Context, sched model.ScheduledJob) error {
+	targets, err := marshalJSONBytes(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `
+		update scheduled_jobs set last_run_at=$2, next_run_at=$3, schedule_targets=$4, updated_at=$5 where id=$1`,
+		sched.ID, sched.LastRunAt, sched.NextRunAt, targets, time.Now().UTC())
 	return err
 }
 
@@ -580,25 +595,31 @@ func (p *Postgres) ListScheduledJobHistory(ctx context.Context, scheduleID strin
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, a model.Agent) error {
+	a.Labels = model.NormalizeAgentLabels(a.ID, a.Labels)
 	caps, err := marshalJSONBytes(a.Capabilities)
 	if err != nil {
 		return err
 	}
+	labels, err := marshalJSONBytes(a.Labels)
+	if err != nil {
+		return err
+	}
 	_, err = p.pool.Exec(ctx, `
-			insert into agents (id, country, region, provider, isp, version, token_hash, capabilities, protocols, status, last_seen_at, created_at)
-			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			insert into agents (id, country, region, provider, isp, version, labels, token_hash, capabilities, protocols, status, last_seen_at, created_at)
+			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			on conflict (id) do update set
 				country=excluded.country,
 				region=excluded.region,
 				provider=excluded.provider,
 				isp=excluded.isp,
 				version=excluded.version,
+				labels=excluded.labels,
 				token_hash=excluded.token_hash,
 				capabilities=excluded.capabilities,
 				protocols=excluded.protocols,
 				status=excluded.status,
 				last_seen_at=excluded.last_seen_at`,
-		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
+		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, labels, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
 	return err
 }
 
@@ -618,7 +639,7 @@ func (p *Postgres) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration
 }
 
 func (p *Postgres) ListAgents(ctx context.Context) ([]model.Agent, error) {
-	rows, err := p.pool.Query(ctx, `select id, country, region, provider, isp, coalesce(version,''), capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
+	rows, err := p.pool.Query(ctx, `select id, country, region, provider, isp, coalesce(version,''), labels, capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +648,11 @@ func (p *Postgres) ListAgents(ctx context.Context) ([]model.Agent, error) {
 	for rows.Next() {
 		var a model.Agent
 		var caps []byte
-		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+		var labels []byte
+		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &labels, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := unmarshalJSONBytes(labels, &a.Labels); err != nil {
 			return nil, err
 		}
 		if err := unmarshalJSONBytes(caps, &a.Capabilities); err != nil {
@@ -657,7 +682,8 @@ func scanJob(row pgx.Row) (model.Job, error) {
 func scanSchedule(row pgx.Row) (model.ScheduledJob, error) {
 	var sched model.ScheduledJob
 	var args []byte
-	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.AgentID, &sched.ResolveOnAgent, &sched.IntervalSeconds, &sched.NextRunAt, &sched.LastRunAt, &sched.CreatedAt, &sched.UpdatedAt)
+	var targets []byte
+	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.ResolveOnAgent, &sched.IntervalSeconds, &sched.NextRunAt, &sched.LastRunAt, &targets, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sched, ErrNotFound
 	}
@@ -665,6 +691,9 @@ func scanSchedule(row pgx.Row) (model.ScheduledJob, error) {
 		return sched, err
 	}
 	if err := unmarshalJSONBytes(args, &sched.Args); err != nil {
+		return sched, err
+	}
+	if err := unmarshalJSONBytes(targets, &sched.ScheduleTargets); err != nil {
 		return sched, err
 	}
 	return sched, nil

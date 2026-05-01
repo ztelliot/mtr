@@ -30,9 +30,10 @@ type Server struct {
 }
 
 type OutboundAgent struct {
-	ID        string `yaml:"id"`
-	BaseURL   string `yaml:"base_url"`
-	HTTPToken string `yaml:"http_token"`
+	ID        string   `yaml:"id"`
+	BaseURL   string   `yaml:"base_url"`
+	HTTPToken string   `yaml:"http_token"`
+	Labels    []string `yaml:"labels"`
 }
 
 type Agent struct {
@@ -43,6 +44,7 @@ type Agent struct {
 	Region         string    `yaml:"region"`
 	Provider       string    `yaml:"provider"`
 	ISP            string    `yaml:"isp"`
+	Labels         []string  `yaml:"labels"`
 	ServerAddr     string    `yaml:"server_addr"`
 	RegisterToken  string    `yaml:"register_token"`
 	HTTPToken      string    `yaml:"http_token"`

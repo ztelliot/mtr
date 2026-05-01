@@ -382,9 +382,12 @@ function pingTableMinWidth(hasIPv6: boolean, compact: boolean): number {
   return hasIPv6 ? 1490 : 1270;
 }
 
-function routeTableMinWidth(isTraceroute: boolean, hasIPv6: boolean, compact: boolean): number {
+function routeTableMinWidth(isTraceroute: boolean, hasIPv6: boolean, compact: boolean): string | number {
   if (isTraceroute) {
     return compact ? (hasIPv6 ? 520 : 390) : (hasIPv6 ? 700 : 540);
+  }
+  if (!hasIPv6 && !compact) {
+    return "100%";
   }
   return compact ? (hasIPv6 ? 820 : 650) : (hasIPv6 ? 1130 : 950);
 }

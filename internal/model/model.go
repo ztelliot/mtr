@@ -334,12 +334,52 @@ type Agent struct {
 	Provider     string       `json:"provider,omitempty"`
 	ISP          string       `json:"isp,omitempty"`
 	Version      string       `json:"version,omitempty"`
+	Labels       []string     `json:"labels,omitempty"`
 	TokenHash    string       `json:"-"`
 	Capabilities []Tool       `json:"capabilities"`
 	Protocols    ProtocolMask `json:"protocols"`
 	Status       AgentStatus  `json:"status"`
 	LastSeenAt   time.Time    `json:"last_seen_at"`
 	CreatedAt    time.Time    `json:"created_at"`
+}
+
+const (
+	AgentAllLabel      = "agent"
+	AgentIDLabelPrefix = "id:"
+)
+
+func AgentIDLabel(agentID string) string {
+	return AgentIDLabelPrefix + strings.TrimSpace(agentID)
+}
+
+func NormalizeAgentLabels(agentID string, labels []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(labels)+2)
+	add := func(label string) {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			return
+		}
+		if _, ok := seen[label]; ok {
+			return
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	add(AgentAllLabel)
+	add(AgentIDLabel(agentID))
+	for _, label := range labels {
+		if IsReservedAgentLabel(label) {
+			continue
+		}
+		add(label)
+	}
+	return out
+}
+
+func IsReservedAgentLabel(label string) bool {
+	label = strings.TrimSpace(label)
+	return label == AgentAllLabel || strings.HasPrefix(label, AgentIDLabelPrefix)
 }
 
 type CreateJobRequest struct {
@@ -351,6 +391,20 @@ type CreateJobRequest struct {
 	ResolveOnAgent bool              `json:"resolve_on_agent,omitempty"`
 }
 
+type ScheduleTarget struct {
+	ID              string     `json:"id,omitempty"`
+	Label           string     `json:"label"`
+	AllowedAgentIDs []string   `json:"allowed_agent_ids,omitempty"`
+	IntervalSeconds int        `json:"interval_seconds"`
+	NextRunAt       time.Time  `json:"next_run_at"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+}
+
+type ScheduleTargetRequest struct {
+	Label           string `json:"label"`
+	IntervalSeconds int    `json:"interval_seconds"`
+}
+
 type ScheduledJob struct {
 	ID              string            `json:"id"`
 	Revision        int               `json:"revision"`
@@ -360,23 +414,26 @@ type ScheduledJob struct {
 	Target          string            `json:"target"`
 	Args            map[string]string `json:"args,omitempty"`
 	IPVersion       IPVersion         `json:"ip_version,omitempty"`
-	AgentID         string            `json:"agent_id,omitempty"`
 	ResolveOnAgent  bool              `json:"resolve_on_agent,omitempty"`
 	IntervalSeconds int               `json:"interval_seconds"`
 	NextRunAt       time.Time         `json:"next_run_at"`
 	LastRunAt       *time.Time        `json:"last_run_at,omitempty"`
+	ScheduleTargets []ScheduleTarget  `json:"schedule_targets,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 type CreateScheduledJobRequest struct {
-	Name            string            `json:"name,omitempty"`
-	Enabled         *bool             `json:"enabled,omitempty"`
-	Tool            Tool              `json:"tool"`
-	Target          string            `json:"target"`
-	Args            map[string]string `json:"args,omitempty"`
-	IPVersion       IPVersion         `json:"ip_version,omitempty"`
-	AgentID         string            `json:"agent_id,omitempty"`
-	ResolveOnAgent  bool              `json:"resolve_on_agent,omitempty"`
-	IntervalSeconds int               `json:"interval_seconds"`
+	Name            string                  `json:"name,omitempty"`
+	Enabled         *bool                   `json:"enabled,omitempty"`
+	Tool            Tool                    `json:"tool"`
+	Target          string                  `json:"target"`
+	Args            map[string]string       `json:"args,omitempty"`
+	IPVersion       IPVersion               `json:"ip_version,omitempty"`
+	ResolveOnAgent  bool                    `json:"resolve_on_agent,omitempty"`
+	ScheduleTargets []ScheduleTargetRequest `json:"schedule_targets,omitempty"`
+}
+
+func (s ScheduledJob) EffectiveScheduleTargets() []ScheduleTarget {
+	return append([]ScheduleTarget(nil), s.ScheduleTargets...)
 }

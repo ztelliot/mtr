@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -484,7 +485,7 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 		t.Fatalf("permissions = %#v", perms)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","interval_seconds":60}`))
+	req = httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}`))
 	req.Header.Set("Authorization", "Bearer reader")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -493,7 +494,7 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 	}
 
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
-		req = httptest.NewRequest(method, "/v1/schedules/"+sched.ID, strings.NewReader(`{"tool":"ping","target":"1.1.1.1","interval_seconds":60}`))
+		req = httptest.NewRequest(method, "/v1/schedules/"+sched.ID, strings.NewReader(`{"tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}`))
 		req.Header.Set("Authorization", "Bearer reader")
 		rec = httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -528,6 +529,57 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 	}
 }
 
+func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC()
+	for _, agent := range []model.Agent{
+		{ID: "edge-1", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-2", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{
+		Token: "restricted",
+		Scope: TokenScope{
+			ScheduleAccess: ScheduleAccessWrite,
+			Agents:         []string{"edge-1"},
+			Tools:          map[model.Tool]ToolScope{model.ToolPing: {}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"schedule_targets":[{"label":"blue","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer restricted")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var sched model.ScheduledJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
+		t.Fatal(err)
+	}
+	if len(sched.ScheduleTargets) != 1 || sched.ScheduleTargets[0].Label != "blue" {
+		t.Fatalf("schedule targets = %#v", sched.ScheduleTargets)
+	}
+	if !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-1"}) {
+		t.Fatalf("allowed agents = %#v", sched.ScheduleTargets[0].AllowedAgentIDs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"schedule_targets":[{"label":"id:edge-1","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer restricted")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("explicit id target status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateScheduleAndHistory(t *testing.T) {
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
@@ -537,7 +589,7 @@ func TestCreateScheduleAndHistory(t *testing.T) {
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 	}), hub, "", slog.Default())
 
-	body := `{"tool":"ping","target":"1.1.1.1","args":{"count":"1"},"interval_seconds":30}`
+	body := `{"tool":"ping","target":"1.1.1.1","args":{"count":"1"},"schedule_targets":[{"label":"agent","interval_seconds":30}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -667,7 +719,7 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 	}), nil, "", slog.Default())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"interval_seconds":30}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"schedule_targets":[{"label":"agent","interval_seconds":30}]}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -678,7 +730,7 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"name":"edited","enabled":false,"tool":"ping","target":"8.8.8.8","args":{"protocol":"icmp"},"interval_seconds":120}`
+	body := `{"name":"edited","enabled":false,"tool":"ping","target":"8.8.8.8","args":{"protocol":"icmp"},"schedule_targets":[{"label":"agent","interval_seconds":120}]}`
 	req = httptest.NewRequest(http.MethodPut, "/v1/schedules/"+sched.ID, strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -715,7 +767,7 @@ func TestUpdateScheduleIntervalRefreshesNextRunWithoutBumpingRevision(t *testing
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 	}), nil, "", slog.Default())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"interval_seconds":30}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"schedule_targets":[{"label":"agent","interval_seconds":30}]}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -726,7 +778,7 @@ func TestUpdateScheduleIntervalRefreshesNextRunWithoutBumpingRevision(t *testing
 		t.Fatal(err)
 	}
 
-	body := `{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"interval_seconds":120}`
+	body := `{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"},"schedule_targets":[{"label":"agent","interval_seconds":120}]}`
 	req = httptest.NewRequest(http.MethodPut, "/v1/schedules/"+sched.ID, strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -748,50 +800,53 @@ func TestUpdateScheduleIntervalRefreshesNextRunWithoutBumpingRevision(t *testing
 	}
 }
 
-func TestCreateScheduleRejectsUnknownOrOfflinePinnedAgent(t *testing.T) {
-	ctx := context.Background()
+func TestCreateScheduleAcceptsLabelTargetsWithIntervals(t *testing.T) {
 	st := store.NewMemory()
-	now := time.Now().UTC()
-	if err := st.UpsertAgent(ctx, model.Agent{
-		ID:           "edge-offline",
-		Capabilities: []model.Tool{model.ToolPing},
-		Protocols:    model.ProtocolAll,
-		Status:       model.AgentOffline,
-		LastSeenAt:   now,
-		CreatedAt:    now,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
-	}), hub, "", slog.Default())
+	}), nil, "", slog.Default())
 
-	for _, tc := range []struct {
-		name  string
-		agent string
-		want  string
-	}{
-		{name: "unknown", agent: "missing-agent", want: "agent not found"},
-		{name: "offline", agent: "edge-offline", want: "agent is offline"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","agent_id":"`+tc.agent+`","resolve_on_agent":true,"interval_seconds":60}`))
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-			}
-			var response map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-				t.Fatal(err)
-			}
-			if response["error"] != tc.want {
-				t.Fatalf("error = %#v, want %q", response, tc.want)
-			}
-		})
+	body := `{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"schedule_targets":[{"label":"blue","interval_seconds":30},{"label":"red","interval_seconds":120}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var sched model.ScheduledJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
+		t.Fatal(err)
+	}
+	if sched.IntervalSeconds != 30 || len(sched.ScheduleTargets) != 2 {
+		t.Fatalf("unexpected schedule targets: %#v", sched)
+	}
+	if sched.ScheduleTargets[0].Label != "blue" || sched.ScheduleTargets[1].IntervalSeconds != 120 {
+		t.Fatalf("unexpected schedule target payload: %#v", sched.ScheduleTargets)
+	}
+}
+
+func TestCreateScheduleRejectsMissingTargets(t *testing.T) {
+	st := store.NewMemory()
+	policies := policy.DefaultPolicies()
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["error"] != "schedule_targets is required" {
+		t.Fatalf("error = %#v", response)
 	}
 }
 

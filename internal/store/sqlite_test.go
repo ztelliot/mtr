@@ -222,7 +222,9 @@ func TestSQLiteScheduledJobHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := now.Add(time.Minute)
-	if err := st.UpdateScheduledJobRun(ctx, "sched-1", now, next); err != nil {
+	sched.LastRunAt = &now
+	sched.NextRunAt = next
+	if err := st.UpdateScheduledJobRun(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := st.GetScheduledJob(ctx, "sched-1")

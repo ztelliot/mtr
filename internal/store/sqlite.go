@@ -269,24 +269,28 @@ func (s *SQLite) CreateScheduledJob(ctx context.Context, sched model.ScheduledJo
 	if err != nil {
 		return err
 	}
+	targets, err := marshalJSONString(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `
-		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, agent_id, resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at)
+		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at)
 		values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion, nullString(sched.AgentID),
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, sched.CreatedAt, sched.UpdatedAt)
+		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
+		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.CreatedAt, sched.UpdatedAt)
 	return err
 }
 
 func (s *SQLite) GetScheduledJob(ctx context.Context, id string) (model.ScheduledJob, error) {
 	row := s.db.QueryRowContext(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs where id=?`, id)
 	return scanSQLiteSchedule(row)
 }
 
 func (s *SQLite) ListScheduledJobs(ctx context.Context) ([]model.ScheduledJob, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs order by created_at asc`)
 	if err != nil {
 		return nil, err
@@ -308,7 +312,7 @@ func (s *SQLite) ListDueScheduledJobs(ctx context.Context, now time.Time, limit 
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, coalesce(agent_id,''), resolve_on_agent, interval_seconds, next_run_at, last_run_at, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs
 		where enabled=1 and next_run_at <= ?
 		order by next_run_at asc
@@ -333,6 +337,10 @@ func (s *SQLite) UpdateScheduledJob(ctx context.Context, sched model.ScheduledJo
 	if err != nil {
 		return err
 	}
+	targets, err := marshalJSONString(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		update scheduled_jobs
 		set revision=?,
@@ -342,15 +350,15 @@ func (s *SQLite) UpdateScheduledJob(ctx context.Context, sched model.ScheduledJo
 		    target=?,
 		    args=?,
 		    ip_version=?,
-		    agent_id=?,
 		    resolve_on_agent=?,
 		    interval_seconds=?,
 		    next_run_at=?,
 		    last_run_at=?,
+		    schedule_targets=?,
 		    updated_at=?
 		where id=?`,
-		sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion, nullString(sched.AgentID),
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, sched.UpdatedAt, sched.ID)
+		sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
+		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.UpdatedAt, sched.ID)
 	if err != nil {
 		return err
 	}
@@ -379,10 +387,14 @@ func (s *SQLite) DeleteScheduledJob(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *SQLite) UpdateScheduledJobRun(ctx context.Context, id string, lastRunAt time.Time, nextRunAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		update scheduled_jobs set last_run_at=?, next_run_at=?, updated_at=? where id=?`,
-		lastRunAt, nextRunAt, time.Now().UTC(), id)
+func (s *SQLite) UpdateScheduledJobRun(ctx context.Context, sched model.ScheduledJob) error {
+	targets, err := marshalJSONString(sched.ScheduleTargets)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		update scheduled_jobs set last_run_at=?, next_run_at=?, schedule_targets=?, updated_at=? where id=?`,
+		sched.LastRunAt, sched.NextRunAt, targets, time.Now().UTC(), sched.ID)
 	return err
 }
 
@@ -446,25 +458,31 @@ func (s *SQLite) ListScheduledJobHistory(ctx context.Context, scheduleID string,
 }
 
 func (s *SQLite) UpsertAgent(ctx context.Context, a model.Agent) error {
+	a.Labels = model.NormalizeAgentLabels(a.ID, a.Labels)
 	caps, err := marshalJSONString(a.Capabilities)
 	if err != nil {
 		return err
 	}
+	labels, err := marshalJSONString(a.Labels)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `
-			insert into agents (id, country, region, provider, isp, version, token_hash, capabilities, protocols, status, last_seen_at, created_at)
-			values (?,?,?,?,?,?,?,?,?,?,?,?)
+			insert into agents (id, country, region, provider, isp, version, labels, token_hash, capabilities, protocols, status, last_seen_at, created_at)
+			values (?,?,?,?,?,?,?,?,?,?,?,?,?)
 			on conflict (id) do update set
 				country=excluded.country,
 				region=excluded.region,
 				provider=excluded.provider,
 				isp=excluded.isp,
 				version=excluded.version,
+				labels=excluded.labels,
 				token_hash=excluded.token_hash,
 				capabilities=excluded.capabilities,
 				protocols=excluded.protocols,
 				status=excluded.status,
 				last_seen_at=excluded.last_seen_at`,
-		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
+		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, labels, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
 	return err
 }
 
@@ -487,7 +505,7 @@ func (s *SQLite) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration) 
 }
 
 func (s *SQLite) ListAgents(ctx context.Context) ([]model.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, country, region, provider, isp, coalesce(version,''), capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
+	rows, err := s.db.QueryContext(ctx, `select id, country, region, provider, isp, coalesce(version,''), labels, capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +514,11 @@ func (s *SQLite) ListAgents(ctx context.Context) ([]model.Agent, error) {
 	for rows.Next() {
 		var a model.Agent
 		var caps string
-		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+		var labels string
+		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &labels, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := unmarshalJSONString(labels, &a.Labels); err != nil {
 			return nil, err
 		}
 		if err := unmarshalJSONString(caps, &a.Capabilities); err != nil {
@@ -538,8 +560,9 @@ func scanSQLiteJob(row sqliteScanner) (model.Job, error) {
 func scanSQLiteSchedule(row sqliteScanner) (model.ScheduledJob, error) {
 	var sched model.ScheduledJob
 	var args string
+	var targets string
 	var lastRunAt sql.NullTime
-	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.AgentID, &sched.ResolveOnAgent, &sched.IntervalSeconds, &sched.NextRunAt, &lastRunAt, &sched.CreatedAt, &sched.UpdatedAt)
+	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.ResolveOnAgent, &sched.IntervalSeconds, &sched.NextRunAt, &lastRunAt, &targets, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sched, ErrNotFound
 	}
@@ -550,6 +573,9 @@ func scanSQLiteSchedule(row sqliteScanner) (model.ScheduledJob, error) {
 		sched.LastRunAt = &lastRunAt.Time
 	}
 	if err := unmarshalJSONString(args, &sched.Args); err != nil {
+		return sched, err
+	}
+	if err := unmarshalJSONString(targets, &sched.ScheduleTargets); err != nil {
 		return sched, err
 	}
 	return sched, nil
@@ -591,6 +617,7 @@ create table if not exists agents (
   provider text not null default '',
   isp text not null default '',
   version text not null default '',
+  labels text not null default '[]',
   token_hash text not null default '',
   capabilities text not null default '[]',
   protocols integer not null default 3,
@@ -633,11 +660,11 @@ create table if not exists scheduled_jobs (
   target text not null,
   args text not null default '{}',
   ip_version integer not null default 0,
-  agent_id text null references agents(id) on delete set null,
   resolve_on_agent integer not null default 0,
   interval_seconds integer not null,
   next_run_at timestamp not null,
   last_run_at timestamp null,
+  schedule_targets text not null default '[]',
   created_at timestamp not null,
   updated_at timestamp not null
 );
@@ -675,7 +702,9 @@ create table if not exists audit_events (
 	_, _ = db.ExecContext(ctx, `alter table jobs add column resolve_on_agent integer not null default 0`)
 	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column resolve_on_agent integer not null default 0`)
 	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column revision integer not null default 1`)
+	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column schedule_targets text not null default '[]'`)
 	_, _ = db.ExecContext(ctx, `alter table agents add column version text not null default ''`)
+	_, _ = db.ExecContext(ctx, `alter table agents add column labels text not null default '[]'`)
 	_, _ = db.ExecContext(ctx, `create index if not exists idx_jobs_scheduled on jobs (scheduled_id, scheduled_revision, created_at)`)
 	_, _ = db.ExecContext(ctx, `create index if not exists idx_jobs_parent on jobs (parent_id, created_at)`)
 	_, _ = db.ExecContext(ctx, `alter table job_events add column event text null`)

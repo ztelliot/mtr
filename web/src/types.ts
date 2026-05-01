@@ -77,13 +77,22 @@ export interface ScheduledJob {
   target: string;
   args?: Record<string, string>;
   ip_version?: IPVersion;
-  agent_id?: string;
   resolve_on_agent?: boolean;
   interval_seconds: number;
   next_run_at: string;
   last_run_at?: string;
+  schedule_targets?: ScheduleTarget[];
   created_at: string;
   updated_at: string;
+}
+
+export interface ScheduleTarget {
+  id?: string;
+  label: string;
+  allowed_agent_ids?: string[];
+  interval_seconds: number;
+  next_run_at: string;
+  last_run_at?: string;
 }
 
 export interface CreateScheduledJobRequest {
@@ -93,8 +102,12 @@ export interface CreateScheduledJobRequest {
   target: string;
   args?: Record<string, string>;
   ip_version?: IPVersion;
-  agent_id?: string;
   resolve_on_agent?: boolean;
+  schedule_targets?: ScheduleTargetRequest[];
+}
+
+export interface ScheduleTargetRequest {
+  label: string;
   interval_seconds: number;
 }
 
@@ -106,6 +119,7 @@ export interface Agent {
   provider?: string;
   isp?: string;
   version?: string;
+  labels?: string[];
   capabilities: Tool[];
   protocols: number;
   status: AgentStatus;

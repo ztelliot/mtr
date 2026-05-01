@@ -236,17 +236,18 @@ func (m *Memory) DeleteScheduledJob(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *Memory) UpdateScheduledJobRun(_ context.Context, id string, lastRunAt time.Time, nextRunAt time.Time) error {
+func (m *Memory) UpdateScheduledJobRun(_ context.Context, s model.ScheduledJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.schedules[id]
+	existing, ok := m.schedules[s.ID]
 	if !ok {
 		return ErrNotFound
 	}
-	s.LastRunAt = &lastRunAt
-	s.NextRunAt = nextRunAt
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = existing.CreatedAt
+	}
 	s.UpdatedAt = time.Now().UTC()
-	m.schedules[id] = s
+	m.schedules[s.ID] = s
 	return nil
 }
 
@@ -288,6 +289,7 @@ func (m *Memory) UpsertAgent(_ context.Context, a model.Agent) error {
 	if old, ok := m.agents[a.ID]; ok {
 		a.CreatedAt = old.CreatedAt
 	}
+	a.Labels = model.NormalizeAgentLabels(a.ID, a.Labels)
 	m.agents[a.ID] = a
 	return nil
 }

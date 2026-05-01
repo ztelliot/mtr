@@ -24,7 +24,7 @@ type Store interface {
 	ListDueScheduledJobs(context.Context, time.Time, int) ([]model.ScheduledJob, error)
 	UpdateScheduledJob(context.Context, model.ScheduledJob) error
 	DeleteScheduledJob(context.Context, string) error
-	UpdateScheduledJobRun(context.Context, string, time.Time, time.Time) error
+	UpdateScheduledJobRun(context.Context, model.ScheduledJob) error
 	ListScheduledJobHistory(context.Context, string, ScheduledJobHistoryFilter) ([]model.Job, error)
 	UpsertAgent(context.Context, model.Agent) error
 	TouchAgent(context.Context, string) error

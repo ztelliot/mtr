@@ -69,6 +69,148 @@ func TestFailTimedOutQueuedJobPublishesFailure(t *testing.T) {
 	}
 }
 
+func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	for _, agent := range []model.Agent{
+		{ID: "edge-blue", Labels: []string{"blue", "red"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-red", Labels: []string{"red"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-green", Labels: []string{"green"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sched := model.ScheduledJob{
+		ID:             "sched-labels",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		ResolveOnAgent: true,
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		ScheduleTargets: []model.ScheduleTarget{
+			{ID: "blue", Label: "blue", IntervalSeconds: 30, NextRunAt: now},
+			{ID: "red", Label: "red", IntervalSeconds: 60, NextRunAt: now},
+		},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+
+	hub.runDueSchedules(ctx)
+
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotAgents := map[string]bool{}
+	for _, job := range jobs {
+		gotAgents[job.AgentID] = true
+	}
+	if len(jobs) != 2 || !gotAgents["edge-blue"] || !gotAgents["edge-red"] {
+		t.Fatalf("scheduled label jobs = %#v", jobs)
+	}
+	loaded, err := st.GetScheduledJob(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LastRunAt == nil || len(loaded.ScheduleTargets) != 2 {
+		t.Fatalf("schedule targets not updated: %#v", loaded)
+	}
+	for _, target := range loaded.ScheduleTargets {
+		if target.LastRunAt == nil || !target.NextRunAt.After(*target.LastRunAt) {
+			t.Fatalf("target run state not advanced: %#v", target)
+		}
+	}
+}
+
+func TestScheduledIDLabelsCannotBeInjectedByAgentLabels(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	for _, agent := range []model.Agent{
+		{ID: "edge-real", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-spoof", Labels: []string{model.AgentIDLabel("edge-real")}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sched := model.ScheduledJob{
+		ID:        "sched-id-label",
+		Revision:  1,
+		Enabled:   true,
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		NextRunAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
+		ScheduleTargets: []model.ScheduleTarget{
+			{ID: "target-real", Label: model.AgentIDLabel("edge-real"), IntervalSeconds: 30, NextRunAt: now},
+		},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+
+	hub.runDueSchedules(ctx)
+
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].AgentID != "edge-real" {
+		t.Fatalf("scheduled id label jobs = %#v", jobs)
+	}
+}
+
+func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	for _, agent := range []model.Agent{
+		{ID: "edge-allowed", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-denied", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sched := model.ScheduledJob{
+		ID:        "sched-allowed-scope",
+		Revision:  1,
+		Enabled:   true,
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		NextRunAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
+		ScheduleTargets: []model.ScheduleTarget{
+			{ID: "target-blue", Label: "blue", AllowedAgentIDs: []string{"edge-allowed"}, IntervalSeconds: 30, NextRunAt: now},
+		},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+
+	hub.runDueSchedules(ctx)
+
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].AgentID != "edge-allowed" {
+		t.Fatalf("scheduled scoped label jobs = %#v", jobs)
+	}
+}
+
 func TestFailTimedOutJobsDefersFanoutParentToChildren(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

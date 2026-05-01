@@ -131,13 +131,13 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		return
 	}
 	for _, sched := range schedules {
-		interval := time.Duration(sched.IntervalSeconds) * time.Second
-		nextRun := now.Add(interval)
-		if candidate := sched.NextRunAt.Add(interval); candidate.After(now) {
-			nextRun = candidate
+		dueTargets := dueScheduleTargets(sched, now)
+		if len(dueTargets) == 0 {
+			continue
 		}
 		if _, ok := h.policies.Get(sched.Tool); !ok {
-			_ = h.store.UpdateScheduledJobRun(ctx, sched.ID, now, nextRun)
+			advanceScheduleTargets(&sched, dueTargets, now)
+			_ = h.store.UpdateScheduledJobRun(ctx, sched)
 			h.log.Debug("skip scheduled job with disabled tool", "schedule_id", sched.ID, "tool", sched.Tool)
 			continue
 		}
@@ -149,7 +149,6 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 			Target:            sched.Target,
 			Args:              h.policies.ServerArgs(sched.Tool, sched.Args),
 			IPVersion:         sched.IPVersion,
-			AgentID:           sched.AgentID,
 			ResolveOnAgent:    sched.ResolveOnAgent,
 			Status:            model.JobQueued,
 			CreatedAt:         now,
@@ -158,7 +157,8 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		if sched.ResolveOnAgent {
 			literalVersion, literal, err := policy.LiteralIPVersion(sched.Tool, sched.Target)
 			if err != nil {
-				_ = h.store.UpdateScheduledJobRun(ctx, sched.ID, now, nextRun)
+				advanceScheduleTargets(&sched, dueTargets, now)
+				_ = h.store.UpdateScheduledJobRun(ctx, sched)
 				h.log.Warn("infer scheduled job target version", "schedule_id", sched.ID, "target", sched.Target, "err", err)
 				continue
 			}
@@ -168,7 +168,8 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		} else if sched.Tool != model.ToolDNS {
 			resolvedTarget, resolvedVersion, err := h.policies.ResolveTarget(ctx, sched.Tool, sched.Target, sched.IPVersion)
 			if err != nil {
-				_ = h.store.UpdateScheduledJobRun(ctx, sched.ID, now, nextRun)
+				advanceScheduleTargets(&sched, dueTargets, now)
+				_ = h.store.UpdateScheduledJobRun(ctx, sched)
 				h.log.Warn("resolve scheduled job target", "schedule_id", sched.ID, "target", sched.Target, "err", err)
 				continue
 			}
@@ -177,52 +178,141 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 				job.IPVersion = resolvedVersion
 			}
 		}
-		agentIDs, err := h.scheduledRunAgentIDs(ctx, sched, job.IPVersion)
-		if err != nil {
-			h.log.Warn("list scheduled run agents", "schedule_id", sched.ID, "err", err)
-			continue
-		}
-		if len(agentIDs) == 0 {
-			_ = h.store.UpdateScheduledJobRun(ctx, sched.ID, now, nextRun)
-			h.log.Warn("skip scheduled fanout with no matching online agents", "schedule_id", sched.ID, "tool", sched.Tool)
-			continue
-		}
-		runs := make([]model.Job, 0, len(agentIDs))
-		for _, agentID := range agentIDs {
-			run := job
-			run.ID = uuid.NewString()
-			run.AgentID = agentID
-			runs = append(runs, run)
+		seenAgentIDs := map[string]struct{}{}
+		runs := make([]model.Job, 0)
+		for _, target := range dueTargets {
+			agentIDs, err := h.scheduledRunAgentIDs(ctx, sched, target, job.IPVersion)
+			if err != nil {
+				h.log.Warn("list scheduled run agents", "schedule_id", sched.ID, "schedule_target_label", target.Label, "err", err)
+				continue
+			}
+			for _, agentID := range agentIDs {
+				if _, ok := seenAgentIDs[agentID]; ok {
+					continue
+				}
+				seenAgentIDs[agentID] = struct{}{}
+				run := job
+				run.ID = uuid.NewString()
+				run.AgentID = agentID
+				runs = append(runs, run)
+			}
 		}
 		if len(runs) == 0 {
+			advanceScheduleTargets(&sched, dueTargets, now)
+			_ = h.store.UpdateScheduledJobRun(ctx, sched)
+			h.log.Warn("skip scheduled fanout with no matching online agents", "schedule_id", sched.ID, "tool", sched.Tool)
 			continue
 		}
 		if err := h.store.CreateJobs(ctx, runs); err != nil {
 			h.log.Warn("create scheduled job runs", "schedule_id", sched.ID, "runs", len(runs), "err", err)
 			continue
 		}
-		if err := h.store.UpdateScheduledJobRun(ctx, sched.ID, now, nextRun); err != nil {
+		advanceScheduleTargets(&sched, dueTargets, now)
+		if err := h.store.UpdateScheduledJobRun(ctx, sched); err != nil {
 			h.log.Warn("update scheduled job run", "schedule_id", sched.ID, "err", err)
 		}
-		h.log.Debug("scheduled job queued", "schedule_id", sched.ID, "runs", len(runs), "next_run_at", nextRun)
+		h.log.Debug("scheduled job queued", "schedule_id", sched.ID, "runs", len(runs), "next_run_at", sched.NextRunAt)
 	}
 }
 
-func (h *Hub) scheduledRunAgentIDs(ctx context.Context, sched model.ScheduledJob, version model.IPVersion) ([]string, error) {
-	if strings.TrimSpace(sched.AgentID) != "" {
-		return []string{strings.TrimSpace(sched.AgentID)}, nil
+func dueScheduleTargets(sched model.ScheduledJob, now time.Time) []model.ScheduleTarget {
+	targets := sched.EffectiveScheduleTargets()
+	out := make([]model.ScheduleTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.NextRunAt.IsZero() || !target.NextRunAt.After(now) {
+			out = append(out, target)
+		}
 	}
+	return out
+}
+
+func advanceScheduleTargets(sched *model.ScheduledJob, dueTargets []model.ScheduleTarget, now time.Time) {
+	dueByID := map[string]model.ScheduleTarget{}
+	for _, target := range dueTargets {
+		dueByID[target.ID] = target
+	}
+	for i := range sched.ScheduleTargets {
+		if _, ok := dueByID[sched.ScheduleTargets[i].ID]; !ok {
+			continue
+		}
+		nextRun := nextScheduleTargetRun(sched.ScheduleTargets[i], now)
+		sched.ScheduleTargets[i].LastRunAt = &now
+		sched.ScheduleTargets[i].NextRunAt = nextRun
+	}
+	syncScheduleAggregateRunFields(sched)
+	sched.UpdatedAt = now
+}
+
+func nextScheduleTargetRun(target model.ScheduleTarget, now time.Time) time.Time {
+	interval := time.Duration(target.IntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = time.Duration(10) * time.Second
+	}
+	nextRun := now.Add(interval)
+	if candidate := target.NextRunAt.Add(interval); candidate.After(now) {
+		nextRun = candidate
+	}
+	return nextRun
+}
+
+func syncScheduleAggregateRunFields(sched *model.ScheduledJob) {
+	if len(sched.ScheduleTargets) == 0 {
+		return
+	}
+	nextRun := sched.ScheduleTargets[0].NextRunAt
+	var lastRunAt *time.Time
+	for _, target := range sched.ScheduleTargets {
+		if target.NextRunAt.Before(nextRun) {
+			nextRun = target.NextRunAt
+		}
+		if target.LastRunAt != nil && (lastRunAt == nil || target.LastRunAt.After(*lastRunAt)) {
+			t := *target.LastRunAt
+			lastRunAt = &t
+		}
+	}
+	sched.NextRunAt = nextRun
+	sched.LastRunAt = lastRunAt
+}
+
+func (h *Hub) scheduledRunAgentIDs(ctx context.Context, sched model.ScheduledJob, target model.ScheduleTarget, version model.IPVersion) ([]string, error) {
 	agents, err := h.store.ListAgents(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(agents))
 	for _, agent := range agents {
+		if !scheduledTargetMatchesAgent(target, agent) {
+			continue
+		}
+		if !scheduledTargetAllowsAgent(target, agent.ID) {
+			continue
+		}
 		if policy.AgentSupports(agent, sched.Tool, version) {
 			ids = append(ids, agent.ID)
 		}
 	}
 	return ids, nil
+}
+
+func scheduledTargetAllowsAgent(target model.ScheduleTarget, agentID string) bool {
+	if len(target.AllowedAgentIDs) == 0 {
+		return true
+	}
+	for _, allowed := range target.AllowedAgentIDs {
+		if allowed == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func scheduledTargetMatchesAgent(target model.ScheduleTarget, agent model.Agent) bool {
+	for _, label := range agent.Labels {
+		if strings.TrimSpace(label) == strings.TrimSpace(target.Label) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
@@ -244,6 +334,7 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 		Provider:     hello.Provider,
 		ISP:          hello.ISP,
 		Version:      hello.Version,
+		Labels:       hello.Labels,
 		TokenHash:    hashToken(hello.Token),
 		Capabilities: hello.Capabilities,
 		Protocols:    hello.Protocols,

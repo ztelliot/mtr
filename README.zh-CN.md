@@ -148,8 +148,15 @@ Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent:
 curl -X POST http://localhost:8080/v1/schedules \
   -H 'Authorization: Bearer developer-token' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","interval_seconds":60}'
+  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}'
 ```
+
+计划任务通过 `schedule_targets` 选择节点。每个 Agent 都会自动获得服务端管理的
+`agent` 标签和 `id:<agent-id>` 标签；自定义标签来自 Agent 配置、outbound Agent
+配置或部署生成器。`agent` 表示全部节点，自定义标签表示节点组，`id:<agent-id>`
+表示单个节点。每个 target 都可以设置自己的 interval。带固定 Agent allowlist 的
+API token 也可以使用组标签；服务端会把 allowlist 固化到 schedule target 上，运行时跳过
+不在 token scope 内的匹配 Agent。
 
 查询计划任务历史：
 
@@ -251,33 +258,38 @@ kubectl -n mtr port-forward svc/mtr-web 8081:80
 `apiBaseUrl` 设置为 `http://localhost:8080`；或者在两个服务前放置 Ingress
 或网关，将 `/v1` 路由到 `mtr-server`，将 `/` 路由到 `mtr-web`。
 
-`deploy/agent.yaml` DaemonSet 可以从 Kubernetes Node labels 生成每个节点的
+`deploy/agent.yaml` DaemonSet 可以从 Kubernetes Node annotations 生成每个节点的
 Agent 元数据，但这个逻辑只在部署层完成，Agent 二进制本身并不知道 Kubernetes。
-示例使用 initContainer 读取当前 Node 的 labels，把普通的 `agent.yaml` 渲染到
+示例使用 initContainer 读取当前 Node 的 annotations，把普通的 `agent.yaml` 渲染到
 `emptyDir`，主容器再读取这个生成后的配置文件。ServiceAccount 只需要给
 initContainer 使用的只读 `get nodes` 权限。initContainer 通过 manifest 中显式配置的
 `MTR_KUBERNETES_API_SERVER` 访问 apiserver；如果集群的 Kubernetes Service IP 不是
-`https://10.96.0.1:443`，请修改这个环境变量。默认映射这些 labels：
+`https://10.96.0.1:443`，请修改这个环境变量。默认映射这些 annotations：
 
 ```sh
-kubectl label node <node> \
+kubectl annotate node <node> \
   mtr.ztelliot.dev/country=JP \
-  mtr.ztelliot.dev/region=tokyo \
+  mtr.ztelliot.dev/region='Tokyo East' \
   mtr.ztelliot.dev/provider=kubernetes \
   mtr.ztelliot.dev/isp=example-net \
   mtr.ztelliot.dev/protocols=3 \
   mtr.ztelliot.dev/hide-first-hops=0 \
+  mtr.ztelliot.dev/labels=Kubernetes,AS,AS-East \
   mtr.ztelliot.dev/capabilities=ping,traceroute,mtr,http,dns,port
 ```
 
-如果集群已经有自己的 label 命名，可修改 `mtr-agent-config` 里的
-`render-agent-config.sh`。`protocols` 使用和 Agent 配置相同的位掩码：
-`1` 表示 IPv4，`2` 表示 IPv6，`3` 表示同时支持两者。`capabilities`
-是逗号分隔的工具列表。缺少 label 时，initContainer 会把 fallback 值写入生成后的配置文件。
+如果集群已经有自己的 annotation 命名，可修改 `mtr-agent-config` 里的
+`render-agent-config.sh`。`labels` 是逗号分隔的计划任务选择器；如果省略，
+initContainer 会回退为 `country`、`region`、`provider`、`isp`。`agent` 和
+`id:*` 是服务端保留标签，Agent 自行上报这些值会被忽略。`protocols` 使用和 Agent
+配置相同的位掩码：`1` 表示 IPv4，`2` 表示 IPv6，`3` 表示同时支持两者。
+`capabilities` 是逗号分隔的工具列表。缺少 annotation 时，initContainer 会把 fallback
+值写入生成后的配置文件。
 
 工作台可以创建 `ping`、`traceroute`、`mtr`、`http` 和 `dns` 任务，列出 Agent，
-并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。`traceroute` 和 `mtr`
-需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`。
+并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。临时 `traceroute` 和
+`mtr` 任务需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`；计划任务则使用
+`schedule_targets` 标签选择节点，而不是单个 `agent_id`。
 
 ## Agent/Server mTLS 证书
 
@@ -553,7 +565,7 @@ Agent 的权限在清单里被刻意压到很窄：
 
 之所以保留 `NET_RAW`，是因为当前 `ping`、`traceroute`、`mtr` 的 ICMP 实现需要原始 socket。Agent 主容器使用 UID 0 运行，以便 `NET_RAW` 能进入 permitted/effective capability sets；但它不是 privileged，且仍然丢弃除 `NET_RAW` 之外的全部 capabilities。若你的集群启用了严格的 Pod Security Admission，需要为这个 Agent securityContext 显式放行。Agent 启动时会打印 `CapEff`、`CapBnd`、`NoNewPrivs` 和 `Seccomp`，便于确认实际权限。
 
-DaemonSet 示例额外包含一条很窄的 RBAC：initContainer 需要 `get nodes`，用于从 Node labels 渲染每个节点的配置。生成后的配置写入 `emptyDir`，主 Agent 容器随后在不挂载 ServiceAccount Token 的情况下运行。
+DaemonSet 示例额外包含一条很窄的 RBAC：initContainer 需要 `get nodes`，用于从 Node annotations 渲染每个节点的配置。生成后的配置写入 `emptyDir`，主 Agent 容器随后在不挂载 ServiceAccount Token 的情况下运行。
 
 这套清单没有附带“默认拒绝 egress”的标准 `NetworkPolicy`。原因是 Agent 的核心职责就是对任意外部目标发起探测，而标准 Kubernetes `NetworkPolicy` 对 ICMP 的表达能力有限；如果你的 CNI 支持更细粒度的 ICMP/egress 规则，建议在该能力之上进一步收紧。
 

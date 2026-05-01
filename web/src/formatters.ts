@@ -54,7 +54,7 @@ export function formatDateTime(value?: string): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  return date.toLocaleString(undefined, { hour12: false });
 }
 
 export function formatHistoryDateTime(value?: string): string {
@@ -68,6 +68,7 @@ export function formatHistoryDateTime(value?: string): string {
   return date.toLocaleString(undefined, {
     day: "2-digit",
     hour: "2-digit",
+    hour12: false,
     minute: "2-digit",
     month: "2-digit",
     second: "2-digit"
@@ -79,7 +80,7 @@ export function formatShortDateTime(value: number): string {
   if (Number.isNaN(date.getTime())) {
     return "-";
   }
-  return date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false, minute: "2-digit" });
 }
 
 export function formatInterval(seconds: number): string {

@@ -147,8 +147,16 @@ Create a scheduled detection task:
 curl -X POST http://localhost:8080/v1/schedules \
   -H 'Authorization: Bearer developer-token' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","interval_seconds":60}'
+  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}'
 ```
+
+Scheduled jobs select nodes with `schedule_targets`. Every Agent gets the
+server-managed `agent` label plus `id:<agent-id>`; custom labels come from Agent
+config, outbound Agent config, or deployment generators. Use `agent` for all
+nodes, a custom label for a group, or `id:<agent-id>` for one node. Each target
+can carry its own interval. API tokens with a fixed Agent allowlist may still
+use group labels; the server stores that allowlist on the schedule target and
+skips matching Agents outside the token scope when the schedule runs.
 
 Query scheduled task history:
 
@@ -255,36 +263,41 @@ or gateway in front of both services and route `/v1` to `mtr-server` and `/` to
 `mtr-web`.
 
 The `deploy/agent.yaml` DaemonSet can derive per-node Agent metadata from
-Kubernetes Node labels without teaching the Agent binary about Kubernetes. An
-init container reads the current Node labels, renders a normal `agent.yaml` into
-an `emptyDir`, and the Agent container starts with that generated config. The
-ServiceAccount only needs read-only `get nodes` permission for the init
-container. The init container talks to the apiserver via the explicit
-`MTR_KUBERNETES_API_SERVER` env in the manifest, so adjust it if your cluster's
-Kubernetes Service IP is not `https://10.96.0.1:443`. The example maps these
-labels by default:
+Kubernetes Node annotations without teaching the Agent binary about Kubernetes.
+An init container reads the current Node annotations, renders a normal
+`agent.yaml` into an `emptyDir`, and the Agent container starts with that
+generated config. The ServiceAccount only needs read-only `get nodes` permission
+for the init container. The init container talks to the apiserver via the
+explicit `MTR_KUBERNETES_API_SERVER` env in the manifest, so adjust it if your
+cluster's Kubernetes Service IP is not `https://10.96.0.1:443`. The example maps
+these annotations by default:
 
 ```sh
-kubectl label node <node> \
+kubectl annotate node <node> \
   mtr.ztelliot.dev/country=JP \
-  mtr.ztelliot.dev/region=tokyo \
+  mtr.ztelliot.dev/region='Tokyo East' \
   mtr.ztelliot.dev/provider=kubernetes \
   mtr.ztelliot.dev/isp=example-net \
   mtr.ztelliot.dev/protocols=3 \
   mtr.ztelliot.dev/hide-first-hops=0 \
+  mtr.ztelliot.dev/labels=Kubernetes,AS,AS-East \
   mtr.ztelliot.dev/capabilities=ping,traceroute,mtr,http,dns,port
 ```
 
 Change `render-agent-config.sh` in `mtr-agent-config` if your cluster already
-uses different label names. `protocols` uses the same bitmask as Agent config:
-`1` for IPv4, `2` for IPv6, and `3` for both. `capabilities` is a
-comma-separated tool list. If a label is missing, the init container writes the
-fallback value into the generated config.
+uses different annotation names. `labels` is a comma-separated schedule selector
+list; if omitted, the init container falls back to `country`, `region`,
+`provider`, and `isp`. The server owns the reserved `agent` and `id:*` labels
+and ignores those values when supplied by an Agent. `protocols` uses the same
+bitmask as Agent config: `1` for IPv4, `2` for IPv6, and `3` for both.
+`capabilities` is a comma-separated tool list. If an annotation is missing, the
+init container writes the fallback value into the generated config.
 
 The workbench can create `ping`, `traceroute`, `mtr`, `http`, and `dns` jobs,
 list Agents, and stream structured job events from `/v1/jobs/<job-id>/stream`.
-`traceroute` and `mtr` require an explicit Agent selection because the server
-requires `agent_id` for those tools.
+Ad-hoc `traceroute` and `mtr` jobs require an explicit Agent selection because
+the server requires `agent_id` for those tools. Scheduled jobs use
+`schedule_targets` labels instead of a single `agent_id`.
 
 ## Agent/Server mTLS
 
@@ -612,8 +625,8 @@ explicit exception for this Agent security context. The Agent logs `CapEff`,
 privileges visible.
 
 The DaemonSet example has one narrow RBAC rule for the init container that
-renders per-node config from Node labels: `get nodes`. The generated config is
-written to an `emptyDir`; the main Agent container then runs without the
+renders per-node config from Node annotations: `get nodes`. The generated config
+is written to an `emptyDir`; the main Agent container then runs without the
 ServiceAccount token mounted.
 
 The baseline does not include a default-deny egress `NetworkPolicy`. The Agent

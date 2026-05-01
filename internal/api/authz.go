@@ -174,19 +174,35 @@ func effectiveScheduleAccess(scope TokenScope) ScheduleAccess {
 }
 
 func scopeAllowsAgent(scope TokenScope, agentID string) bool {
-	if scope.All || len(scope.Agents) == 0 {
+	if scopeAllowsAllAgents(scope) {
 		return true
 	}
 	for _, allowed := range scope.Agents {
-		if allowed == "*" || allowed == agentID {
+		if allowed == agentID {
 			return true
 		}
 	}
 	return false
 }
 
-func permissionAgents(scope TokenScope) []string {
+func scopeAllowsAllAgents(scope TokenScope) bool {
 	if scope.All || len(scope.Agents) == 0 {
+		return true
+	}
+	for _, allowed := range scope.Agents {
+		if allowed == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeRestrictsAgents(scope TokenScope) bool {
+	return !scopeAllowsAllAgents(scope)
+}
+
+func permissionAgents(scope TokenScope) []string {
+	if scopeAllowsAllAgents(scope) {
 		return []string{"*"}
 	}
 	out := append([]string(nil), scope.Agents...)
