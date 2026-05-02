@@ -138,7 +138,7 @@ export function SchedulePage({
   const intervalError = scheduleTargetDrafts.every((target) => intervalIsValid(target.interval_seconds)) ? null : t("errors.intervalRequired");
   const scheduleTargetError = scheduleTargetFormError(scheduleLabels, scheduleLabelOptions, t);
   const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...form, agentId: "schedule-target" } : form;
-  const formError = localizedFormError(validationForm, permissions, t) || permissionFormError(form, permissions, t);
+  const formError = localizedFormError(validationForm, permissions, t) || permissionFormError(form, permissions, agents, t);
   const showFormError = attemptedSubmit && (formError || scheduleTargetError || intervalError);
 
   useEffect(() => {

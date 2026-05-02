@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/ztelliot/mtr/internal/config"
 )
 
 func TestFirstExistingConfigPrefersSystemPath(t *testing.T) {
@@ -26,18 +24,5 @@ func TestFirstExistingConfigFallsBackToLocalPath(t *testing.T) {
 	localPath := filepath.Join(dir, "local.yaml")
 	if got := firstExistingConfig(systemPath, localPath); got != localPath {
 		t.Fatalf("config path = %q, want %q", got, localPath)
-	}
-}
-
-func TestToSchedulerOutboundAgentsKeepsConnectionConfig(t *testing.T) {
-	agents, err := toSchedulerOutboundAgents([]config.OutboundAgent{{ID: "edge-1", BaseURL: "http://edge", HTTPToken: "secret"}}, config.TLS{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(agents) != 1 || agents[0].ID != "edge-1" || agents[0].BaseURL != "http://edge" || agents[0].Token != "secret" {
-		t.Fatalf("unexpected agents: %#v", agents)
-	}
-	if agents[0].HTTPClient == nil {
-		t.Fatal("expected outbound HTTP client")
 	}
 }

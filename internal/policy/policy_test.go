@@ -73,7 +73,7 @@ func TestValidateRejectsUnknownArgument(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresAgentIDForPathTools(t *testing.T) {
+func TestValidateRequiresPathToolsAgentIDButScheduleDoesNot(t *testing.T) {
 	for _, tool := range []model.Tool{model.ToolTraceroute, model.ToolMTR} {
 		_, err := DefaultPolicies().Validate(model.CreateJobRequest{
 			Tool:   tool,
@@ -89,6 +89,13 @@ func TestValidateRequiresAgentIDForPathTools(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("expected %s with agent_id to be allowed: %v", tool, err)
+		}
+		_, err = DefaultPolicies().ValidateSchedule(model.CreateJobRequest{
+			Tool:   tool,
+			Target: "1.1.1.1",
+		})
+		if err != nil {
+			t.Fatalf("expected scheduled %s without agent_id to be allowed: %v", tool, err)
 		}
 	}
 }
@@ -120,6 +127,37 @@ func TestPortToolRequiresPort(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected out-of-range port to be rejected")
+	}
+}
+
+func TestValidatePortRangeRule(t *testing.T) {
+	if err := ValidatePortRangeRule("1-3000,6000-50000,50005-65535"); err != nil {
+		t.Fatalf("expected port ranges to be valid: %v", err)
+	}
+	if err := ValidatePortAllowed("1-3000,6000-50000,50005-65535", "50004"); err == nil {
+		t.Fatal("expected port outside ranges to be rejected")
+	}
+	if err := ValidatePortAllowed("1-3000,6000-50000,50005-65535", "50005"); err != nil {
+		t.Fatalf("expected port inside ranges to be allowed: %v", err)
+	}
+	if err := ValidatePortRangeRule("1-3000;6000-7000"); err == nil {
+		t.Fatal("expected semicolon-separated ranges to be rejected")
+	}
+	if err := ValidatePortRangeRule("3000-1"); err == nil {
+		t.Fatal("expected reversed range to be rejected")
+	}
+}
+
+func TestPolicyIntersectionsUseMostRestrictiveArgs(t *testing.T) {
+	args := IntersectAllowedArgs(
+		map[string]string{"method": "GET,HEAD", "port": "1-3000,6000-50000"},
+		map[string]string{"method": "HEAD", "port": "1000-7000"},
+	)
+	if args["method"] != "HEAD" {
+		t.Fatalf("method intersection = %q, want HEAD", args["method"])
+	}
+	if args["port"] != "1000-3000,6000-7000" {
+		t.Fatalf("port intersection = %q", args["port"])
 	}
 }
 

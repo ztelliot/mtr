@@ -7,10 +7,50 @@ import (
 	"time"
 
 	"github.com/ztelliot/mtr/internal/config"
+	"github.com/ztelliot/mtr/internal/grpcwire"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
 	"github.com/ztelliot/mtr/internal/store"
 )
+
+func upsertHubTestAgent(t *testing.T, ctx context.Context, st store.Store, agent model.Agent) {
+	t.Helper()
+	if err := st.UpsertAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func upsertHubTestAgentConfigLabels(t *testing.T, ctx context.Context, st store.Store, id string, labels []string) {
+	t.Helper()
+	cfg, err := st.GetAgentConfig(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Labels = labels
+	if err := st.UpsertAgentConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRegisterTokenAllowedRequiresConfiguredToken(t *testing.T) {
+	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+
+	if hub.registerTokenAllowed("change-me-agent-token") {
+		t.Fatal("unconfigured register token should not allow agent registration")
+	}
+}
+
+func TestApplySettingsRegisterTokensRestrictRegistration(t *testing.T) {
+	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	hub.ApplySettings(config.ManagedSettings{RegisterTokens: []config.RegisterToken{{Name: "managed", Token: "managed-token"}}})
+
+	if !hub.registerTokenAllowed("managed-token") {
+		t.Fatal("managed register token should allow agent registration")
+	}
+	if hub.registerTokenAllowed("change-me-agent-token") {
+		t.Fatal("unexpected token should not allow agent registration")
+	}
+}
 
 func TestFailTimedOutQueuedJobPublishesFailure(t *testing.T) {
 	ctx := context.Background()
@@ -19,7 +59,7 @@ func TestFailTimedOutQueuedJobPublishesFailure(t *testing.T) {
 	runtime.Count = 1
 	runtime.ProbeStepTimeoutSec = 1
 	policies := policy.PoliciesWithRuntime(runtime)
-	hub := NewHub(st, policies, "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policies, time.Minute, time.Millisecond, 4, slog.Default())
 
 	job := model.Job{
 		ID:        "job-timeout",
@@ -74,14 +114,15 @@ func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
 	st := store.NewMemory()
 	now := time.Now().UTC().Add(-time.Minute)
 	for _, agent := range []model.Agent{
-		{ID: "edge-blue", Labels: []string{"blue", "red"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-red", Labels: []string{"red"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-green", Labels: []string{"green"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-blue", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-red", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-green", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
 	} {
-		if err := st.UpsertAgent(ctx, agent); err != nil {
-			t.Fatal(err)
-		}
+		upsertHubTestAgent(t, ctx, st, agent)
 	}
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-blue", []string{"blue", "red"})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-red", []string{"red"})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-green", []string{"green"})
 	sched := model.ScheduledJob{
 		ID:             "sched-labels",
 		Revision:       1,
@@ -100,7 +141,7 @@ func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
 
 	hub.runDueSchedules(ctx)
 
@@ -129,13 +170,13 @@ func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
 	}
 }
 
-func TestScheduledIDLabelsCannotBeInjectedByAgentLabels(t *testing.T) {
+func TestScheduledIDLabelsMatchOnlyRealAgentID(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Now().UTC().Add(-time.Minute)
 	for _, agent := range []model.Agent{
 		{ID: "edge-real", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-spoof", Labels: []string{model.AgentIDLabel("edge-real")}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-spoof", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
 	} {
 		if err := st.UpsertAgent(ctx, agent); err != nil {
 			t.Fatal(err)
@@ -157,7 +198,7 @@ func TestScheduledIDLabelsCannotBeInjectedByAgentLabels(t *testing.T) {
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
 
 	hub.runDueSchedules(ctx)
 
@@ -175,13 +216,13 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 	st := store.NewMemory()
 	now := time.Now().UTC().Add(-time.Minute)
 	for _, agent := range []model.Agent{
-		{ID: "edge-allowed", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-denied", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-allowed", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-denied", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
 	} {
-		if err := st.UpsertAgent(ctx, agent); err != nil {
-			t.Fatal(err)
-		}
+		upsertHubTestAgent(t, ctx, st, agent)
 	}
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-allowed", []string{"blue"})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-denied", []string{"blue"})
 	sched := model.ScheduledJob{
 		ID:        "sched-allowed-scope",
 		Revision:  1,
@@ -198,7 +239,7 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
 
 	hub.runDueSchedules(ctx)
 
@@ -211,6 +252,162 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 	}
 }
 
+func TestScheduledTargetsDoNotDriftToNewMatchingAgents(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	for _, agent := range []model.Agent{
+		{ID: "edge-frozen", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-new", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		upsertHubTestAgent(t, ctx, st, agent)
+	}
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-frozen", []string{"blue"})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-new", []string{"blue"})
+	sched := model.ScheduledJob{
+		ID:        "sched-frozen-scope",
+		Revision:  1,
+		Enabled:   true,
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		NextRunAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
+		ScheduleTargets: []model.ScheduleTarget{
+			{ID: "target-blue", Label: "blue", AllowedAgentIDs: []string{"edge-frozen"}, IntervalSeconds: 30, NextRunAt: now},
+		},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+
+	hub.runDueSchedules(ctx)
+
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].AgentID != "edge-frozen" {
+		t.Fatalf("scheduled scope drifted to new agent: %#v", jobs)
+	}
+}
+
+func TestHandleResultRejectsUnassignedAgent(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	now := time.Now().UTC()
+	job := model.Job{
+		ID:        "job-owned",
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		AgentID:   "edge-owner",
+		Status:    model.JobRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: &now,
+	}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	hub.markInflight("edge-owner", job.ID)
+
+	hub.handleResult(ctx, "edge-other", grpcwire.ResultEvent{
+		JobID: job.ID,
+		Event: map[string]any{"type": "summary", "exit_code": 0},
+	})
+
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.JobRunning {
+		t.Fatalf("unassigned agent should not complete job: %#v", got)
+	}
+	events, err := st.ListJobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("unassigned agent should not write events: %#v", events)
+	}
+}
+
+func TestHandleResultRequiresInflightOwnership(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	now := time.Now().UTC()
+	job := model.Job{
+		ID:        "job-not-inflight",
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		AgentID:   "edge-owner",
+		Status:    model.JobRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: &now,
+	}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	hub.handleResult(ctx, "edge-owner", grpcwire.ResultEvent{
+		JobID: job.ID,
+		Event: map[string]any{"type": "summary", "exit_code": 0},
+	})
+
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.JobRunning {
+		t.Fatalf("non-inflight job should not complete: %#v", got)
+	}
+}
+
+func TestHandleResultAcceptsAssignedInflightAgent(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	now := time.Now().UTC()
+	job := model.Job{
+		ID:        "job-inflight",
+		Tool:      model.ToolPing,
+		Target:    "1.1.1.1",
+		AgentID:   "edge-owner",
+		Status:    model.JobRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: &now,
+	}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	hub.markInflight("edge-owner", job.ID)
+
+	hub.handleResult(ctx, "edge-owner", grpcwire.ResultEvent{
+		JobID: job.ID,
+		Event: map[string]any{"type": "summary", "exit_code": 0},
+	})
+
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.JobSucceeded {
+		t.Fatalf("assigned inflight job should complete: %#v", got)
+	}
+	events, err := st.ListJobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("assigned inflight job should write summary and progress events: %#v", events)
+	}
+}
+
 func TestFailTimedOutJobsDefersFanoutParentToChildren(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -218,7 +415,7 @@ func TestFailTimedOutJobsDefersFanoutParentToChildren(t *testing.T) {
 	runtime.Count = 1
 	runtime.ProbeStepTimeoutSec = 1
 	policies := policy.PoliciesWithRuntime(runtime)
-	hub := NewHub(st, policies, "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policies, time.Minute, time.Millisecond, 4, slog.Default())
 
 	old := time.Now().UTC().Add(-10 * time.Second)
 	now := time.Now().UTC()
@@ -278,7 +475,7 @@ func TestFailTimedOutJobsFailsFanoutParentAfterOverallLimit(t *testing.T) {
 	runtime.ProbeStepTimeoutSec = 1
 	runtime.MaxToolTimeoutSec = 3
 	policies := policy.PoliciesWithRuntime(runtime)
-	hub := NewHub(st, policies, "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policies, time.Minute, time.Millisecond, 4, slog.Default())
 
 	old := time.Now().UTC().Add(-5 * time.Second)
 	now := time.Now().UTC()
@@ -372,7 +569,7 @@ func TestFailTimedOutJobsSucceedsFanoutParentWhenSomeChildrenSucceeded(t *testin
 	runtime.ProbeStepTimeoutSec = 1
 	runtime.MaxToolTimeoutSec = 3
 	policies := policy.PoliciesWithRuntime(runtime)
-	hub := NewHub(st, policies, "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policies, time.Minute, time.Millisecond, 4, slog.Default())
 
 	old := time.Now().UTC().Add(-5 * time.Second)
 	done := time.Now().UTC().Add(-1 * time.Second)
@@ -447,7 +644,7 @@ func TestFailTimedOutJobsSucceedsFanoutParentWhenSomeChildrenSucceeded(t *testin
 func TestCompleteParentIfDoneSucceedsWhenSomeChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 4, slog.Default())
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
 
 	now := time.Now().UTC()
 	parent := model.Job{
@@ -507,29 +704,29 @@ func TestCompleteParentIfDoneSucceedsWhenSomeChildrenFailed(t *testing.T) {
 }
 
 func TestHubInflightLimitsSeparateTransports(t *testing.T) {
-	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), "", time.Minute, time.Millisecond, 9, slog.Default())
+	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 9, slog.Default())
 
 	if got := hub.grpcInflightLimit(); got != 9 {
 		t.Fatalf("default grpc inflight = %d, want 9", got)
 	}
-	if got := hub.outboundInflightLimit(); got != 1 {
-		t.Fatalf("default outbound inflight = %d, want 1", got)
+	if got := hub.httpAgentInflightLimit(); got != 1 {
+		t.Fatalf("default httpAgents inflight = %d, want 1", got)
 	}
 
 	hub.SetInflightLimits(6, 2)
 	if got := hub.grpcInflightLimit(); got != 6 {
 		t.Fatalf("configured grpc inflight = %d, want 6", got)
 	}
-	if got := hub.outboundInflightLimit(); got != 2 {
-		t.Fatalf("configured outbound inflight = %d, want 2", got)
+	if got := hub.httpAgentInflightLimit(); got != 2 {
+		t.Fatalf("configured httpAgents inflight = %d, want 2", got)
 	}
 
 	hub.SetInflightLimits(0, 0)
 	if got := hub.grpcInflightLimit(); got != 4 {
 		t.Fatalf("fallback grpc inflight = %d, want 4", got)
 	}
-	if got := hub.outboundInflightLimit(); got != 1 {
-		t.Fatalf("fallback outbound inflight = %d, want 1", got)
+	if got := hub.httpAgentInflightLimit(); got != 1 {
+		t.Fatalf("fallback httpAgents inflight = %d, want 1", got)
 	}
 }
 

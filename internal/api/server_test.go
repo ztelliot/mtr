@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ztelliot/mtr/internal/abuse"
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
 	"github.com/ztelliot/mtr/internal/scheduler"
@@ -24,7 +25,7 @@ import (
 func TestStreamJobEventsSendsHistoryAndLive(t *testing.T) {
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -105,6 +106,36 @@ func TestStreamJobEventsSendsHistoryAndLive(t *testing.T) {
 	}
 }
 
+func upsertTestAgent(t *testing.T, ctx context.Context, st store.Store, id string, labels []string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := st.UpsertAgent(ctx, model.Agent{
+		ID:           id,
+		Capabilities: []model.Tool{model.ToolPing},
+		Protocols:    model.ProtocolAll,
+		Status:       model.AgentOnline,
+		LastSeenAt:   now,
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) > 0 {
+		upsertTestAgentConfigLabels(t, ctx, st, id, labels)
+	}
+}
+
+func upsertTestAgentConfigLabels(t *testing.T, ctx context.Context, st store.Store, id string, labels []string) {
+	t.Helper()
+	cfg, err := st.GetAgentConfig(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Labels = labels
+	if err := st.UpsertAgentConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestJobEventJSONUsesUnifiedEventEnvelope(t *testing.T) {
 	event := model.JobEvent{
 		ID:      "event-1",
@@ -174,7 +205,7 @@ func TestHealthIncludesVersion(t *testing.T) {
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
-	}), nil, "", slog.Default())
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true}})
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -199,7 +230,14 @@ func TestHealthIncludesVersion(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("version status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("version without auth status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/version", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("version with auth status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var versionBody struct {
 		Version string `json:"version"`
@@ -209,6 +247,63 @@ func TestHealthIncludesVersion(t *testing.T) {
 	}
 	if versionBody.Version == "" {
 		t.Fatalf("unexpected version response: %#v", versionBody)
+	}
+}
+
+func TestAuthFailureCountsAgainstRequestLimit(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1, Burst: 1},
+	}), nil, "", slog.Default(), TokenConfig{Token: "secret", Scope: TokenScope{All: true}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("first status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.RemoteAddr = "203.0.113.10:4321"
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("valid retry should be rate limited, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthorizationHeaderRequiresBearerScheme(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "secret", Scope: TokenScope{All: true}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.Header.Set("Authorization", "secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("raw token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bearer token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/permissions?access_token=secret", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query access token status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -328,15 +423,17 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	st := store.NewMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
-		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing, model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-2", Capabilities: []model.Tool{model.ToolPing, model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing, model.ToolHTTP, model.ToolPort}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-2", Capabilities: []model.Tool{model.ToolPing, model.ToolHTTP, model.ToolPort}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
 	} {
 		if err := st.UpsertAgent(ctx, agent); err != nil {
 			t.Fatal(err)
 		}
 	}
-	policies := policy.DefaultPolicies()
-	headOnly := map[string]string{"method": "^(HEAD)$"}
+	policies := policy.FromConfig(map[string]config.Policy{
+		"port": {Enabled: true, AllowedArgs: map[string]string{"port": "1-2000"}},
+	}, config.DefaultRuntime())
+	headOnly := map[string]string{"method": "HEAD"}
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -347,6 +444,7 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 			Tools: map[model.Tool]ToolScope{
 				model.ToolPing: {},
 				model.ToolHTTP: {AllowedArgs: headOnly},
+				model.ToolPort: {AllowedArgs: map[string]string{"port": "1-1000"}},
 			},
 		},
 	}, TokenConfig{Token: "token-2", Scope: TokenScope{All: true}})
@@ -365,7 +463,7 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	if _, ok := perms.Tools[model.ToolTraceroute]; ok || perms.ScheduleAccess != ScheduleAccessNone {
 		t.Fatalf("restricted token permissions = %#v", perms)
 	}
-	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "^(HEAD)$" || len(perms.Agents) != 1 || perms.Agents[0] != "edge-1" {
+	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "HEAD" || perms.Tools[model.ToolPort].AllowedArgs["port"] != "1-1000" || len(perms.Agents) != 1 || perms.Agents[0] != "edge-1" {
 		t.Fatalf("restricted token permissions = %#v", perms)
 	}
 
@@ -398,6 +496,24 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 		t.Fatalf("GET should be forbidden, status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
+	body = `{"tool":"port","target":"1.1.1.1","args":{"port":"443"},"resolve_on_agent":true}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token-1")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("allowed port should be accepted, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = `{"tool":"port","target":"1.1.1.1","args":{"port":"1500"},"resolve_on_agent":true}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token-1")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("disallowed port should be forbidden, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
 	body = `{"tool":"traceroute","target":"1.1.1.1","agent_id":"edge-1","resolve_on_agent":true}`
 	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer token-1")
@@ -421,6 +537,62 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("all token should view schedules, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPermissionsResponseShowsEffectiveAllowedArgsForInheritedTokenScope(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC()
+	if err := st.UpsertAgent(ctx, model.Agent{ID: "edge-1", Capabilities: []model.Tool{model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	policies := policy.FromConfig(map[string]config.Policy{
+		"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET"}},
+	}, config.DefaultRuntime())
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{
+		Token: "reader",
+		Scope: TokenScope{
+			Tools: map[model.Tool]ToolScope{
+				model.ToolHTTP: {},
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.Header.Set("Authorization", "Bearer reader")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("permissions status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var perms PermissionsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &perms); err != nil {
+		t.Fatal(err)
+	}
+	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "GET" {
+		t.Fatalf("inherited allowed args should show effective policy, got %#v", perms.Tools[model.ToolHTTP].AllowedArgs)
+	}
+
+	body := `{"tool":"http","target":"https://1.1.1.1","args":{"method":"POST"},"resolve_on_agent":true}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("policy should still reject POST, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = `{"tool":"http","target":"https://1.1.1.1","args":{"method":"GET"},"resolve_on_agent":true}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("policy should allow inherited GET, status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -534,12 +706,13 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	st := store.NewMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
-		{ID: "edge-1", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-2", Labels: []string{"blue"}, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-2", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
 	} {
 		if err := st.UpsertAgent(ctx, agent); err != nil {
 			t.Fatal(err)
 		}
+		upsertTestAgentConfigLabels(t, ctx, st, agent.ID, []string{"blue"})
 	}
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -580,10 +753,104 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	}
 }
 
-func TestCreateScheduleAndHistory(t *testing.T) {
+func TestCreateScheduleFreezesTagAndDenyScopesToCurrentAgents(t *testing.T) {
+	ctx := context.Background()
 	st := store.NewMemory()
+	now := time.Now().UTC()
+	for _, agent := range []model.Agent{
+		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-2", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-3", Capabilities: []model.Tool{model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upsertTestAgentConfigLabels(t, ctx, st, "edge-1", []string{"blue"})
+	upsertTestAgentConfigLabels(t, ctx, st, "edge-2", []string{"blue", "blocked"})
+	upsertTestAgentConfigLabels(t, ctx, st, "edge-3", []string{"blue"})
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{
+		Token: "tagged",
+		Scope: TokenScope{
+			ScheduleAccess: ScheduleAccessWrite,
+			AgentTags:      []string{"blue"},
+			DeniedTags:     []string{"blocked"},
+			Tools:          map[model.Tool]ToolScope{model.ToolPing: {}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"schedule_targets":[{"label":"blue","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer tagged")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var sched model.ScheduledJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
+		t.Fatal(err)
+	}
+	if len(sched.ScheduleTargets) != 1 {
+		t.Fatalf("schedule targets = %#v", sched.ScheduleTargets)
+	}
+	if !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-1"}) {
+		t.Fatalf("allowed agents should be frozen to matching current scope: %#v", sched.ScheduleTargets[0].AllowedAgentIDs)
+	}
+}
+
+func TestServerManagedLabelsGrantTokenScope(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC()
+	if err := st.UpsertAgent(ctx, model.Agent{
+		ID:           "edge-spoof",
+		Capabilities: []model.Tool{model.ToolPing},
+		Protocols:    model.ProtocolAll,
+		Status:       model.AgentOnline,
+		LastSeenAt:   now,
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{
+		Token: "tagged",
+		Scope: TokenScope{
+			AgentTags: []string{"blue"},
+			Tools:     map[model.Tool]ToolScope{model.ToolPing: {}},
+		},
+	})
+
+	body, _ := json.Marshal(model.CreateJobRequest{Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-spoof"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tagged")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("agent without server-managed label should not satisfy token scope, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	upsertTestAgentConfigLabels(t, ctx, st, "edge-spoof", []string{"blue"})
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tagged")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("server-managed label should satisfy token scope, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateScheduleAndHistory(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -712,7 +979,9 @@ func TestCreateScheduleAndHistory(t *testing.T) {
 }
 
 func TestUpdateAndDeleteSchedule(t *testing.T) {
+	ctx := context.Background()
 	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -760,7 +1029,9 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 }
 
 func TestUpdateScheduleIntervalRefreshesNextRunWithoutBumpingRevision(t *testing.T) {
+	ctx := context.Background()
 	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -801,7 +1072,10 @@ func TestUpdateScheduleIntervalRefreshesNextRunWithoutBumpingRevision(t *testing
 }
 
 func TestCreateScheduleAcceptsLabelTargetsWithIntervals(t *testing.T) {
+	ctx := context.Background()
 	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-blue", []string{"blue"})
+	upsertTestAgent(t, ctx, st, "edge-red", []string{"red"})
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -865,7 +1139,7 @@ func TestCreateJobNormalizesServerOwnedArgsAndResolveLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -913,6 +1187,31 @@ func TestCreateJobNormalizesServerOwnedArgsAndResolveLocation(t *testing.T) {
 	}
 }
 
+func TestCreateJobRequiresPinnedAgentForRouteTools(t *testing.T) {
+	st := store.NewMemory()
+	policies := policy.DefaultPolicies()
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default())
+
+	for _, tool := range []model.Tool{model.ToolTraceroute, model.ToolMTR} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"`+string(tool)+`","target":"1.1.1.1","resolve_on_agent":true}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s without agent status = %d, body = %s", tool, rec.Code, rec.Body.String())
+		}
+		var response map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response["error"] != string(tool)+" requires agent_id" {
+			t.Fatalf("%s error = %#v", tool, response)
+		}
+	}
+}
+
 func TestCreateJobRejectsUnknownOrOfflinePinnedAgent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -928,7 +1227,7 @@ func TestCreateJobRejectsUnknownOrOfflinePinnedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -975,7 +1274,7 @@ func TestCreateJobWithEmptyAgentIDFansOutToMatchingAgents(t *testing.T) {
 		}
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1048,7 +1347,7 @@ func TestCreateJobWithAgentResolveAutoDomainDoesNotFilterProtocols(t *testing.T)
 		}
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1091,7 +1390,7 @@ func TestCreateJobWithAgentResolveTypedDomainFiltersProtocols(t *testing.T) {
 		}
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1150,7 +1449,7 @@ func TestCreateJobWithPinnedIncompatibleAgentReportsFailureType(t *testing.T) {
 		t.Fatal(err)
 	}
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1233,7 +1532,7 @@ func TestGeoIPProxyReturnsCompactPayload(t *testing.T) {
 
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1279,7 +1578,7 @@ func TestGeoIPProxyAcceptsEscapedIPv6(t *testing.T) {
 
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1296,7 +1595,7 @@ func TestGeoIPProxyAcceptsEscapedIPv6(t *testing.T) {
 func TestGeoIPProxyIsDisabledWhenURLIsEmpty(t *testing.T) {
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1313,7 +1612,7 @@ func TestGeoIPProxyIsDisabledWhenURLIsEmpty(t *testing.T) {
 func TestGeoIPProxyRejectsInvalidIP(t *testing.T) {
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
-	hub := scheduler.NewHub(st, policies, "", 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1324,6 +1623,845 @@ func TestGeoIPProxyRejectsInvalidIP(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedRuntimeSettingsApplyToNewJobs(t *testing.T) {
+	st := store.NewMemory()
+	policies := policy.DefaultPolicies()
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), hub, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	settings, err := st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentLabel := settings.LabelConfigs[config.AgentAllLabel]
+	runtime := config.DefaultRuntime()
+	runtime.Count = 2
+	agentLabel.Runtime = &runtime
+	settings.LabelConfigs[config.AgentAllLabel] = agentLabel
+	body, _ := json.Marshal(managedLabelsPayload{LabelConfigs: settings.LabelConfigs})
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now().UTC()
+	if err := st.UpsertAgent(context.Background(), model.Agent{
+		ID:           "edge-1",
+		Capabilities: []model.Tool{model.ToolPing},
+		Protocols:    model.ProtocolAll,
+		Status:       model.AgentOnline,
+		LastSeenAt:   now,
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = json.Marshal(model.CreateJobRequest{Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-1"})
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("job status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var job model.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Args["count"]; got != "2" {
+		t.Fatalf("job count arg = %q, want updated runtime count 2", got)
+	}
+}
+
+func TestLabelRuntimeSettingsApplyToPinnedJob(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeA := config.DefaultRuntime()
+	runtimeA.Count = 4
+	runtimeB := config.DefaultRuntime()
+	runtimeB.Count = 2
+	settings.LabelConfigs = map[string]config.LabelConfig{
+		"blue": {Runtime: &runtimeA},
+		"fast": {Runtime: &runtimeB},
+	}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	upsertTestAgent(t, ctx, st, "edge-1", []string{"blue", "fast"})
+	policies := policy.DefaultPolicies()
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub.ApplySettings(settings)
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), hub, "", slog.Default(), TokenConfig{Token: settings.APITokens[0].Secret, Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body, _ := json.Marshal(model.CreateJobRequest{Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-1"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var job model.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Args["count"]; got != "2" {
+		t.Fatalf("label runtime count = %q, want min 2", got)
+	}
+}
+
+func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LabelConfigs = map[string]config.LabelConfig{
+		"tcp-only": {
+			ToolPolicies: map[string]config.Policy{
+				"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": "443"}},
+			},
+		},
+	}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	upsertTestAgent(t, ctx, st, "edge-icmp", []string{"icmp"})
+	upsertTestAgent(t, ctx, st, "edge-tcp", []string{"tcp-only"})
+	policies := policy.DefaultPolicies()
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	hub.ApplySettings(settings)
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), hub, "", slog.Default(), TokenConfig{Token: settings.APITokens[0].Secret, Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","args":{"protocol":"icmp"}}`))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var parent model.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &parent); err != nil {
+		t.Fatal(err)
+	}
+	children, err := st.ListChildJobs(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 || children[0].AgentID != "edge-icmp" {
+		t.Fatalf("label policy should filter fanout nodes: %#v", children)
+	}
+}
+
+func TestManagedRateLimitEndpointUsesLowercaseJSONAndDoesNotPersistInvalidConfig(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	before, err := st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/manage/rate-limit", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rate-limit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"Global", "IP", "CIDR", "Tools", "ExemptCIDRs"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("rate-limit response contains uppercase field %q: %#v", key, raw)
+		}
+	}
+	rateLimitRaw, ok := raw["rate_limit"].(map[string]any)
+	if !ok {
+		t.Fatalf("rate-limit response missing rate_limit wrapper: %#v", raw)
+	}
+	for _, key := range []string{"global", "ip", "cidr"} {
+		if _, ok := rateLimitRaw[key]; !ok {
+			t.Fatalf("rate-limit response missing lowercase field %q: %#v", key, raw)
+		}
+	}
+
+	next := before
+	next.RateLimit.ExemptCIDRs = []string{"not-a-cidr"}
+	body, _ := json.Marshal(managedRateLimitPayload{Revision: before.Revision, RateLimit: next.RateLimit})
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/rate-limit", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid rate-limit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	after, err := st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.RateLimit.ExemptCIDRs) != len(before.RateLimit.ExemptCIDRs) {
+		t.Fatalf("invalid settings persisted: before=%#v after=%#v", before.RateLimit.ExemptCIDRs, after.RateLimit.ExemptCIDRs)
+	}
+}
+
+func TestRequiredAuthRejectsRequestsWhenTokenSetIsEmpty(t *testing.T) {
+	st := store.NewMemory()
+	handler, err := NewWithOptions(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), Options{RequireAuth: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("empty required auth token set status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+	settings, err := st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/manage/tokens", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tokens get status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var apiTokensResp managedAPITokensResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiTokensResp); err != nil {
+		t.Fatal(err)
+	}
+	visibleAPITokens := apiTokensResp.Tokens
+	if visibleAPITokens[0].Secret != "" || visibleAPITokens[0].ID == "" {
+		t.Fatalf("existing api token should be redacted with id: %#v", visibleAPITokens[0])
+	}
+
+	body := []byte(`{"name":"bad-rename","secret":"client-secret","all":true}`)
+	req = httptest.NewRequest(http.MethodPatch, "/v1/manage/tokens/"+visibleAPITokens[0].ID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("api token patch with client secret status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"renamed-admin"}`)
+	req = httptest.NewRequest(http.MethodPatch, "/v1/manage/tokens/"+visibleAPITokens[0].ID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("redacted api token rename status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var apiTokenResp managedAPITokenResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	savedAPI := apiTokenResp.Token
+	if savedAPI.Secret != "" || savedAPI.ID != visibleAPITokens[0].ID || savedAPI.Name != "renamed-admin" {
+		t.Fatalf("api token patch should not reveal secret: %#v", savedAPI)
+	}
+	if !savedAPI.All || savedAPI.ManageAccess != "write" {
+		t.Fatalf("api token patch should preserve omitted permissions: %#v", savedAPI)
+	}
+
+	settings, err = st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAPISecret := settings.APITokens[0].Secret
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/tokens/"+settings.APITokens[0].ID+"/rotate", nil)
+	req.Header.Set("Authorization", "Bearer "+oldAPISecret)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("api token rotation status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	apiTokenResp = managedAPITokenResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	savedAPI = apiTokenResp.Token
+	if savedAPI.Secret == "" || savedAPI.Secret == oldAPISecret || savedAPI.Rotate || savedAPI.ID == "" {
+		t.Fatalf("api token was not rotated: old=%q saved=%#v", oldAPISecret, savedAPI)
+	}
+	writeToken := savedAPI.Secret
+
+	body = []byte(`{"name":"bad-create","secret":"client-secret","all":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/tokens", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("api token create with client secret status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"ops","all":true,"schedule_access":"write","manage_access":"write","agents":["*"]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/tokens", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("api token create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	apiTokenResp = managedAPITokenResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	createdAPI := apiTokenResp.Token
+	if createdAPI.ID == "" || createdAPI.Secret == "" || createdAPI.Name != "ops" {
+		t.Fatalf("api token create should reveal generated secret once: %#v", createdAPI)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v1/manage/tokens/"+createdAPI.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("api token delete status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"edge","token":"manual-register-token"}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/register-tokens", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("register token create with client token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"edge"}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/register-tokens", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("generated register token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var registerTokenResp managedRegisterTokenResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &registerTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	savedRegister := registerTokenResp.Token
+	if savedRegister.ID == "" || savedRegister.Token == "" || savedRegister.Name != "edge" {
+		t.Fatalf("register token was not generated: %#v", savedRegister)
+	}
+
+	oldRegisterToken := savedRegister.Token
+	body = []byte(`{"name":"bad-rename","token":"manual-register-token"}`)
+	req = httptest.NewRequest(http.MethodPatch, "/v1/manage/register-tokens/"+savedRegister.ID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("register token patch with client token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"edge-renamed"}`)
+	req = httptest.NewRequest(http.MethodPatch, "/v1/manage/register-tokens/"+savedRegister.ID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("redacted register token rename status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	registerTokenResp = managedRegisterTokenResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &registerTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	savedRegister = registerTokenResp.Token
+	if savedRegister.Token != "" || savedRegister.ID == "" || savedRegister.Name != "edge-renamed" {
+		t.Fatalf("unchanged register token should stay redacted: %#v", savedRegister)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/register-tokens/"+savedRegister.ID+"/rotate", nil)
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register token rotation status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	registerTokenResp = managedRegisterTokenResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &registerTokenResp); err != nil {
+		t.Fatal(err)
+	}
+	savedRegister = registerTokenResp.Token
+	if savedRegister.Token == "" || savedRegister.Token == oldRegisterToken || savedRegister.Rotate {
+		t.Fatalf("register token was not rotated: old=%q saved=%#v", oldRegisterToken, savedRegister)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/manage/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tokens get after rotation status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	apiTokensResp = managedAPITokensResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiTokensResp); err != nil {
+		t.Fatal(err)
+	}
+	visibleAPITokens = apiTokensResp.Tokens
+	if visibleAPITokens[0].Secret != "" {
+		t.Fatalf("api tokens should only be visible in write result: %#v", visibleAPITokens)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/manage/register-tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register tokens get after rotation status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var registerTokensResp managedRegisterTokensResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &registerTokensResp); err != nil {
+		t.Fatal(err)
+	}
+	visibleRegisterTokens := registerTokensResp.Tokens
+	if visibleRegisterTokens[len(visibleRegisterTokens)-1].Token != "" {
+		t.Fatalf("register tokens should only be visible in write result: %#v", visibleRegisterTokens)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v1/manage/register-tokens/"+savedRegister.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register token delete status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedLabelsEndpointKeepsAgentRuntimeAndRemovesSettingsRoute(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	payload := managedLabelsPayload{LabelConfigs: map[string]config.LabelConfig{
+		"blue": {
+			ToolPolicies: map[string]config.Policy{
+				"ping": {Enabled: true},
+			},
+		},
+	}}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("labels status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var saved managedLabelsPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	agentConfig := saved.LabelConfigs[config.AgentAllLabel]
+	if agentConfig.Runtime == nil || agentConfig.Scheduler == nil {
+		t.Fatalf("agent label should own runtime and scheduler defaults: %#v", agentConfig)
+	}
+	if _, ok := saved.LabelConfigs["blue"]; !ok {
+		t.Fatalf("custom label was not preserved: %#v", saved.LabelConfigs)
+	}
+
+	settings, err := st.GetManagedSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/manage/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("old settings route status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-grpc", []string{"old"})
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Disabled: true, Labels: []string{"old"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: false, BaseURL: "http://agent.local", HTTPToken: "secret", Labels: []string{"old-http"}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body, _ := json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{
+		{ID: "edge-grpc", Labels: []string{"new", config.AgentAllLabel, "id:edge-grpc"}},
+		{ID: "edge-http", Labels: []string{"new-http"}},
+	}})
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch labels status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	cfg, err := st.GetAgentConfig(ctx, "edge-grpc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Disabled != true || !reflect.DeepEqual(cfg.Labels, []string{"new"}) {
+		t.Fatalf("grpc cfg = %#v", cfg)
+	}
+	node, err := st.GetHTTPAgent(ctx, "edge-http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Enabled != false || node.BaseURL != "http://agent.local" || node.HTTPToken != "secret" || !reflect.DeepEqual(node.Labels, []string{"new-http"}) {
+		t.Fatalf("http node = %#v", node)
+	}
+
+	body, _ = json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{
+		{ID: "edge-grpc", Labels: []string{"one"}},
+		{ID: "edge-grpc", Labels: []string{"two"}},
+	}})
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedLabelsAndAgentLabelsUpdateAtomically(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-grpc", []string{"old"})
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Labels: []string{"old"}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	payload := managedLabelsAndAgentsPayload{
+		LabelConfigs: map[string]config.LabelConfig{"blue": {ToolPolicies: map[string]config.Policy{"ping": {Enabled: true}}}},
+		Agents:       []managedAgentLabelPatch{{ID: "missing", Labels: []string{"blue"}}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels/state", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("atomic bad agent status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings.LabelConfigs["blue"]; ok {
+		t.Fatalf("label config persisted despite failed agent update: %#v", settings.LabelConfigs)
+	}
+
+	payload.Agents = []managedAgentLabelPatch{{ID: "edge-grpc", Labels: []string{"blue"}}}
+	body, _ = json.Marshal(payload)
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/labels/state", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("atomic labels status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	settings, err = st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings.LabelConfigs["blue"]; !ok {
+		t.Fatalf("label config was not persisted: %#v", settings.LabelConfigs)
+	}
+	cfg, err := st.GetAgentConfig(ctx, "edge-grpc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Labels, []string{"blue"}) {
+		t.Fatalf("agent labels = %#v", cfg.Labels)
+	}
+}
+
+func TestManagedLabelStateRejectsStaleRevision(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", nil)
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRevision := settings.Revision
+	settings.LabelConfigs["blue"] = config.LabelConfig{}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := managedLabelsAndAgentsPayload{
+		Revision:     staleRevision,
+		LabelConfigs: settings.LabelConfigs,
+		Agents:       []managedAgentLabelPatch{{ID: "edge-1", Labels: []string{"blue"}}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels/state", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale revision status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateHTTPAgentRejectsDuplicateID(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := []byte(`{"id":"edge-http","transport":"http","enabled":true,"base_url":"http://one.local","http_token":"secret"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create http agent status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"id":"edge-http","transport":"http","enabled":true,"base_url":"http://two.local","http_token":"secret"}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate http agent status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	node, err := st.GetHTTPAgent(context.Background(), "edge-http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.BaseURL != "http://one.local" {
+		t.Fatalf("duplicate create should not overwrite existing http agent: %#v", node)
+	}
+}
+
+func TestManageWriteAuditsAllowedAndDeniedActions(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(),
+		TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}},
+		TokenConfig{Token: "reader", Scope: TokenScope{ManageAccess: ScheduleAccessRead}},
+	)
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/rate-limit", strings.NewReader(`{"global":{"requests_per_minute":600,"burst":200},"ip":{"requests_per_minute":60,"burst":20},"cidr":{"requests_per_minute":300,"burst":100,"ipv4_prefix":32,"ipv6_prefix":128}}`))
+	req.Header.Set("Authorization", "Bearer reader")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("denied rate limit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/labels", strings.NewReader(`{"label_configs":{"blue":{"tool_policies":{"ping":{"enabled":true}}}}}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("allowed labels status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	events := st.AuditEvents()
+	if len(events) != 2 {
+		t.Fatalf("audit event count = %d, events = %#v", len(events), events)
+	}
+	if events[0].Action != "manage.rate_limit.update" || events[0].Decision != "deny" || events[0].Subject != "token:"+managedSecretHash("reader") {
+		t.Fatalf("unexpected denied audit event: %#v", events[0])
+	}
+	if events[1].Action != "manage.labels.update" || events[1].Decision != "allow" || events[1].Subject != "token:"+managedSecretHash("admin") {
+		t.Fatalf("unexpected allowed audit event: %#v", events[1])
+	}
+}
+
+func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.APITokens = append(settings.APITokens, config.APITokenPermission{
+		Name:         "reader-visible",
+		Secret:       "reader-visible-secret",
+		ManageAccess: "read",
+		Agents:       []string{"*"},
+	})
+	settings.RegisterTokens = append(settings.RegisterTokens, config.RegisterToken{Name: "register", Token: "register-secret"})
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := st.UpsertAgent(ctx, model.Agent{
+		ID:           "edge-http",
+		Capabilities: []model.Tool{model.ToolPing},
+		Protocols:    model.ProtocolAll,
+		Status:       model.AgentOnline,
+		LastSeenAt:   now,
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: true, BaseURL: "http://agent.local", HTTPToken: "http-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "reader", Scope: TokenScope{ManageAccess: ScheduleAccessRead}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/manage/tokens", nil)
+	req.Header.Set("Authorization", "Bearer reader")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tokens status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/manage/agents", nil)
+	req.Header.Set("Authorization", "Bearer reader")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agents status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agents []ManagedAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].HTTP == nil || agents[0].HTTP.HTTPToken != "" {
+		t.Fatalf("read-only agents leaked http token: %#v", agents)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/manage/agents/edge-http", nil)
+	req.Header.Set("Authorization", "Bearer reader")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent detail status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agent ManagedAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &agent); err != nil {
+		t.Fatal(err)
+	}
+	if agent.HTTP == nil || agent.HTTP.HTTPToken != "" {
+		t.Fatalf("read-only agent detail leaked http token: %#v", agent)
+	}
+}
+
+func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC()
+	for _, agent := range []model.Agent{
+		{ID: "edge-grpc", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-http", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: true, BaseURL: "http://agent.local", HTTPToken: "secret", Labels: []string{"configured"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Labels: []string{"configured-grpc"}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/manage/agents", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agents []ManagedAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
+		t.Fatal(err)
+	}
+	byType := map[string][]ManagedAgent{}
+	for _, agent := range agents {
+		byType[agent.Type] = append(byType[agent.Type], agent)
+	}
+	grpcAgents := byType["grpc"]
+	if len(grpcAgents) != 1 || grpcAgents[0].ID != "edge-grpc" || grpcAgents[0].Transport != "grpc" {
+		t.Fatalf("grpc agents = %#v", grpcAgents)
+	}
+	if !stringListContains(grpcAgents[0].Labels, "configured-grpc") || stringListContains(grpcAgents[0].Labels, "grpc-live") {
+		t.Fatalf("grpc managed labels should come from server config: %#v", grpcAgents[0].Labels)
+	}
+	httpAgents := byType["http"]
+	if len(httpAgents) != 1 || httpAgents[0].ID != "edge-http" || httpAgents[0].Transport != "http" {
+		t.Fatalf("http agents = %#v", httpAgents)
+	}
+	if !reflect.DeepEqual(httpAgents[0].Labels, []string{"agent", "id:edge-http", "configured"}) {
+		t.Fatalf("http labels = %#v", httpAgents[0].Labels)
+	}
+	if httpAgents[0].HTTP == nil || !reflect.DeepEqual(httpAgents[0].HTTP.Labels, []string{"configured"}) {
+		t.Fatalf("http config = %#v", httpAgents[0].HTTP)
 	}
 }
 

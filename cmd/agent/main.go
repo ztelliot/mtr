@@ -192,6 +192,9 @@ func agentCapabilities(in []string) []model.Tool {
 }
 
 func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger) (func(), <-chan error, error) {
+	if strings.TrimSpace(cfg.HTTPToken) == "" {
+		return nil, nil, fmt.Errorf("http_token is required when agent mode includes http")
+	}
 	cfg.ID = defaultHTTPAgentID(cfg.ID)
 	handler := newHTTPAgentHandler(cfg, log)
 	tlsConfig, err := tlsutil.ServerTLSConfig(cfg.HTTPTLS.CAFiles, cfg.HTTPTLS.CertFile, cfg.HTTPTLS.KeyFile, cfg.HTTPTLS.Enabled)
@@ -244,6 +247,7 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	r := runner.New()
 	policies := policy.DefaultPolicies()
+	invokeAuthLimiter := abuse.NewConfiguredLimiter(abuse.RateLimitConfig{})
 	mux.Handle("/speedtest/random", newSpeedtestHandler(cfg.Speedtest, cfg.HTTPToken, log))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -256,7 +260,6 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 				"region":       cfg.Region,
 				"provider":     cfg.Provider,
 				"isp":          cfg.ISP,
-				"labels":       cfg.Labels,
 				"capabilities": agentCapabilities(cfg.Capabilities),
 				"protocols":    model.ProtocolMask(cfg.Protocols),
 			},
@@ -267,9 +270,22 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		if cfg.HTTPToken != "" && strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ") != cfg.HTTPToken {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-			return
+		if cfg.HTTPToken != "" {
+			token, ok := bearerToken(req.Header.Get("Authorization"))
+			if !ok || token != cfg.HTTPToken {
+				if !invokeAuthLimiter.AllowRequest(speedtestClientIP(req)) {
+					writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+					return
+				}
+			}
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization header must use Bearer scheme"})
+				return
+			}
+			if token != cfg.HTTPToken {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+				return
+			}
 		}
 
 		var spec grpcwire.JobSpec
@@ -316,7 +332,6 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			return nil
 		}
 		sendEvent := func(event model.StreamEvent) error {
-			redactStreamEvent(&event, spec.Tool, spec.HideFirstHops)
 			redactStreamEvent(&event, spec.Tool, cfg.HideFirstHops)
 			return writeLine(event.WirePayload())
 		}
@@ -335,7 +350,6 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 		log.Debug("http job start", "job_id", spec.ID, "tool", spec.Tool, "target", spec.Target)
 		parsed, runErr := r.RunStream(req.Context(), job, p, sendEvent)
 		if parsed != nil {
-			redactHops(parsed, spec.HideFirstHops)
 			redactHops(parsed, cfg.HideFirstHops)
 			compactParsedResult(parsed)
 			_ = writeLine(parsed.WirePayload())
@@ -351,6 +365,17 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 		handler = prefixed
 	}
 	return logHTTPRequests(log, handler)
+}
+
+func bearerToken(header string) (string, bool) {
+	if header == "" {
+		return "", true
+	}
+	token, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok || strings.TrimSpace(token) == "" {
+		return "", false
+	}
+	return token, true
 }
 
 func logHTTPRequests(log *slog.Logger, next http.Handler) http.Handler {
@@ -440,7 +465,6 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 			Provider:     cfg.Provider,
 			ISP:          cfg.ISP,
 			Version:      version.String(),
-			Labels:       cfg.Labels,
 			Token:        cfg.RegisterToken,
 			Capabilities: caps,
 			Protocols:    model.ProtocolMask(cfg.Protocols),
@@ -533,12 +557,10 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 				}
 				log.Debug("job start", "job_id", job.ID, "tool", job.Tool)
 				parsed, err := r.RunStream(jobCtx, job, p, func(event model.StreamEvent) error {
-					redactStreamEvent(&event, jobSpec.Tool, jobSpec.HideFirstHops)
 					redactStreamEvent(&event, jobSpec.Tool, cfg.HideFirstHops)
 					return sendStreamEvent(stream, &sendMu, jobSpec.ID, event)
 				})
 				if parsed != nil {
-					redactHops(parsed, jobSpec.HideFirstHops)
 					redactHops(parsed, cfg.HideFirstHops)
 					compactParsedResult(parsed)
 					if sendErr := sendParsed(stream, &sendMu, jobSpec.ID, parsed); sendErr != nil {
@@ -662,18 +684,18 @@ func newSpeedtestHandler(cfg config.Speedtest, token string, log *slog.Logger) h
 		},
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientIP := httpClientIP(r)
+		clientIP := speedtestClientIP(r)
 		log.Debug("speedtest request", "method", r.Method, "path", r.URL.Path, "client_ip", clientIP)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		if token != "" && r.URL.Query().Get("token") != token {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-			return
-		}
 		if !limiter.AllowRequest(clientIP) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+		if token != "" && r.URL.Query().Get("token") != token {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 			return
 		}
 		size := cfg.DefaultBytes
@@ -700,6 +722,14 @@ func newSpeedtestHandler(cfg config.Speedtest, token string, log *slog.Logger) h
 			log.Debug("speedtest write failed", "client_ip", clientIP, "err", err)
 		}
 	})
+}
+
+func speedtestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func httpClientIP(r *http.Request) string {

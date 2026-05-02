@@ -57,38 +57,44 @@ HTTP token, capabilities, protocols, TLS, and speed-test limits, live in the Age
 Jobs may set `ip_version` to `4` or `6`; tasks are only dispatched to Agents
 whose protocol mask supports the requested protocol.
 
-Every Server and Agent config field can also be supplied through environment
+Server process config and Agent config fields can also be supplied through environment
 variables. Environment variables use the YAML path with a `MTR_` prefix and
 upper-case underscores, for example `tls.ca_files` becomes `MTR_TLS_CA_FILES`,
-`runtime.http_timeout_sec` becomes `MTR_RUNTIME_HTTP_TIMEOUT_SEC`, and
 `speedtest.max_bytes` becomes `MTR_SPEEDTEST_MAX_BYTES`. Config file values win
 when both sources set the same field. Lists of strings may be comma-separated
-or YAML/JSON arrays, and map/list fields such as `outbound_agents`,
-`tool_policies`, and `rate_limit.tools` may be supplied as YAML/JSON fragments.
+or YAML/JSON arrays.
 When Server runs behind a reverse proxy, set `trusted_proxies` to the proxy IPs
 or CIDRs allowed to supply standard proxy headers; otherwise `X-Forwarded-For`
 and `X-Real-IP` are ignored for logging and rate limiting. `client_ip_headers`
 is an ordered list of custom single-IP headers trusted unconditionally before
 proxy headers, for example a long private header name or `Eo-Connecting-Ip`.
-Set `rate_limit.exempt_cidrs` to client IPs or CIDRs that should bypass global,
-CIDR, IP, and per-tool rate limits.
 
-Server scheduling controls live in the server config under `scheduler`: `agent_offline_after_sec` marks stale gRPC Agents offline, `grpc_max_inflight_per_agent` controls concurrent jobs per connected gRPC Agent, and `outbound_max_inflight_per_agent` does the same for HTTP outbound Agents. Runtime knobs live under `runtime`, including probe `count`, `max_hops`, per-hop `probe_step_timeout_sec`, tool timeout presets, DNS resolve timeout, HTTP outbound invoke attempts, and outbound recovery health-check backoff. Set `log_level: debug` in the Server or Agent config for verbose scheduling and execution logs.
+Server runtime policy is managed in persisted managed settings, not in
+`server.yaml`. That includes API tokens, Agent register tokens, rate limits,
+global tool policies, label-based tool policies, label-based scheduler/runtime
+knobs, probe counts, timeouts, and managed HTTP Agents. Per-node tuning is done
+by assigning labels; every node also has the reserved `agent` and
+`id:<agent-id>` labels, so global, grouped, and single-node rules use the same
+label mechanism. On a fresh database, Server creates one admin API token and
+prints it to the log. Use that token with the Manage page or the
+`/v1/manage/tokens`, `/v1/manage/register-tokens`, `/v1/manage/rate-limit`,
+`/v1/manage/labels`, and `/v1/manage/agents` endpoints to create the tokens and
+policy you want. Set
+`log_level: debug` in the Server or Agent config for verbose scheduling and
+execution logs.
 
-Server can also actively invoke HTTP Agents configured under `outbound_agents`
-with `id`, `base_url`, and `http_token`. Each outbound Agent exposes `/invoke`
-when Agent config sets `mode: http` or `mode: grpc,http`. Set Agent
+Server can also actively invoke managed HTTP Agents created through
+`/v1/manage/agents` with `transport`, `id`, `base_url`, and `http_token`.
+Each HTTP Agent exposes `/invoke` when Agent config sets `mode: http` or
+`mode: grpc,http`; `http_token` is required for HTTP mode. Set Agent
 `http_path_prefix` to serve these HTTP endpoints below a prefix such as `/api`
-or `/v1`; then include the same prefix in the Server `base_url`. Server probes
-`/healthz` once at startup to learn version, region, provider, capabilities,
-protocols, and redaction settings, then uses `/healthz` again only during
-recovery after connection failures.
-HTTP Agent listener TLS is controlled by Agent `http_tls`. When Server calls
-HTTPS Agents, configure global `outbound_tls` with CA files, client
-certificate/key to verify Agent server certificate chains and enable mutual TLS;
-use `https://` `base_url` values for those Agents. Client-side TLS verification
-checks the configured CA chain only, so in-cluster addresses do not need to
-match certificate SANs.
+or `/v1`; then include the same prefix in the managed Agent `base_url`. Server
+probes `/healthz` once at startup to learn version, region, provider,
+capabilities, protocols, and redaction settings, then uses `/healthz` again only
+during recovery after connection failures. HTTP Agent listener TLS is controlled
+by Agent `http_tls`; per-Agent TLS settings live on the managed HTTP Agent
+record. Client-side TLS verification checks the configured CA chain only, so
+in-cluster addresses do not need to match certificate SANs.
 
 HTTP Agent contract:
 
@@ -128,7 +134,8 @@ curl -o /dev/null 'http://localhost:9000/speedtest/random?bytes=10485760&token=c
 The speed test endpoint is only available when HTTP mode is enabled, on
 `http_addr`. It is protected by the Agent `http_token`, supplied as the `token`
 query parameter. Configure limits under `speedtest` in the Agent config, or set
-`speedtest.max_bytes: 0` to disable the endpoint.
+`speedtest.max_bytes: 0` to disable the endpoint. Speed-test rate limiting uses
+the direct remote address and ignores `X-Forwarded-For`.
 
 Create a job:
 
@@ -151,12 +158,14 @@ curl -X POST http://localhost:8080/v1/schedules \
 ```
 
 Scheduled jobs select nodes with `schedule_targets`. Every Agent gets the
-server-managed `agent` label plus `id:<agent-id>`; custom labels come from Agent
-config, outbound Agent config, or deployment generators. Use `agent` for all
-nodes, a custom label for a group, or `id:<agent-id>` for one node. Each target
-can carry its own interval. API tokens with a fixed Agent allowlist may still
-use group labels; the server stores that allowlist on the schedule target and
-skips matching Agents outside the token scope when the schedule runs.
+server-managed `agent` label plus `id:<agent-id>`. Custom labels are set in
+server-side Agent or managed HTTP Agent config. Use `agent` for all nodes, a
+custom label for a group, or `id:<agent-id>` for one node.
+Each target can carry its own interval. API tokens with a fixed Agent allowlist
+may still use group labels; the server stores that allowlist on the schedule target and
+skips matching Agents outside the token scope when the schedule runs. Schedule
+and job read endpoints are intentionally shareable to any token with the
+corresponding read permission.
 
 Query scheduled task history:
 
@@ -280,18 +289,15 @@ kubectl annotate node <node> \
   mtr.ztelliot.dev/isp=example-net \
   mtr.ztelliot.dev/protocols=3 \
   mtr.ztelliot.dev/hide-first-hops=0 \
-  mtr.ztelliot.dev/labels=Kubernetes,AS,AS-East \
   mtr.ztelliot.dev/capabilities=ping,traceroute,mtr,http,dns,port
 ```
 
 Change `render-agent-config.sh` in `mtr-agent-config` if your cluster already
-uses different annotation names. `labels` is a comma-separated schedule selector
-list; if omitted, the init container falls back to `country`, `region`,
-`provider`, and `isp`. The server owns the reserved `agent` and `id:*` labels
-and ignores those values when supplied by an Agent. `protocols` uses the same
-bitmask as Agent config: `1` for IPv4, `2` for IPv6, and `3` for both.
-`capabilities` is a comma-separated tool list. If an annotation is missing, the
-init container writes the fallback value into the generated config.
+uses different annotation names. Schedule labels are managed on the server, not
+reported by the Agent. `protocols` uses the same bitmask as Agent config: `1`
+for IPv4, `2` for IPv6, and `3` for both. `capabilities` is a comma-separated
+tool list. If an annotation is missing, the init container writes the fallback
+value into the generated config.
 
 The workbench can create `ping`, `traceroute`, `mtr`, `http`, and `dns` jobs,
 list Agents, and stream structured job events from `/v1/jobs/<job-id>/stream`.
@@ -556,6 +562,10 @@ These manifests assume:
 - The gRPC control plane uses `mtr-server.mtr.svc.cluster.local:8443`, so the example Server certificate SANs match that service DNS name.
 - All Agents share one client certificate, while each pod keeps a unique logical identity through `MTR_ID=metadata.name`.
 - Server stays at `replicas: 1`. The scheduler hub holds in-process connection state, so this baseline does not claim horizontal control-plane scaling.
+- API tokens, Agent register tokens, rate limits, global settings, label-based
+  scheduler/runtime settings, label policies, and managed HTTP Agents are
+  stored in Server managed settings. They are not read from the Kubernetes
+  Server ConfigMap or Secret.
 
 You can either edit the placeholders in `deploy/secrets.example.yaml` or
 create the Secrets directly:
@@ -564,35 +574,12 @@ create the Secrets directly:
 kubectl apply -f deploy/namespace.yaml
 
 kubectl -n mtr create secret generic mtr-server-env \
-  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable' \
-  --from-literal=register-token='change-me-agent-token' \
-  --from-file=api-tokens.yaml=<(cat <<'EOF'
-- secret: frontend-token
-  agents: ["*"]
-  schedule_access: "read"
-  tools:
-    ping:
-      allowed_args:
-        protocol: "^(icmp)$"
-    mtr:
-      allowed_args:
-        protocol: "^(icmp)$"
-    http:
-      allowed_args:
-        method: "^(HEAD)$"
-    dns: {}
-- secret: developer-token
-  all: true
-EOF
-)
+  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable'
 
 kubectl -n mtr create secret generic mtr-server-tls \
   --from-file=ca.crt=certs/ca.crt \
   --from-file=tls.crt=certs/server.crt \
   --from-file=tls.key=certs/server.key
-
-kubectl -n mtr create secret generic mtr-agent-env \
-  --from-literal=register-token='change-me-agent-token'
 
 kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=ca.crt=certs/ca.crt \

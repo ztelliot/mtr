@@ -145,7 +145,6 @@ data:
     protocols="$(read_annotation mtr.ztelliot.dev/protocols protocols || true)"
     hide_first_hops="$(read_annotation mtr.ztelliot.dev/hide-first-hops hide_first_hops || true)"
     capabilities="$(read_annotation mtr.ztelliot.dev/capabilities capabilities || true)"
-    labels="$(read_annotation mtr.ztelliot.dev/labels labels || true)"
 
     country="$(value_or_default country "${country}" CN)"
     region="$(value_or_default region "${region}" k8s)"
@@ -157,12 +156,6 @@ data:
       log "capabilities: using node annotation value ${capabilities}"
     else
       log "capabilities: node annotation missing, using fallback ping,traceroute,mtr,http,dns,port"
-    fi
-    if [ -n "${labels}" ]; then
-      log "labels: using node annotation value ${labels}"
-    else
-      labels="${country},${region},${provider},${isp}"
-      log "labels: node annotation missing, using fallback ${labels}"
     fi
 
     write_capabilities() {
@@ -187,28 +180,6 @@ data:
       fi
     }
 
-    write_labels() {
-      old_ifs="${IFS}"
-      IFS=","
-      seen_file="/tmp/mtr-agent-labels.seen"
-      : > "${seen_file}"
-      for label in ${labels}; do
-        label="$(printf '%s' "${label}" | xargs)"
-        case "${label}" in
-          ""|"agent"|id:*)
-            continue
-            ;;
-        esac
-        if grep -Fxq "${label}" "${seen_file}"; then
-          continue
-        fi
-        printf '%s\n' "${label}" >> "${seen_file}"
-        printf '  - %s\n' "${label}"
-      done
-      rm -f "${seen_file}"
-      IFS="${old_ifs}"
-    }
-
     cat > /work/agent.yaml <<EOF
     mode: "grpc"
     log_level: "info"
@@ -218,10 +189,6 @@ data:
     isp: "${isp}"
     protocols: ${protocols}
     hide_first_hops: ${hide_first_hops}
-    labels:
-    EOF
-    write_labels >> /work/agent.yaml
-    cat >> /work/agent.yaml <<EOF
     capabilities:
     EOF
     write_capabilities >> /work/agent.yaml

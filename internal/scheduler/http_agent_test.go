@@ -28,7 +28,7 @@ import (
 	"github.com/ztelliot/mtr/internal/store"
 )
 
-func TestCallOutboundAgentConsumesStreamingEvents(t *testing.T) {
+func TestCallHTTPAgentConsumesStreamingEvents(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "application/x-ndjson" {
 			t.Fatalf("accept = %q", r.Header.Get("Accept"))
@@ -48,7 +48,7 @@ func TestCallOutboundAgentConsumesStreamingEvents(t *testing.T) {
 	defer srv.Close()
 
 	var got []grpcwire.ResultEvent
-	err := callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1"}, func(event grpcwire.ResultEvent) {
+	err := callHTTPAgent(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1"}, func(event grpcwire.ResultEvent) {
 		got = append(got, event)
 	})
 	if err != nil {
@@ -65,10 +65,10 @@ func TestCallOutboundAgentConsumesStreamingEvents(t *testing.T) {
 	}
 }
 
-func TestCallOutboundAgentRetriesConnectionErrors(t *testing.T) {
-	oldDelay := outboundInvokeRetryDelay
-	outboundInvokeRetryDelay = func(int) time.Duration { return 10 * time.Millisecond }
-	defer func() { outboundInvokeRetryDelay = oldDelay }()
+func TestCallHTTPAgentRetriesConnectionErrors(t *testing.T) {
+	oldDelay := httpAgentInvokeRetryDelay
+	httpAgentInvokeRetryDelay = func(int) time.Duration { return 10 * time.Millisecond }
+	defer func() { httpAgentInvokeRetryDelay = oldDelay }()
 
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -90,7 +90,7 @@ func TestCallOutboundAgentRetriesConnectionErrors(t *testing.T) {
 	defer srv.Close()
 
 	var got []grpcwire.ResultEvent
-	err := callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(event grpcwire.ResultEvent) {
+	err := callHTTPAgent(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(event grpcwire.ResultEvent) {
 		got = append(got, event)
 	})
 	if err != nil {
@@ -101,10 +101,10 @@ func TestCallOutboundAgentRetriesConnectionErrors(t *testing.T) {
 	}
 }
 
-func TestCallOutboundAgentHonorsConfiguredAttemptLimit(t *testing.T) {
-	oldDelay := outboundInvokeRetryDelay
-	outboundInvokeRetryDelay = func(int) time.Duration { return time.Millisecond }
-	defer func() { outboundInvokeRetryDelay = oldDelay }()
+func TestCallHTTPAgentHonorsConfiguredAttemptLimit(t *testing.T) {
+	oldDelay := httpAgentInvokeRetryDelay
+	httpAgentInvokeRetryDelay = func(int) time.Duration { return time.Millisecond }
+	defer func() { httpAgentInvokeRetryDelay = oldDelay }()
 
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -121,7 +121,7 @@ func TestCallOutboundAgentHonorsConfiguredAttemptLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := callOutboundAgentWithAttempts(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, 2, func(grpcwire.ResultEvent) {})
+	err := callHTTPAgentWithAttempts(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, 2, func(grpcwire.ResultEvent) {})
 	if err == nil {
 		t.Fatal("expected connection error")
 	}
@@ -130,36 +130,36 @@ func TestCallOutboundAgentHonorsConfiguredAttemptLimit(t *testing.T) {
 	}
 }
 
-func TestCallOutboundAgentRejectsUntypedEvents(t *testing.T) {
+func TestCallHTTPAgentRejectsUntypedEvents(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_ = json.NewEncoder(w).Encode(map[string]string{"job_id": "job-1"})
 	}))
 	defer srv.Close()
 
-	err := callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(grpcwire.ResultEvent) {})
+	err := callHTTPAgent(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(grpcwire.ResultEvent) {})
 	if err == nil {
 		t.Fatal("expected untyped event to fail")
 	}
 }
 
-func TestCallOutboundAgentHTTPErrorIsNotConnectionError(t *testing.T) {
+func TestCallHTTPAgentHTTPErrorIsNotConnectionError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 
-	err := callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(grpcwire.ResultEvent) {})
+	err := callHTTPAgent(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL}, &grpcwire.JobSpec{ID: "job-1"}, func(grpcwire.ResultEvent) {})
 	if err == nil {
 		t.Fatal("expected HTTP error")
 	}
-	if isOutboundConnectionError(err) {
+	if isHTTPAgentConnectionError(err) {
 		t.Fatalf("HTTP status error should not mark agent offline: %v", err)
 	}
 }
 
-func TestOutboundHealthURLDefaultsToHealthz(t *testing.T) {
-	got, err := outboundHealthURL(OutboundAgent{BaseURL: "https://agent.example.com/path?token=nope"})
+func TestHTTPAgentHealthURLDefaultsToHealthz(t *testing.T) {
+	got, err := httpAgentHealthURL(HTTPAgent{BaseURL: "https://agent.example.com/path?token=nope"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestOutboundHealthURLDefaultsToHealthz(t *testing.T) {
 	}
 }
 
-func TestCheckOutboundAgentHealth(t *testing.T) {
+func TestCheckHTTPAgentHealth(t *testing.T) {
 	var sawAuth bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {
@@ -193,7 +193,7 @@ func TestCheckOutboundAgentHealth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	health, err := probeOutboundAgentHealth(context.Background(), OutboundAgent{BaseURL: srv.URL, Token: "secret"})
+	health, err := probeHTTPAgentHealth(context.Background(), HTTPAgent{BaseURL: srv.URL, Token: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,17 +208,17 @@ func TestCheckOutboundAgentHealth(t *testing.T) {
 	}
 }
 
-func TestOutboundAgentHTTPSMutualTLS(t *testing.T) {
-	files := writeOutboundMTLSFiles(t)
-	assertOutboundAgentHTTPSMutualTLS(t, files)
+func TestHTTPAgentHTTPSMutualTLS(t *testing.T) {
+	files := writeHTTPAgentMTLSFiles(t)
+	assertHTTPAgentHTTPSMutualTLS(t, files)
 }
 
-func TestOutboundAgentHTTPSMutualTLSVerifiesCAWithoutServerName(t *testing.T) {
-	files := writeOutboundMTLSFilesWithServerNames(t, nil, []string{"agent.mtr.svc"})
-	assertOutboundAgentHTTPSMutualTLS(t, files)
+func TestHTTPAgentHTTPSMutualTLSVerifiesCAWithoutServerName(t *testing.T) {
+	files := writeHTTPAgentMTLSFilesWithServerNames(t, nil, []string{"agent.mtr.svc"})
+	assertHTTPAgentHTTPSMutualTLS(t, files)
 }
 
-func assertOutboundAgentHTTPSMutualTLS(t *testing.T, files outboundMTLSFiles) {
+func assertHTTPAgentHTTPSMutualTLS(t *testing.T, files httpAgentMTLSFiles) {
 	t.Helper()
 	serverCert, err := tls.LoadX509KeyPair(files.serverCert, files.serverKey)
 	if err != nil {
@@ -248,7 +248,7 @@ func assertOutboundAgentHTTPSMutualTLS(t *testing.T, files outboundMTLSFiles) {
 	srv.StartTLS()
 	defer srv.Close()
 
-	client, err := NewOutboundHTTPClient(OutboundTLS{
+	client, err := NewHTTPAgentHTTPClient(HTTPAgentTLS{
 		Enabled:  true,
 		CAFiles:  []string{files.ca},
 		CertFile: files.clientCert,
@@ -258,7 +258,7 @@ func assertOutboundAgentHTTPSMutualTLS(t *testing.T, files outboundMTLSFiles) {
 		t.Fatal(err)
 	}
 	var got []grpcwire.ResultEvent
-	err = callOutboundAgent(context.Background(), OutboundAgent{ID: "edge-http", BaseURL: srv.URL, HTTPClient: client}, &grpcwire.JobSpec{ID: "job-1"}, func(event grpcwire.ResultEvent) {
+	err = callHTTPAgent(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL, HTTPClient: client}, &grpcwire.JobSpec{ID: "job-1"}, func(event grpcwire.ResultEvent) {
 		got = append(got, event)
 	})
 	if err != nil {
@@ -269,19 +269,19 @@ func assertOutboundAgentHTTPSMutualTLS(t *testing.T, files outboundMTLSFiles) {
 	}
 }
 
-func TestCheckOutboundAgentHealthRejectsNon2xx(t *testing.T) {
+func TestCheckHTTPAgentHealthRejectsNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 
-	err := checkOutboundAgentHealth(context.Background(), OutboundAgent{BaseURL: srv.URL})
+	err := checkHTTPAgentHealth(context.Background(), HTTPAgent{BaseURL: srv.URL})
 	if err == nil {
 		t.Fatal("expected non-2xx health check to fail")
 	}
 }
 
-func TestOutboundLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
+func TestHTTPAgentLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 	var healthCalls int32
 	var invokeCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -313,12 +313,12 @@ func TestOutboundLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	st := store.NewMemory()
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Second, 10*time.Millisecond, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", Status: model.JobQueued, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	hub := NewHub(st, policy.DefaultPolicies(), time.Second, 10*time.Millisecond, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-http", Status: model.JobQueued, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := st.CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	go hub.outboundLoop(ctx, OutboundAgent{
+	go hub.httpAgentLoop(ctx, HTTPAgent{
 		ID:      "edge-http",
 		BaseURL: srv.URL,
 	})
@@ -354,7 +354,7 @@ func TestOutboundLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 	}
 }
 
-type outboundMTLSFiles struct {
+type httpAgentMTLSFiles struct {
 	ca         string
 	serverCert string
 	serverKey  string
@@ -362,12 +362,12 @@ type outboundMTLSFiles struct {
 	clientKey  string
 }
 
-func writeOutboundMTLSFiles(t *testing.T) outboundMTLSFiles {
+func writeHTTPAgentMTLSFiles(t *testing.T) httpAgentMTLSFiles {
 	t.Helper()
-	return writeOutboundMTLSFilesWithServerNames(t, []net.IP{net.ParseIP("127.0.0.1")}, nil)
+	return writeHTTPAgentMTLSFilesWithServerNames(t, []net.IP{net.ParseIP("127.0.0.1")}, nil)
 }
 
-func writeOutboundMTLSFilesWithServerNames(t *testing.T, serverIPs []net.IP, serverDNSNames []string) outboundMTLSFiles {
+func writeHTTPAgentMTLSFilesWithServerNames(t *testing.T, serverIPs []net.IP, serverDNSNames []string) httpAgentMTLSFiles {
 	t.Helper()
 	dir := t.TempDir()
 	caKey := newTestKey(t)
@@ -399,7 +399,7 @@ func writeOutboundMTLSFilesWithServerNames(t *testing.T, serverIPs []net.IP, ser
 	writeTestPEM(t, clientCertPath, "CERTIFICATE", clientCert)
 	writeTestPEM(t, clientKeyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(clientKey))
 
-	return outboundMTLSFiles{
+	return httpAgentMTLSFiles{
 		ca:         caPath,
 		serverCert: serverCertPath,
 		serverKey:  serverKeyPath,
@@ -453,17 +453,17 @@ func writeTestPEM(t *testing.T, path string, typ string, der []byte) {
 	}
 }
 
-func TestNextOutboundHealthIntervalBacksOffToFiveMinutes(t *testing.T) {
-	if got := nextOutboundHealthInterval(time.Second, time.Second, 300*time.Second); got != 2*time.Second {
+func TestNextHTTPAgentHealthIntervalBacksOffToFiveMinutes(t *testing.T) {
+	if got := nextHTTPAgentHealthInterval(time.Second, time.Second, 300*time.Second); got != 2*time.Second {
 		t.Fatalf("interval = %s", got)
 	}
-	if got := nextOutboundHealthInterval(400*time.Second, time.Second, 300*time.Second); got != 300*time.Second {
+	if got := nextHTTPAgentHealthInterval(400*time.Second, time.Second, 300*time.Second); got != 300*time.Second {
 		t.Fatalf("capped interval = %s", got)
 	}
-	if got := nextOutboundHealthInterval(0, 2*time.Second, 300*time.Second); got != 4*time.Second {
+	if got := nextHTTPAgentHealthInterval(0, 2*time.Second, 300*time.Second); got != 4*time.Second {
 		t.Fatalf("base interval = %s", got)
 	}
-	if got := nextOutboundHealthInterval(10*time.Second, time.Second, 15*time.Second); got != 15*time.Second {
+	if got := nextHTTPAgentHealthInterval(10*time.Second, time.Second, 15*time.Second); got != 15*time.Second {
 		t.Fatalf("custom capped interval = %s", got)
 	}
 }
@@ -471,11 +471,12 @@ func TestNextOutboundHealthIntervalBacksOffToFiveMinutes(t *testing.T) {
 func TestHubRestoresCompactGRPCResultEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", Status: model.JobRunning, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	hub := NewHub(st, policy.DefaultPolicies(), time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-1", Status: model.JobRunning, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := st.CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
+	hub.markInflight("edge-1", job.ID)
 
 	hub.handleAgentResult(ctx, "edge-1", grpcwire.AgentResult{
 		JobID: "job-1",
@@ -507,11 +508,12 @@ func TestHubRestoresCompactGRPCResultEnvelope(t *testing.T) {
 func TestHubRejectsSummaryWithoutExitCode(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", Status: model.JobRunning, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	hub := NewHub(st, policy.DefaultPolicies(), time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := model.Job{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-1", Status: model.JobRunning, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := st.CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
+	hub.markInflight("edge-1", job.ID)
 
 	hub.handleAgentResult(ctx, "edge-1", grpcwire.AgentResult{
 		JobID: "job-1",
@@ -537,7 +539,7 @@ func TestHubRejectsSummaryWithoutExitCode(t *testing.T) {
 func TestHubPublishesFanoutChildEventsToParent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	hub := NewHub(st, policy.DefaultPolicies(), "", time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub := NewHub(st, policy.DefaultPolicies(), time.Second, time.Second, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	now := time.Now()
 	parent := model.Job{ID: "parent-1", Tool: model.ToolPing, Target: "1.1.1.1", Status: model.JobRunning, CreatedAt: now, UpdatedAt: now}
 	child := model.Job{ID: "child-1", ParentID: parent.ID, Tool: model.ToolPing, Target: "1.1.1.1", AgentID: "edge-1", Status: model.JobRunning, CreatedAt: now, UpdatedAt: now}
@@ -547,6 +549,7 @@ func TestHubPublishesFanoutChildEventsToParent(t *testing.T) {
 	if err := st.CreateJob(ctx, child); err != nil {
 		t.Fatal(err)
 	}
+	hub.markInflight("edge-1", child.ID)
 
 	hub.handleAgentResult(ctx, "edge-1", grpcwire.AgentResult{
 		JobID: "child-1",

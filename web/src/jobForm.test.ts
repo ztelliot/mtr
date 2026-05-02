@@ -23,7 +23,7 @@ describe("job form", () => {
     });
   });
 
-  it("requires pinned agent for mtr", () => {
+  it("requires a pinned agent for route tools", () => {
     expect(validateForm({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "" })).toBeNull();
     expect(validateForm({ ...defaultFormState, tool: "traceroute", target: "1.1.1.1", agentId: "" })).toBe("traceroute requires an agent.");
     expect(validateForm({ ...defaultFormState, tool: "traceroute", target: "1.1.1.1", agentId: "edge-1" })).toBeNull();

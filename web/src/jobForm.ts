@@ -19,7 +19,7 @@ export const defaultFormState: JobFormState = {
 const allTools = new Set<Tool>(tools);
 
 export function requiresAgent(tool: Tool): boolean {
-  return tool === "mtr" || tool === "traceroute";
+  return tool === "traceroute" || tool === "mtr";
 }
 
 export function formStateFromLocation(

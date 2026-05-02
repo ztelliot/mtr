@@ -36,7 +36,8 @@ import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailu
 import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
-import { canReadSchedules, dnsTypeOptions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed } from "./permissions";
+import { ManagePage } from "./ManagePage";
+import { canReadManage, canReadSchedules, dnsTypeOptions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTables";
 import { SchedulePage } from "./SchedulePage";
@@ -46,7 +47,7 @@ import { appVersionLabel } from "./version";
 
 const streamErrorStatusFallbackMS = 4000;
 const streamNames = ["message", "progress", "target_resolved", "target_blocked", "unsupported_tool", "unsupported_protocol", "job_timeout", "hop", "hop_summary", "metric", "summary", "completed", "succeeded", "failed", "canceled", "stderr", "stdout"];
-type AppPage = "diagnostics" | "schedules";
+type AppPage = "diagnostics" | "schedules" | "manage";
 
 export function App() {
   const { t, i18n } = useTranslation();
@@ -93,7 +94,7 @@ export function App() {
     () => navTools.filter((tool) => allowedNavTools.includes(tool) || (page === "diagnostics" && tool === form.tool)),
     [allowedNavTools, form.tool, page]
   );
-  const activeNavValue = page === "schedules" ? "schedules" : form.tool;
+  const activeNavValue = page === "schedules" || page === "manage" ? page : form.tool;
   const availableFanoutAgents = useMemo(() => capableAgents(visibleAgents, form.tool), [visibleAgents, form.tool]);
   const routeAgents = useMemo(() => capableAgents(visibleAgents, form.tool), [visibleAgents, form.tool]);
   const allEvents = useMemo(() => Object.values(eventsByJobId).flat(), [eventsByJobId]);
@@ -122,7 +123,7 @@ export function App() {
     () => collectGeoIPTargets(isFanout, nodeRows, mtrRows, mtrTargetIP),
     [isFanout, mtrRows, mtrTargetIP, nodeRows]
   );
-  const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, t);
+  const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, safeAgents, t);
   const onlineAgents = visibleAgents.filter((agent) => agent.status === "online").length;
   const noFanoutAgents = submissionIsFanout && availableFanoutAgents.length === 0;
   const canSubmitCurrentTool = toolAllowed(permissions, form.tool);
@@ -183,6 +184,10 @@ export function App() {
 
   useEffect(() => {
     if (page === "schedules" && permissions && !canReadSchedules(permissions)) {
+      setPage("diagnostics");
+      window.history.replaceState(null, "", formStatePath(form));
+    }
+    if (page === "manage" && permissions && !canReadManage(permissions)) {
       setPage("diagnostics");
       window.history.replaceState(null, "", formStatePath(form));
     }
@@ -607,8 +612,8 @@ export function App() {
   }
 
   function changeNav(value: string) {
-    if (value === "schedules") {
-      if (controlsLocked || !canReadSchedules(permissions)) {
+    if (value === "schedules" || value === "manage") {
+      if (controlsLocked || (value === "schedules" ? !canReadSchedules(permissions) : !canReadManage(permissions))) {
         return;
       }
       closeStreams();
@@ -621,8 +626,8 @@ export function App() {
       setEventsByJobId({});
       setError(null);
       setAttemptedSubmit(false);
-      setPage("schedules");
-      window.history.pushState(null, "", "/schedules");
+      setPage(value);
+      window.history.pushState(null, "", `/${value}`);
       return;
     }
     changeTool(value as Tool);
@@ -800,6 +805,11 @@ export function App() {
                     {t("nav.schedules")}
                   </Tabs.Tab>
                 )}
+                {canReadManage(permissions) && (
+                  <Tabs.Tab className="watch-tab" value="manage" disabled={controlsLocked}>
+                    {t("nav.manage")}
+                  </Tabs.Tab>
+                )}
               </Tabs.List>
             </Tabs>
             {settingsControls("settings-controls desktop-settings")}
@@ -808,6 +818,8 @@ export function App() {
 
         {page === "schedules" ? (
           <SchedulePage client={client} permissions={permissions} agents={visibleAgents} t={t} />
+        ) : page === "manage" ? (
+          <ManagePage client={client} permissions={permissions} t={t} />
         ) : (
           <>
             {canSubmitCurrentTool && (
@@ -922,7 +934,7 @@ export function App() {
               {t("footer.copyright", { year: new Date().getFullYear(), brand: brandText })}
             </Text>
             <Group gap="sm" className="footer-version-group">
-              <Anchor href="https://github.com/ztelliot/mtr" target="_blank" c="dimmed" size="sm" underline="never" className="footer-repo-link">
+              <Anchor href="https://github.com/ztelliot/mtr" target="_blank" rel="noreferrer noopener" c="dimmed" size="sm" underline="never" className="footer-repo-link">
                 <GitBranch size={14} /> ztelliot/mtr
               </Anchor>
               <Text c="dimmed" size="sm" className="footer-separator">|</Text>
@@ -1032,7 +1044,8 @@ function resultHTTPMethod(job: Job | null, form: JobFormState): JobFormState["me
 }
 
 function pageFromLocation(location: Pick<Location, "pathname">): AppPage {
-  return location.pathname.split("/").filter(Boolean)[0] === "schedules" ? "schedules" : "diagnostics";
+  const page = location.pathname.split("/").filter(Boolean)[0];
+  return page === "schedules" || page === "manage" ? page : "diagnostics";
 }
 
 function jobIDFromLocation(location: Pick<Location, "pathname" | "search">): string {

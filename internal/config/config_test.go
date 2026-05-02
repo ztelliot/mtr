@@ -73,25 +73,11 @@ func TestLoadServerUsesEnvAndLetsYAMLOverride(t *testing.T) {
 	t.Setenv("MTR_GRPC_ADDR", ":9998")
 	t.Setenv("MTR_TLS_ENABLED", "true")
 	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
-	t.Setenv("MTR_RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", "7")
-	t.Setenv("MTR_RATE_LIMIT_GLOBAL_BURST", "8")
-	t.Setenv("MTR_RATE_LIMIT_EXEMPT_CIDRS", "127.0.0.1,10.0.0.0/8")
-	t.Setenv("MTR_RUNTIME_HTTP_TIMEOUT_SEC", "9")
-	t.Setenv("MTR_OUTBOUND_TLS_ENABLED", "true")
-	t.Setenv("MTR_OUTBOUND_TLS_CA_FILES", "/env/edge-ca.pem")
 	t.Setenv("MTR_TRUSTED_PROXIES", "127.0.0.1,10.0.0.0/8")
 	t.Setenv("MTR_CLIENT_IP_HEADERS", "Eo-Connecting-Ip,X-Client-IP-Secret")
-	t.Setenv("MTR_OUTBOUND_AGENTS", `[{id: edge-env, base_url: "http://edge", http_token: secret}]`)
-	t.Setenv("MTR_TOOL_POLICIES", `{ping: {enabled: true, allowed_args: {protocol: "^(icmp)$"}, hide_first_hops: 2}}`)
-	t.Setenv("MTR_API_TOKENS", `[{secret: token-env, schedule_access: read, tools: {http: {allowed_args: {method: "^(HEAD)$"}}}, agents: [edge-1]}]`)
 
 	cfg, err := LoadServer(writeConfig(t, `
 http_addr: ":file"
-rate_limit:
-  global:
-    burst: 11
-runtime:
-  http_timeout_sec: 5
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -102,53 +88,11 @@ runtime:
 	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) {
 		t.Fatalf("nested tls env not loaded: %#v", cfg.TLS)
 	}
-	if cfg.RateLimit.Global.RequestsPerMinute != 7 || cfg.RateLimit.Global.Burst != 11 {
-		t.Fatalf("nested rate limit merge failed: %#v", cfg.RateLimit.Global)
-	}
-	if !reflect.DeepEqual(cfg.RateLimit.ExemptCIDRs, []string{"127.0.0.1", "10.0.0.0/8"}) {
-		t.Fatalf("rate limit exempt cidrs env not loaded: %#v", cfg.RateLimit.ExemptCIDRs)
-	}
-	if cfg.Runtime.HTTPTimeoutSec != 5 {
-		t.Fatalf("runtime yaml should override env: %#v", cfg.Runtime)
-	}
 	if !reflect.DeepEqual(cfg.TrustedProxies, []string{"127.0.0.1", "10.0.0.0/8"}) {
 		t.Fatalf("trusted proxies env not loaded: %#v", cfg.TrustedProxies)
 	}
 	if !reflect.DeepEqual(cfg.ClientIPHeaders, []string{"Eo-Connecting-Ip", "X-Client-IP-Secret"}) {
 		t.Fatalf("client ip headers env not loaded: %#v", cfg.ClientIPHeaders)
-	}
-	if cfg.Runtime.ProbeStepTimeoutSec != 1 {
-		t.Fatalf("runtime probe step default = %d, want 1", cfg.Runtime.ProbeStepTimeoutSec)
-	}
-	if cfg.Scheduler.GRPCMaxInflightPerAgent != 4 || cfg.Scheduler.OutboundMaxInflightPerAgent != 1 {
-		t.Fatalf("scheduler inflight defaults = %#v", cfg.Scheduler)
-	}
-	if len(cfg.OutboundAgents) != 1 || cfg.OutboundAgents[0].ID != "edge-env" || cfg.OutboundAgents[0].BaseURL != "http://edge" || cfg.OutboundAgents[0].HTTPToken != "secret" {
-		t.Fatalf("outbound agents env not loaded: %#v", cfg.OutboundAgents)
-	}
-	if !cfg.OutboundTLS.Enabled || !reflect.DeepEqual(cfg.OutboundTLS.CAFiles, []string{"/env/edge-ca.pem"}) {
-		t.Fatalf("outbound tls env not loaded: %#v", cfg.OutboundTLS)
-	}
-	pingPolicy := cfg.ToolPolicies["ping"]
-	if !pingPolicy.Enabled || pingPolicy.HideFirstHops != 2 || pingPolicy.AllowedArgs["protocol"] != "^(icmp)$" {
-		t.Fatalf("tool policies env not loaded: %#v", cfg.ToolPolicies)
-	}
-	if len(cfg.APITokenPermissions) != 1 || cfg.APITokenPermissions[0].Secret != "token-env" || cfg.APITokenPermissions[0].ScheduleAccess != "read" || cfg.APITokenPermissions[0].Tools["http"].AllowedArgs["method"] != "^(HEAD)$" || !reflect.DeepEqual(cfg.APITokenPermissions[0].Agents, []string{"edge-1"}) {
-		t.Fatalf("api token permissions env not loaded: %#v", cfg.APITokenPermissions)
-	}
-}
-
-func TestLoadServerSchedulerInflightLimits(t *testing.T) {
-	cfg, err := LoadServer(writeConfig(t, `
-scheduler:
-  grpc_max_inflight_per_agent: 7
-  outbound_max_inflight_per_agent: 2
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Scheduler.GRPCMaxInflightPerAgent != 7 || cfg.Scheduler.OutboundMaxInflightPerAgent != 2 {
-		t.Fatalf("explicit scheduler inflight limits not loaded: %#v", cfg.Scheduler)
 	}
 }
 
@@ -167,30 +111,58 @@ speedtest:
 	}
 }
 
-func TestLoadServerYAMLEmptyMapOverridesEnvMap(t *testing.T) {
-	t.Setenv("MTR_TOOL_POLICIES", `{ping: {enabled: true}}`)
-
-	cfg, err := LoadServer(writeConfig(t, `tool_policies: {}`))
-	if err != nil {
-		t.Fatal(err)
+func TestNormalizeManagedSettingsGeneratesAndRejectsDuplicateTokens(t *testing.T) {
+	settings := DefaultManagedSettings()
+	settings.APITokens = []APITokenPermission{{Tools: map[string]APIToolScope{"ping": {}}}}
+	settings.RegisterTokens = []RegisterToken{{Name: "edge"}}
+	if err := NormalizeManagedSettings(&settings); err != nil {
+		t.Fatalf("expected missing secrets to be generated: %v", err)
 	}
-	if len(cfg.ToolPolicies) != 0 {
-		t.Fatalf("yaml empty map should override env map: %#v", cfg.ToolPolicies)
+	if settings.APITokens[0].ID == "" || settings.APITokens[0].Secret == "" || settings.RegisterTokens[0].ID == "" || settings.RegisterTokens[0].Token == "" || settings.RegisterTokens[0].Name != "edge" {
+		t.Fatalf("expected generated tokens: %#v", settings)
+	}
+	settings = DefaultManagedSettings()
+	settings.APITokens = []APITokenPermission{{Secret: "same", All: true}, {Secret: "same", All: true}}
+	if err := NormalizeManagedSettings(&settings); err == nil {
+		t.Fatal("expected duplicate secret to be rejected")
+	}
+	settings = DefaultManagedSettings()
+	settings.RegisterTokens = []RegisterToken{{ID: "same", Token: "one"}, {ID: "same", Token: "two"}}
+	if err := NormalizeManagedSettings(&settings); err == nil {
+		t.Fatal("expected duplicate register token id to be rejected")
 	}
 }
 
-func TestLoadServerRejectsInvalidAPITokenPermissions(t *testing.T) {
-	if _, err := LoadServer(writeConfig(t, `api_tokens: [{tools: {ping: {}}}]`)); err == nil {
-		t.Fatal("expected missing secret to be rejected")
+func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
+	settings := DefaultManagedSettings()
+	settings.LabelConfigs = map[string]LabelConfig{
+		" edge ": {
+			Runtime:   &Runtime{Count: 2},
+			Scheduler: &Scheduler{GRPCMaxInflightPerAgent: 1},
+			ToolPolicies: map[string]Policy{
+				"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp"}},
+			},
+		},
+		"": {Runtime: &Runtime{Count: 1}},
 	}
-	if _, err := LoadServer(writeConfig(t, `
-api_tokens:
-  - secret: same
-    all: true
-  - secret: same
-    all: true
-`)); err == nil {
-		t.Fatal("expected duplicate secret to be rejected")
+	if err := NormalizeManagedSettings(&settings); err != nil {
+		t.Fatal(err)
+	}
+	cfg, ok := settings.LabelConfigs["edge"]
+	if !ok || len(settings.LabelConfigs) != 2 {
+		t.Fatalf("label configs not normalized: %#v", settings.LabelConfigs)
+	}
+	if settings.LabelConfigs[AgentAllLabel].Runtime == nil || settings.LabelConfigs[AgentAllLabel].Scheduler == nil {
+		t.Fatalf("agent label defaults not ensured: %#v", settings.LabelConfigs[AgentAllLabel])
+	}
+	if cfg.Runtime == nil || cfg.Runtime.Count != 2 || cfg.Runtime.MaxHops == 0 {
+		t.Fatalf("label runtime not defaulted: %#v", cfg.Runtime)
+	}
+	if cfg.Scheduler == nil || cfg.Scheduler.GRPCMaxInflightPerAgent != 1 || cfg.Scheduler.PollIntervalSec == 0 {
+		t.Fatalf("label scheduler not defaulted: %#v", cfg.Scheduler)
+	}
+	if cfg.ToolPolicies["ping"].AllowedArgs["protocol"] != "tcp" {
+		t.Fatalf("label policy not preserved: %#v", cfg.ToolPolicies)
 	}
 }
 

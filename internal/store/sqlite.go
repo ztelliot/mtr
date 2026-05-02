@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 	_ "modernc.org/sqlite"
 )
@@ -147,7 +148,7 @@ func (s *SQLite) ListQueuedJobs(ctx context.Context, agentID string, caps []mode
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		select id, coalesce(parent_id,''), coalesce(scheduled_id,''), scheduled_revision, tool, target, coalesce(resolved_target,''), args, ip_version, coalesce(agent_id,''), resolve_on_agent, status, created_at, updated_at, started_at, completed_at, coalesce(error,'')
 		from jobs
-		where status=? and (agent_id is null or agent_id=?) and tool in (%s)
+		where status=? and agent_id=? and tool in (%s)
 		  and (ip_version=0 or (ip_version=4 and (? & 1) <> 0) or (ip_version=6 and (? & 2) <> 0))
 		order by created_at asc
 		limit ?`, strings.Join(placeholders, ",")), args...)
@@ -166,15 +167,15 @@ func (s *SQLite) ListQueuedJobs(ctx context.Context, agentID string, caps []mode
 	return jobs, rows.Err()
 }
 
-func (s *SQLite) ClaimQueuedJob(ctx context.Context, id string) (bool, error) {
+func (s *SQLite) ClaimQueuedJob(ctx context.Context, id string, agentID string) (bool, error) {
 	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 		update jobs
 		set status=?,
 		    updated_at=?,
 		    started_at=case when started_at is null then ? else started_at end
-		where id=? and status=?`,
-		model.JobRunning, now, now, id, model.JobQueued)
+		where id=? and agent_id=? and status=?`,
+		model.JobRunning, now, now, id, agentID, model.JobQueued)
 	if err != nil {
 		return false, err
 	}
@@ -458,31 +459,25 @@ func (s *SQLite) ListScheduledJobHistory(ctx context.Context, scheduleID string,
 }
 
 func (s *SQLite) UpsertAgent(ctx context.Context, a model.Agent) error {
-	a.Labels = model.NormalizeAgentLabels(a.ID, a.Labels)
 	caps, err := marshalJSONString(a.Capabilities)
 	if err != nil {
 		return err
 	}
-	labels, err := marshalJSONString(a.Labels)
-	if err != nil {
-		return err
-	}
 	_, err = s.db.ExecContext(ctx, `
-			insert into agents (id, country, region, provider, isp, version, labels, token_hash, capabilities, protocols, status, last_seen_at, created_at)
-			values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+			insert into agents (id, country, region, provider, isp, version, token_hash, capabilities, protocols, status, last_seen_at, created_at)
+			values (?,?,?,?,?,?,?,?,?,?,?,?)
 			on conflict (id) do update set
 				country=excluded.country,
 				region=excluded.region,
 				provider=excluded.provider,
 				isp=excluded.isp,
 				version=excluded.version,
-				labels=excluded.labels,
 				token_hash=excluded.token_hash,
 				capabilities=excluded.capabilities,
 				protocols=excluded.protocols,
 				status=excluded.status,
 				last_seen_at=excluded.last_seen_at`,
-		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, labels, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
+		a.ID, a.Country, a.Region, a.Provider, a.ISP, a.Version, a.TokenHash, caps, a.Protocols, a.Status, a.LastSeenAt, a.CreatedAt)
 	return err
 }
 
@@ -496,6 +491,22 @@ func (s *SQLite) MarkAgentOffline(ctx context.Context, id string) error {
 	return err
 }
 
+func (s *SQLite) DeleteAgent(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `delete from agents where id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	_, _ = s.db.ExecContext(ctx, `delete from agent_configs where id=?`, id)
+	return nil
+}
+
 func (s *SQLite) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `update agents set status=? where status=? and last_seen_at < ?`, model.AgentOffline, model.AgentOnline, time.Now().UTC().Add(-ttl))
 	if err != nil {
@@ -505,7 +516,7 @@ func (s *SQLite) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration) 
 }
 
 func (s *SQLite) ListAgents(ctx context.Context) ([]model.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, country, region, provider, isp, coalesce(version,''), labels, capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
+	rows, err := s.db.QueryContext(ctx, `select id, country, region, provider, isp, coalesce(version,''), capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
 	if err != nil {
 		return nil, err
 	}
@@ -514,11 +525,7 @@ func (s *SQLite) ListAgents(ctx context.Context) ([]model.Agent, error) {
 	for rows.Next() {
 		var a model.Agent
 		var caps string
-		var labels string
-		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &labels, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
-			return nil, err
-		}
-		if err := unmarshalJSONString(labels, &a.Labels); err != nil {
+		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := unmarshalJSONString(caps, &a.Capabilities); err != nil {
@@ -527,6 +534,298 @@ func (s *SQLite) ListAgents(ctx context.Context) ([]model.Agent, error) {
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
+}
+
+func (s *SQLite) ListAgentConfigs(ctx context.Context) ([]config.AgentConfig, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select id, disabled, labels, created_at, updated_at
+		from agent_configs order by id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cfgs []config.AgentConfig
+	for rows.Next() {
+		cfg, err := scanSQLiteAgentConfig(rows)
+		if err != nil {
+			return nil, err
+		}
+		cfgs = append(cfgs, cfg)
+	}
+	return cfgs, rows.Err()
+}
+
+func (s *SQLite) GetAgentConfig(ctx context.Context, id string) (config.AgentConfig, error) {
+	row := s.db.QueryRowContext(ctx, `
+		select id, disabled, labels, created_at, updated_at
+		from agent_configs where id=?`, id)
+	cfg, err := scanSQLiteAgentConfig(row)
+	if errors.Is(err, ErrNotFound) {
+		return config.AgentConfig{ID: id}, nil
+	}
+	return cfg, err
+}
+
+func (s *SQLite) UpsertAgentConfig(ctx context.Context, cfg config.AgentConfig) error {
+	if err := normalizeAgentConfig(&cfg); err != nil {
+		return err
+	}
+	labelsRaw, err := marshalJSONString(cfg.Labels)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.db.ExecContext(ctx, `
+		insert into agent_configs (id, disabled, labels, created_at, updated_at)
+		values (?,?,?,?,?)
+		on conflict (id) do update set
+			disabled=excluded.disabled,
+			labels=excluded.labels,
+			updated_at=excluded.updated_at`,
+		cfg.ID, cfg.Disabled, labelsRaw, now, now)
+	return err
+}
+
+func (s *SQLite) DeleteAgentConfig(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `delete from agent_configs where id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) GetManagedSettings(ctx context.Context) (config.ManagedSettings, error) {
+	settings := config.DefaultManagedSettings()
+	row := s.db.QueryRowContext(ctx, `select value, revision, updated_at from managed_settings where id='default'`)
+	var raw string
+	var updated time.Time
+	if err := row.Scan(&raw, &settings.Revision, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return settings, nil
+		}
+		return settings, err
+	}
+	if err := unmarshalJSONString(raw, &settings); err != nil {
+		return settings, err
+	}
+	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
+	return settings, config.NormalizeManagedSettings(&settings)
+}
+
+func (s *SQLite) UpdateManagedSettings(ctx context.Context, settings config.ManagedSettings) (config.ManagedSettings, error) {
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return settings, err
+	}
+	currentRevision := settings.Revision
+	settings.Revision = currentRevision + 1
+	raw, err := marshalJSONString(settings)
+	if err != nil {
+		return settings, err
+	}
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `
+		insert into managed_settings (id, value, updated_at)
+		values ('default', ?, ?)
+		on conflict (id) do update set
+			value=excluded.value,
+			revision=revision+1,
+			updated_at=excluded.updated_at
+		where revision=?`, raw, now, currentRevision)
+	if err != nil {
+		return settings, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return settings, err
+	}
+	if rows == 0 {
+		return settings, ErrConflict
+	}
+	return s.GetManagedSettings(ctx)
+}
+
+func (s *SQLite) UpdateManagedSettingsAndAgentLabels(ctx context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.HTTPAgent) (config.ManagedSettings, error) {
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return settings, err
+	}
+	currentRevision := settings.Revision
+	settings.Revision = currentRevision + 1
+	raw, err := marshalJSONString(settings)
+	if err != nil {
+		return settings, err
+	}
+	cfgs = append([]config.AgentConfig(nil), cfgs...)
+	for i := range cfgs {
+		if err := normalizeAgentConfig(&cfgs[i]); err != nil {
+			return settings, err
+		}
+	}
+	nodes = append([]config.HTTPAgent(nil), nodes...)
+	for i := range nodes {
+		if err := normalizeHTTPAgent(&nodes[i]); err != nil {
+			return settings, err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return settings, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `
+		insert into managed_settings (id, value, updated_at)
+		values ('default', ?, ?)
+		on conflict (id) do update set
+			value=excluded.value,
+			revision=revision+1,
+			updated_at=excluded.updated_at
+		where revision=?`, raw, now, currentRevision)
+	if err != nil {
+		return settings, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return settings, err
+	}
+	if rows == 0 {
+		return settings, ErrConflict
+	}
+	for _, cfg := range cfgs {
+		labelsRaw, err := marshalJSONString(cfg.Labels)
+		if err != nil {
+			return settings, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			insert into agent_configs (id, disabled, labels, created_at, updated_at)
+			values (?,?,?,?,?)
+			on conflict (id) do update set
+				disabled=excluded.disabled,
+				labels=excluded.labels,
+				updated_at=excluded.updated_at`,
+			cfg.ID, cfg.Disabled, labelsRaw, now, now); err != nil {
+			return settings, err
+		}
+	}
+	for _, node := range nodes {
+		labelsRaw, err := marshalJSONString(node.Labels)
+		if err != nil {
+			return settings, err
+		}
+		tlsRaw, err := marshalJSONString(node.TLS)
+		if err != nil {
+			return settings, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			insert into http_agents (id, enabled, base_url, http_token, labels, tls, created_at, updated_at)
+			values (?,?,?,?,?,?,?,?)
+			on conflict (id) do update set
+				enabled=excluded.enabled,
+				base_url=excluded.base_url,
+				http_token=excluded.http_token,
+				labels=excluded.labels,
+				tls=excluded.tls,
+				updated_at=excluded.updated_at`,
+			node.ID, node.Enabled, node.BaseURL, node.HTTPToken, labelsRaw, tlsRaw, now, now); err != nil {
+			return settings, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return settings, err
+	}
+	return s.GetManagedSettings(ctx)
+}
+
+func (s *SQLite) AddAuditEvent(ctx context.Context, event AuditEvent) error {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		insert into audit_events (subject, action, target, decision, reason, created_at)
+		values (?, ?, ?, ?, ?, ?)`,
+		strings.TrimSpace(event.Subject),
+		strings.TrimSpace(event.Action),
+		strings.TrimSpace(event.Target),
+		strings.TrimSpace(event.Decision),
+		strings.TrimSpace(event.Reason),
+		event.CreatedAt)
+	return err
+}
+
+func (s *SQLite) ListHTTPAgents(ctx context.Context) ([]config.HTTPAgent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select id, enabled, base_url, http_token, labels, tls, created_at, updated_at
+		from http_agents order by id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var nodes []config.HTTPAgent
+	for rows.Next() {
+		node, err := scanSQLiteHTTPAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+func (s *SQLite) GetHTTPAgent(ctx context.Context, id string) (config.HTTPAgent, error) {
+	row := s.db.QueryRowContext(ctx, `
+		select id, enabled, base_url, http_token, labels, tls, created_at, updated_at
+		from http_agents where id=?`, id)
+	return scanSQLiteHTTPAgent(row)
+}
+
+func (s *SQLite) UpsertHTTPAgent(ctx context.Context, node config.HTTPAgent) error {
+	if err := normalizeHTTPAgent(&node); err != nil {
+		return err
+	}
+	labels, err := marshalJSONString(node.Labels)
+	if err != nil {
+		return err
+	}
+	tlsRaw, err := marshalJSONString(node.TLS)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.db.ExecContext(ctx, `
+		insert into http_agents (id, enabled, base_url, http_token, labels, tls, created_at, updated_at)
+		values (?,?,?,?,?,?,?,?)
+		on conflict (id) do update set
+			enabled=excluded.enabled,
+			base_url=excluded.base_url,
+			http_token=excluded.http_token,
+			labels=excluded.labels,
+			tls=excluded.tls,
+			updated_at=excluded.updated_at`,
+		node.ID, node.Enabled, node.BaseURL, node.HTTPToken, labels, tlsRaw, now, now)
+	return err
+}
+
+func (s *SQLite) DeleteHTTPAgent(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `delete from http_agents where id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 type sqliteScanner interface {
@@ -581,6 +880,52 @@ func scanSQLiteSchedule(row sqliteScanner) (model.ScheduledJob, error) {
 	return sched, nil
 }
 
+func scanSQLiteHTTPAgent(row sqliteScanner) (config.HTTPAgent, error) {
+	var node config.HTTPAgent
+	var labels string
+	var tlsRaw string
+	var created time.Time
+	var updated time.Time
+	err := row.Scan(&node.ID, &node.Enabled, &node.BaseURL, &node.HTTPToken, &labels, &tlsRaw, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return node, ErrNotFound
+	}
+	if err != nil {
+		return node, err
+	}
+	if err := unmarshalJSONString(labels, &node.Labels); err != nil {
+		return node, err
+	}
+	node.Labels = normalizedAgentLabels(node.Labels)
+	if err := unmarshalJSONString(tlsRaw, &node.TLS); err != nil {
+		return node, err
+	}
+	node.CreatedAt = created.Format(time.RFC3339)
+	node.UpdatedAt = updated.Format(time.RFC3339)
+	return node, nil
+}
+
+func scanSQLiteAgentConfig(row sqliteScanner) (config.AgentConfig, error) {
+	var cfg config.AgentConfig
+	var labelsRaw string
+	var created time.Time
+	var updated time.Time
+	err := row.Scan(&cfg.ID, &cfg.Disabled, &labelsRaw, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return cfg, ErrNotFound
+	}
+	if err != nil {
+		return cfg, err
+	}
+	if err := unmarshalJSONString(labelsRaw, &cfg.Labels); err != nil {
+		return cfg, err
+	}
+	cfg.Labels = normalizedAgentLabels(cfg.Labels)
+	cfg.CreatedAt = created.Format(time.RFC3339)
+	cfg.UpdatedAt = updated.Format(time.RFC3339)
+	return cfg, nil
+}
+
 func nullString(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
@@ -617,7 +962,6 @@ create table if not exists agents (
   provider text not null default '',
   isp text not null default '',
   version text not null default '',
-  labels text not null default '[]',
   token_hash text not null default '',
   capabilities text not null default '[]',
   protocols integer not null default 3,
@@ -692,21 +1036,59 @@ create table if not exists audit_events (
   decision text not null,
   reason text not null default '',
   created_at timestamp not null default current_timestamp
+);
+
+create table if not exists managed_settings (
+  id text primary key,
+  value text not null default '{}',
+  revision integer not null default 1,
+  updated_at timestamp not null
+);
+
+create table if not exists http_agents (
+  id text primary key,
+  enabled integer not null default 1,
+  base_url text not null,
+  http_token text not null default '',
+  labels text not null default '[]',
+  tls text not null default '{}',
+  created_at timestamp not null,
+  updated_at timestamp not null
+);
+
+create table if not exists agent_configs (
+  id text primary key,
+  disabled integer not null default 0,
+  labels text not null default '[]',
+  created_at timestamp not null,
+  updated_at timestamp not null
 );`); err != nil {
 		return err
 	}
-	_, _ = db.ExecContext(ctx, `alter table jobs add column scheduled_id text null`)
-	_, _ = db.ExecContext(ctx, `alter table jobs add column scheduled_revision integer not null default 0`)
-	_, _ = db.ExecContext(ctx, `alter table jobs add column parent_id text null`)
-	_, _ = db.ExecContext(ctx, `alter table jobs add column resolved_target text null`)
-	_, _ = db.ExecContext(ctx, `alter table jobs add column resolve_on_agent integer not null default 0`)
-	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column resolve_on_agent integer not null default 0`)
-	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column revision integer not null default 1`)
-	_, _ = db.ExecContext(ctx, `alter table scheduled_jobs add column schedule_targets text not null default '[]'`)
-	_, _ = db.ExecContext(ctx, `alter table agents add column version text not null default ''`)
-	_, _ = db.ExecContext(ctx, `alter table agents add column labels text not null default '[]'`)
-	_, _ = db.ExecContext(ctx, `create index if not exists idx_jobs_scheduled on jobs (scheduled_id, scheduled_revision, created_at)`)
-	_, _ = db.ExecContext(ctx, `create index if not exists idx_jobs_parent on jobs (parent_id, created_at)`)
-	_, _ = db.ExecContext(ctx, `alter table job_events add column event text null`)
+	if err := seedSQLiteManagedSettings(ctx, db); err != nil {
+		return err
+	}
 	return nil
+}
+
+func seedSQLiteManagedSettings(ctx context.Context, db *sql.DB) error {
+	settings := config.DefaultManagedSettings()
+	settings.Revision = 1
+	now := time.Now().UTC()
+	settings.UpdatedAt = now.Format(time.RFC3339Nano)
+	raw, err := marshalJSONString(settings)
+	if err != nil {
+		return err
+	}
+	res, err := db.ExecContext(ctx, `
+		insert into managed_settings (id, value, updated_at)
+		values ('default', ?, ?)
+		on conflict (id) do nothing`, raw, now)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows > 0 {
+		printInitialAdminToken(settings)
+	}
+	return err
 }

@@ -3,26 +3,39 @@ package store
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 )
 
 type Memory struct {
-	mu        sync.Mutex
-	jobs      map[string]model.Job
-	events    map[string][]model.JobEvent
-	agents    map[string]model.Agent
-	schedules map[string]model.ScheduledJob
+	mu         sync.Mutex
+	jobs       map[string]model.Job
+	events     map[string][]model.JobEvent
+	agents     map[string]model.Agent
+	agentCfgs  map[string]config.AgentConfig
+	schedules  map[string]model.ScheduledJob
+	settings   config.ManagedSettings
+	httpAgents map[string]config.HTTPAgent
+	audit      []AuditEvent
 }
 
 func NewMemory() *Memory {
+	settings := config.CloneManagedSettings(config.DefaultManagedSettings())
+	settings.Revision = 1
+	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return &Memory{
-		jobs:      map[string]model.Job{},
-		events:    map[string][]model.JobEvent{},
-		agents:    map[string]model.Agent{},
-		schedules: map[string]model.ScheduledJob{},
+		jobs:       map[string]model.Job{},
+		events:     map[string][]model.JobEvent{},
+		agents:     map[string]model.Agent{},
+		agentCfgs:  map[string]config.AgentConfig{},
+		schedules:  map[string]model.ScheduledJob{},
+		settings:   settings,
+		httpAgents: map[string]config.HTTPAgent{},
+		audit:      []AuditEvent{},
 	}
 }
 
@@ -91,7 +104,7 @@ func (m *Memory) ListQueuedJobs(_ context.Context, agentID string, caps []model.
 	var jobs []model.Job
 	for _, j := range m.jobs {
 		required := protocolForJob(j)
-		if j.Status == model.JobQueued && (j.AgentID == "" || j.AgentID == agentID) && capSet[j.Tool] && (required == 0 || protocols&required != 0) {
+		if j.Status == model.JobQueued && j.AgentID == agentID && capSet[j.Tool] && (required == 0 || protocols&required != 0) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -102,14 +115,14 @@ func (m *Memory) ListQueuedJobs(_ context.Context, agentID string, caps []model.
 	return jobs, nil
 }
 
-func (m *Memory) ClaimQueuedJob(_ context.Context, id string) (bool, error) {
+func (m *Memory) ClaimQueuedJob(_ context.Context, id string, agentID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j, ok := m.jobs[id]
 	if !ok {
 		return false, nil
 	}
-	if j.Status != model.JobQueued {
+	if j.Status != model.JobQueued || j.AgentID != agentID {
 		return false, nil
 	}
 	now := time.Now().UTC()
@@ -289,7 +302,6 @@ func (m *Memory) UpsertAgent(_ context.Context, a model.Agent) error {
 	if old, ok := m.agents[a.ID]; ok {
 		a.CreatedAt = old.CreatedAt
 	}
-	a.Labels = model.NormalizeAgentLabels(a.ID, a.Labels)
 	m.agents[a.ID] = a
 	return nil
 }
@@ -319,6 +331,17 @@ func (m *Memory) MarkAgentOffline(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *Memory) DeleteAgent(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.agents[id]; !ok {
+		return ErrNotFound
+	}
+	delete(m.agents, id)
+	delete(m.agentCfgs, id)
+	return nil
+}
+
 func (m *Memory) MarkStaleAgentsOffline(_ context.Context, ttl time.Duration) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -343,4 +366,194 @@ func (m *Memory) ListAgents(_ context.Context) ([]model.Agent, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+func (m *Memory) ListAgentConfigs(_ context.Context) ([]config.AgentConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]config.AgentConfig, 0, len(m.agentCfgs))
+	for _, cfg := range m.agentCfgs {
+		out = append(out, cfg)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (m *Memory) GetAgentConfig(_ context.Context, id string) (config.AgentConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg, ok := m.agentCfgs[id]
+	if !ok {
+		return config.AgentConfig{ID: id}, nil
+	}
+	return cfg, nil
+}
+
+func (m *Memory) UpsertAgentConfig(_ context.Context, cfg config.AgentConfig) error {
+	if err := normalizeAgentConfig(&cfg); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if existing, ok := m.agentCfgs[cfg.ID]; ok {
+		cfg.CreatedAt = existing.CreatedAt
+	} else {
+		cfg.CreatedAt = now
+	}
+	cfg.UpdatedAt = now
+	m.agentCfgs[cfg.ID] = cfg
+	return nil
+}
+
+func (m *Memory) DeleteAgentConfig(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.agentCfgs[id]; !ok {
+		return ErrNotFound
+	}
+	delete(m.agentCfgs, id)
+	return nil
+}
+
+func (m *Memory) GetManagedSettings(_ context.Context) (config.ManagedSettings, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	settings := config.CloneManagedSettings(m.settings)
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return settings, err
+	}
+	return settings, nil
+}
+
+func (m *Memory) UpdateManagedSettings(_ context.Context, settings config.ManagedSettings) (config.ManagedSettings, error) {
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return settings, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if settings.Revision != m.settings.Revision {
+		return settings, ErrConflict
+	}
+	settings.Revision = m.settings.Revision + 1
+	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	m.settings = config.CloneManagedSettings(settings)
+	return config.CloneManagedSettings(m.settings), nil
+}
+
+func (m *Memory) UpdateManagedSettingsAndAgentLabels(_ context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.HTTPAgent) (config.ManagedSettings, error) {
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return settings, err
+	}
+	cfgs = append([]config.AgentConfig(nil), cfgs...)
+	for i := range cfgs {
+		if err := normalizeAgentConfig(&cfgs[i]); err != nil {
+			return settings, err
+		}
+	}
+	nodes = append([]config.HTTPAgent(nil), nodes...)
+	for i := range nodes {
+		if err := normalizeHTTPAgent(&nodes[i]); err != nil {
+			return settings, err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if settings.Revision != m.settings.Revision {
+		return settings, ErrConflict
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	settings.Revision = m.settings.Revision + 1
+	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	m.settings = config.CloneManagedSettings(settings)
+	for _, cfg := range cfgs {
+		if existing, ok := m.agentCfgs[cfg.ID]; ok {
+			cfg.CreatedAt = existing.CreatedAt
+		} else {
+			cfg.CreatedAt = now
+		}
+		cfg.UpdatedAt = now
+		m.agentCfgs[cfg.ID] = cfg
+	}
+	for _, node := range nodes {
+		if existing, ok := m.httpAgents[node.ID]; ok {
+			node.CreatedAt = existing.CreatedAt
+		} else {
+			node.CreatedAt = now
+		}
+		node.UpdatedAt = now
+		m.httpAgents[node.ID] = node
+	}
+	return config.CloneManagedSettings(m.settings), nil
+}
+
+func (m *Memory) AddAuditEvent(_ context.Context, event AuditEvent) error {
+	event.Subject = strings.TrimSpace(event.Subject)
+	event.Action = strings.TrimSpace(event.Action)
+	event.Target = strings.TrimSpace(event.Target)
+	event.Decision = strings.TrimSpace(event.Decision)
+	event.Reason = strings.TrimSpace(event.Reason)
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audit = append(m.audit, event)
+	return nil
+}
+
+func (m *Memory) AuditEvents() []AuditEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]AuditEvent, len(m.audit))
+	copy(out, m.audit)
+	return out
+}
+
+func (m *Memory) ListHTTPAgents(_ context.Context) ([]config.HTTPAgent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]config.HTTPAgent, 0, len(m.httpAgents))
+	for _, node := range m.httpAgents {
+		out = append(out, node)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (m *Memory) GetHTTPAgent(_ context.Context, id string) (config.HTTPAgent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	node, ok := m.httpAgents[id]
+	if !ok {
+		return config.HTTPAgent{}, ErrNotFound
+	}
+	return node, nil
+}
+
+func (m *Memory) UpsertHTTPAgent(_ context.Context, node config.HTTPAgent) error {
+	if err := normalizeHTTPAgent(&node); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if existing, ok := m.httpAgents[node.ID]; ok {
+		node.CreatedAt = existing.CreatedAt
+	} else {
+		node.CreatedAt = now
+	}
+	node.UpdatedAt = now
+	m.httpAgents[node.ID] = node
+	return nil
+}
+
+func (m *Memory) DeleteHTTPAgent(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.httpAgents[id]; !ok {
+		return ErrNotFound
+	}
+	delete(m.httpAgents, id)
+	return nil
 }

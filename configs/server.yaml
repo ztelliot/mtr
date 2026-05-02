@@ -8,24 +8,6 @@ trusted_proxies: []
 # Custom single-IP headers accepted unconditionally before proxy headers.
 # X-Real-IP is handled separately and only trusted from trusted_proxies.
 client_ip_headers: []
-api_tokens:
-  - secret: "frontend-token"
-    agents: ["*"]
-    schedule_access: "read"
-    tools:
-      ping:
-        allowed_args:
-          protocol: "^(icmp)$"
-      mtr:
-        allowed_args:
-          protocol: "^(icmp)$"
-      http:
-        allowed_args:
-          method: "^(HEAD)$"
-      dns: {}
-  - secret: "developer-token"
-    all: true
-register_token: "change-me-agent-token"
 # Set all three files to enable mTLS on the gRPC control plane and require
 # Agents to present a client certificate signed by this CA.
 tls:
@@ -33,61 +15,3 @@ tls:
   ca_files: []
   cert_file: ""
   key_file: ""
-rate_limit:
-  # Client IPs/CIDRs that bypass global, CIDR, IP, and per-tool rate limits.
-  exempt_cidrs: []
-  global:
-    requests_per_minute: 600
-    burst: 200
-  ip:
-    requests_per_minute: 60
-    burst: 20
-  cidr:
-    requests_per_minute: 300
-    burst: 100
-    ipv4_prefix: 24
-    ipv6_prefix: 64
-  tools:
-    ping:
-      global:
-        requests_per_minute: 120
-        burst: 40
-    traceroute:
-      global:
-        requests_per_minute: 60
-        burst: 20
-    mtr:
-      global:
-        requests_per_minute: 30
-        burst: 10
-    port:
-      global:
-        requests_per_minute: 120
-        burst: 40
-runtime:
-  count: 10
-  max_hops: 30
-  probe_step_timeout_sec: 1
-  max_tool_timeout_sec: 300
-  http_timeout_sec: 5
-  dns_timeout_sec: 5
-  resolve_timeout_sec: 3
-  outbound_invoke_attempts: 3
-  outbound_max_health_interval_sec: 300
-scheduler:
-  agent_offline_after_sec: 90
-  grpc_max_inflight_per_agent: 4
-  outbound_max_inflight_per_agent: 1
-  poll_interval_sec: 2
-outbound_tls:
-  enabled: false
-  ca_files: []
-  cert_file: ""
-  key_file: ""
-outbound_agents: []
-# Example for an agent reachable through a forwarded gateway port or HTTP function endpoint:
-# outbound_agents:
-#   - id: "edge-http-1"
-#     base_url: "https://agent.example.com"
-#     http_token: "change-me-agent-http-token"
-tool_policies: {}

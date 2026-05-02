@@ -7,33 +7,30 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	AgentAllLabel      = "agent"
+	AgentIDLabelPrefix = "id:"
+)
+
 type Server struct {
-	HTTPAddr            string               `yaml:"http_addr"`
-	GRPCAddr            string               `yaml:"grpc_addr"`
-	LogLevel            string               `yaml:"log_level"`
-	DatabaseURL         string               `yaml:"database_url"`
-	GeoIPURL            string               `yaml:"geoip_url"`
-	TrustedProxies      []string             `yaml:"trusted_proxies"`
-	ClientIPHeaders     []string             `yaml:"client_ip_headers"`
-	APITokenPermissions []APITokenPermission `yaml:"api_tokens"`
-	RegisterToken       string               `yaml:"register_token"`
-	TLS                 TLS                  `yaml:"tls"`
-	RateLimit           RateLimit            `yaml:"rate_limit"`
-	Runtime             Runtime              `yaml:"runtime"`
-	Scheduler           Scheduler            `yaml:"scheduler"`
-	OutboundTLS         TLS                  `yaml:"outbound_tls"`
-	OutboundAgents      []OutboundAgent      `yaml:"outbound_agents"`
-	ToolPolicies        map[string]Policy    `yaml:"tool_policies"`
+	HTTPAddr        string   `yaml:"http_addr"`
+	GRPCAddr        string   `yaml:"grpc_addr"`
+	LogLevel        string   `yaml:"log_level"`
+	DatabaseURL     string   `yaml:"database_url"`
+	GeoIPURL        string   `yaml:"geoip_url"`
+	TrustedProxies  []string `yaml:"trusted_proxies"`
+	ClientIPHeaders []string `yaml:"client_ip_headers"`
+	TLS             TLS      `yaml:"tls"`
 }
 
-type OutboundAgent struct {
-	ID        string   `yaml:"id"`
-	BaseURL   string   `yaml:"base_url"`
-	HTTPToken string   `yaml:"http_token"`
-	Labels    []string `yaml:"labels"`
+type HTTPPeer struct {
+	ID        string `yaml:"id"`
+	BaseURL   string `yaml:"base_url"`
+	HTTPToken string `yaml:"http_token"`
 }
 
 type Agent struct {
@@ -44,7 +41,6 @@ type Agent struct {
 	Region         string    `yaml:"region"`
 	Provider       string    `yaml:"provider"`
 	ISP            string    `yaml:"isp"`
-	Labels         []string  `yaml:"labels"`
 	ServerAddr     string    `yaml:"server_addr"`
 	RegisterToken  string    `yaml:"register_token"`
 	HTTPToken      string    `yaml:"http_token"`
@@ -75,68 +71,115 @@ type TLS struct {
 }
 
 type RateLimit struct {
-	Global      LimitSpec                `yaml:"global"`
-	IP          LimitSpec                `yaml:"ip"`
-	CIDR        CIDRSpec                 `yaml:"cidr"`
-	Tools       map[string]ToolLimitSpec `yaml:"tools"`
-	ExemptCIDRs []string                 `yaml:"exempt_cidrs"`
+	Global      LimitSpec                `yaml:"global" json:"global"`
+	IP          LimitSpec                `yaml:"ip" json:"ip"`
+	CIDR        CIDRSpec                 `yaml:"cidr" json:"cidr"`
+	Tools       map[string]ToolLimitSpec `yaml:"tools" json:"tools,omitempty"`
+	ExemptCIDRs []string                 `yaml:"exempt_cidrs" json:"exempt_cidrs,omitempty"`
 }
 
 type CIDRSpec struct {
-	RequestsPerMinute int `yaml:"requests_per_minute"`
-	Burst             int `yaml:"burst"`
-	IPv4Prefix        int `yaml:"ipv4_prefix"`
-	IPv6Prefix        int `yaml:"ipv6_prefix"`
+	RequestsPerMinute int `yaml:"requests_per_minute" json:"requests_per_minute"`
+	Burst             int `yaml:"burst" json:"burst"`
+	IPv4Prefix        int `yaml:"ipv4_prefix" json:"ipv4_prefix"`
+	IPv6Prefix        int `yaml:"ipv6_prefix" json:"ipv6_prefix"`
 }
 
 type LimitSpec struct {
-	RequestsPerMinute int `yaml:"requests_per_minute"`
-	Burst             int `yaml:"burst"`
+	RequestsPerMinute int `yaml:"requests_per_minute" json:"requests_per_minute"`
+	Burst             int `yaml:"burst" json:"burst"`
 }
 
 type ToolLimitSpec struct {
-	Global LimitSpec `yaml:"global"`
-	CIDR   LimitSpec `yaml:"cidr"`
-	IP     LimitSpec `yaml:"ip"`
+	Global LimitSpec `yaml:"global" json:"global"`
+	CIDR   LimitSpec `yaml:"cidr" json:"cidr"`
+	IP     LimitSpec `yaml:"ip" json:"ip"`
 }
 
 type Runtime struct {
-	Count                        int `yaml:"count"`
-	MaxHops                      int `yaml:"max_hops"`
-	ProbeStepTimeoutSec          int `yaml:"probe_step_timeout_sec"`
-	MaxToolTimeoutSec            int `yaml:"max_tool_timeout_sec"`
-	HTTPTimeoutSec               int `yaml:"http_timeout_sec"`
-	DNSTimeoutSec                int `yaml:"dns_timeout_sec"`
-	ResolveTimeoutSec            int `yaml:"resolve_timeout_sec"`
-	OutboundInvokeAttempts       int `yaml:"outbound_invoke_attempts"`
-	OutboundMaxHealthIntervalSec int `yaml:"outbound_max_health_interval_sec"`
+	Count                    int `yaml:"count" json:"count"`
+	MaxHops                  int `yaml:"max_hops" json:"max_hops"`
+	ProbeStepTimeoutSec      int `yaml:"probe_step_timeout_sec" json:"probe_step_timeout_sec"`
+	MaxToolTimeoutSec        int `yaml:"max_tool_timeout_sec" json:"max_tool_timeout_sec"`
+	HTTPTimeoutSec           int `yaml:"http_timeout_sec" json:"http_timeout_sec"`
+	DNSTimeoutSec            int `yaml:"dns_timeout_sec" json:"dns_timeout_sec"`
+	ResolveTimeoutSec        int `yaml:"resolve_timeout_sec" json:"resolve_timeout_sec"`
+	HTTPInvokeAttempts       int `yaml:"http_invoke_attempts" json:"http_invoke_attempts"`
+	HTTPMaxHealthIntervalSec int `yaml:"http_max_health_interval_sec" json:"http_max_health_interval_sec"`
 }
 
 type Scheduler struct {
-	AgentOfflineAfterSec        int `yaml:"agent_offline_after_sec"`
-	GRPCMaxInflightPerAgent     int `yaml:"grpc_max_inflight_per_agent"`
-	OutboundMaxInflightPerAgent int `yaml:"outbound_max_inflight_per_agent"`
-	PollIntervalSec             int `yaml:"poll_interval_sec"`
+	AgentOfflineAfterSec    int `yaml:"agent_offline_after_sec" json:"agent_offline_after_sec"`
+	GRPCMaxInflightPerAgent int `yaml:"grpc_max_inflight_per_agent" json:"grpc_max_inflight_per_agent"`
+	HTTPMaxInflightPerAgent int `yaml:"http_max_inflight_per_agent" json:"http_max_inflight_per_agent"`
+	PollIntervalSec         int `yaml:"poll_interval_sec" json:"poll_interval_sec"`
 }
 
 type Policy struct {
-	Enabled       bool              `yaml:"enabled"`
-	AllowedArgs   map[string]string `yaml:"allowed_args"`
-	HideFirstHops int               `yaml:"hide_first_hops"`
+	Enabled     bool              `yaml:"enabled" json:"enabled"`
+	AllowedArgs map[string]string `yaml:"allowed_args" json:"allowed_args,omitempty"`
 }
 
 type APITokenPermission struct {
-	Secret         string                  `yaml:"secret"`
-	All            bool                    `yaml:"all"`
-	ScheduleAccess string                  `yaml:"schedule_access"`
-	Agents         []string                `yaml:"agents"`
-	Tools          map[string]APIToolScope `yaml:"tools"`
+	ID             string                  `yaml:"id" json:"id,omitempty"`
+	Name           string                  `yaml:"name" json:"name,omitempty"`
+	Secret         string                  `yaml:"secret" json:"secret"`
+	Rotate         bool                    `yaml:"rotate" json:"rotate,omitempty"`
+	All            bool                    `yaml:"all" json:"all,omitempty"`
+	ScheduleAccess string                  `yaml:"schedule_access" json:"schedule_access,omitempty"`
+	ManageAccess   string                  `yaml:"manage_access" json:"manage_access,omitempty"`
+	Agents         []string                `yaml:"agents" json:"agents,omitempty"`
+	DeniedAgents   []string                `yaml:"denied_agents" json:"denied_agents,omitempty"`
+	AgentTags      []string                `yaml:"agent_tags" json:"agent_tags,omitempty"`
+	DeniedTags     []string                `yaml:"denied_tags" json:"denied_tags,omitempty"`
+	Tools          map[string]APIToolScope `yaml:"tools" json:"tools,omitempty"`
 }
 
 type APIToolScope struct {
-	AllowedArgs    map[string]string `yaml:"allowed_args"`
-	ResolveOnAgent *bool             `yaml:"resolve_on_agent"`
-	IPVersions     []int             `yaml:"ip_versions"`
+	AllowedArgs    map[string]string `yaml:"allowed_args" json:"allowed_args,omitempty"`
+	ResolveOnAgent *bool             `yaml:"resolve_on_agent" json:"resolve_on_agent,omitempty"`
+	IPVersions     []int             `yaml:"ip_versions" json:"ip_versions,omitempty"`
+}
+
+type RegisterToken struct {
+	ID     string `yaml:"id" json:"id,omitempty"`
+	Name   string `yaml:"name" json:"name,omitempty"`
+	Token  string `yaml:"token" json:"token"`
+	Rotate bool   `yaml:"rotate" json:"rotate,omitempty"`
+}
+
+type ManagedSettings struct {
+	Revision       int64                  `yaml:"revision" json:"revision,omitempty"`
+	UpdatedAt      string                 `yaml:"updated_at" json:"updated_at,omitempty"`
+	RateLimit      RateLimit              `yaml:"rate_limit" json:"rate_limit"`
+	LabelConfigs   map[string]LabelConfig `yaml:"label_configs" json:"label_configs,omitempty"`
+	APITokens      []APITokenPermission   `yaml:"api_tokens" json:"api_tokens,omitempty"`
+	RegisterTokens []RegisterToken        `yaml:"register_tokens" json:"register_tokens,omitempty"`
+}
+
+type LabelConfig struct {
+	Runtime      *Runtime          `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Scheduler    *Scheduler        `yaml:"scheduler,omitempty" json:"scheduler,omitempty"`
+	ToolPolicies map[string]Policy `yaml:"tool_policies,omitempty" json:"tool_policies,omitempty"`
+}
+
+type HTTPAgent struct {
+	ID        string   `json:"id" yaml:"id"`
+	Enabled   bool     `json:"enabled" yaml:"enabled"`
+	BaseURL   string   `json:"base_url" yaml:"base_url"`
+	HTTPToken string   `json:"http_token,omitempty" yaml:"http_token"`
+	Labels    []string `json:"labels,omitempty" yaml:"labels"`
+	TLS       TLS      `json:"tls" yaml:"tls"`
+	CreatedAt string   `json:"created_at,omitempty" yaml:"-"`
+	UpdatedAt string   `json:"updated_at,omitempty" yaml:"-"`
+}
+
+type AgentConfig struct {
+	ID        string   `json:"id" yaml:"id"`
+	Disabled  bool     `json:"disabled" yaml:"disabled"`
+	Labels    []string `json:"labels,omitempty" yaml:"labels"`
+	CreatedAt string   `json:"created_at,omitempty" yaml:"-"`
+	UpdatedAt string   `json:"updated_at,omitempty" yaml:"-"`
 }
 
 func LoadServer(path string) (Server, error) {
@@ -153,32 +196,251 @@ func LoadServer(path string) (Server, error) {
 	if cfg.GRPCAddr == "" {
 		cfg.GRPCAddr = ":8443"
 	}
-	defaultRateLimit(&cfg.RateLimit)
-	defaultRuntime(&cfg.Runtime)
-	if cfg.Scheduler.AgentOfflineAfterSec == 0 {
-		cfg.Scheduler.AgentOfflineAfterSec = 90
-	}
-	if cfg.Scheduler.GRPCMaxInflightPerAgent == 0 {
-		cfg.Scheduler.GRPCMaxInflightPerAgent = 4
-	}
-	if cfg.Scheduler.OutboundMaxInflightPerAgent == 0 {
-		cfg.Scheduler.OutboundMaxInflightPerAgent = 1
-	}
-	if cfg.Scheduler.PollIntervalSec == 0 {
-		cfg.Scheduler.PollIntervalSec = 2
-	}
-	if err := normalizeAPITokenPermissions(cfg.APITokenPermissions); err != nil {
-		return cfg, err
-	}
 	return cfg, nil
 }
 
-func normalizeAPITokenPermissions(perms []APITokenPermission) error {
+func NormalizeManagedSettings(settings *ManagedSettings) error {
+	DefaultRateLimit(&settings.RateLimit)
+	settings.LabelConfigs = NormalizeLabelConfigs(settings.LabelConfigs)
+	EnsureAgentLabelConfig(settings)
+	if err := NormalizeAPITokenPermissions(settings.APITokens); err != nil {
+		return err
+	}
+	var err error
+	settings.RegisterTokens, err = NormalizeRegisterTokens(settings.RegisterTokens)
+	if err != nil {
+		return err
+	}
+	ClearManagedSettingsRotateFlags(settings)
+	return nil
+}
+
+func ClearManagedSettingsRotateFlags(settings *ManagedSettings) {
+	for i := range settings.APITokens {
+		settings.APITokens[i].Rotate = false
+	}
+	for i := range settings.RegisterTokens {
+		settings.RegisterTokens[i].Rotate = false
+	}
+}
+
+func DefaultManagedSettings() ManagedSettings {
+	settings := ManagedSettings{}
+	_ = NormalizeManagedSettings(&settings)
+	settings.APITokens = []APITokenPermission{DefaultAdminAPIToken()}
+	_ = NormalizeManagedSettings(&settings)
+	return settings
+}
+
+func DefaultAdminAPIToken() APITokenPermission {
+	return APITokenPermission{
+		Name:           "admin",
+		Secret:         uuid.NewString(),
+		All:            true,
+		ScheduleAccess: "write",
+		ManageAccess:   "write",
+		Agents:         []string{"*"},
+	}
+}
+
+func CloneManagedSettings(settings ManagedSettings) ManagedSettings {
+	settings.RateLimit = cloneRateLimit(settings.RateLimit)
+	settings.LabelConfigs = cloneLabelConfigs(settings.LabelConfigs)
+	settings.APITokens = cloneAPITokenPermissions(settings.APITokens)
+	settings.RegisterTokens = cloneRegisterTokens(settings.RegisterTokens)
+	return settings
+}
+
+func EnsureAgentLabelConfig(settings *ManagedSettings) {
+	if settings.LabelConfigs == nil {
+		settings.LabelConfigs = map[string]LabelConfig{}
+	}
+	cfg := settings.LabelConfigs[AgentAllLabel]
+	if cfg.Runtime == nil {
+		runtime := DefaultRuntime()
+		cfg.Runtime = &runtime
+	}
+	if cfg.Scheduler == nil {
+		var scheduler Scheduler
+		DefaultScheduler(&scheduler)
+		cfg.Scheduler = &scheduler
+	}
+	if cfg.ToolPolicies == nil {
+		cfg.ToolPolicies = map[string]Policy{}
+	}
+	settings.LabelConfigs[AgentAllLabel] = cfg
+}
+
+func NormalizeLabelConfigs(configs map[string]LabelConfig) map[string]LabelConfig {
+	if len(configs) == 0 {
+		return nil
+	}
+	out := make(map[string]LabelConfig, len(configs))
+	for label, cfg := range configs {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if cfg.Runtime != nil {
+			runtime := *cfg.Runtime
+			DefaultRuntimeValues(&runtime)
+			cfg.Runtime = &runtime
+		}
+		if cfg.Scheduler != nil {
+			scheduler := *cfg.Scheduler
+			DefaultScheduler(&scheduler)
+			cfg.Scheduler = &scheduler
+		}
+		cfg.ToolPolicies = clonePolicies(cfg.ToolPolicies)
+		out[label] = cfg
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneRateLimit(rateLimit RateLimit) RateLimit {
+	rateLimit.Tools = cloneToolLimits(rateLimit.Tools)
+	rateLimit.ExemptCIDRs = cloneStringSlice(rateLimit.ExemptCIDRs)
+	return rateLimit
+}
+
+func clonePolicies(policies map[string]Policy) map[string]Policy {
+	if policies == nil {
+		return nil
+	}
+	out := make(map[string]Policy, len(policies))
+	for name, policy := range policies {
+		policy.AllowedArgs = cloneStringMap(policy.AllowedArgs)
+		out[name] = policy
+	}
+	return out
+}
+
+func cloneLabelConfigs(configs map[string]LabelConfig) map[string]LabelConfig {
+	if configs == nil {
+		return nil
+	}
+	out := make(map[string]LabelConfig, len(configs))
+	for label, cfg := range configs {
+		if cfg.Runtime != nil {
+			runtime := *cfg.Runtime
+			cfg.Runtime = &runtime
+		}
+		if cfg.Scheduler != nil {
+			scheduler := *cfg.Scheduler
+			cfg.Scheduler = &scheduler
+		}
+		cfg.ToolPolicies = clonePolicies(cfg.ToolPolicies)
+		out[label] = cfg
+	}
+	return out
+}
+
+func cloneToolLimits(limits map[string]ToolLimitSpec) map[string]ToolLimitSpec {
+	if limits == nil {
+		return nil
+	}
+	out := make(map[string]ToolLimitSpec, len(limits))
+	for name, limit := range limits {
+		out[name] = limit
+	}
+	return out
+}
+
+func cloneAPITokenPermissions(tokens []APITokenPermission) []APITokenPermission {
+	if tokens == nil {
+		return nil
+	}
+	out := make([]APITokenPermission, len(tokens))
+	for i, token := range tokens {
+		token.Agents = cloneStringSlice(token.Agents)
+		token.DeniedAgents = cloneStringSlice(token.DeniedAgents)
+		token.AgentTags = cloneStringSlice(token.AgentTags)
+		token.DeniedTags = cloneStringSlice(token.DeniedTags)
+		token.Tools = cloneAPIToolScopes(token.Tools)
+		out[i] = token
+	}
+	return out
+}
+
+func cloneRegisterTokens(tokens []RegisterToken) []RegisterToken {
+	if tokens == nil {
+		return nil
+	}
+	out := make([]RegisterToken, len(tokens))
+	copy(out, tokens)
+	return out
+}
+
+func cloneAPIToolScopes(scopes map[string]APIToolScope) map[string]APIToolScope {
+	if scopes == nil {
+		return nil
+	}
+	out := make(map[string]APIToolScope, len(scopes))
+	for name, scope := range scopes {
+		scope.AllowedArgs = cloneStringMap(scope.AllowedArgs)
+		scope.ResolveOnAgent = cloneBoolPtr(scope.ResolveOnAgent)
+		scope.IPVersions = cloneIntSlice(scope.IPVersions)
+		out[name] = scope
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
+}
+
+func cloneIntSlice(values []int) []int {
+	if values == nil {
+		return nil
+	}
+	out := make([]int, len(values))
+	copy(out, values)
+	return out
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
+func NormalizeAPITokenPermissions(perms []APITokenPermission) error {
 	seen := map[string]struct{}{}
+	seenIDs := map[string]struct{}{}
 	for i := range perms {
+		id := strings.TrimSpace(perms[i].ID)
+		if id == "" {
+			id = uuid.NewString()
+		}
+		if _, ok := seenIDs[id]; ok {
+			return fmt.Errorf("api_tokens[%d].id is duplicated", i)
+		}
+		seenIDs[id] = struct{}{}
+		perms[i].ID = id
 		secret := strings.TrimSpace(perms[i].Secret)
 		if secret == "" {
-			return fmt.Errorf("api_tokens[%d].secret is required", i)
+			secret = uuid.NewString()
 		}
 		if _, ok := seen[secret]; ok {
 			return fmt.Errorf("api_tokens[%d].secret is duplicated", i)
@@ -193,17 +455,52 @@ func normalizeAPITokenPermissions(perms []APITokenPermission) error {
 		default:
 			return fmt.Errorf("api_tokens[%d].schedule_access must be none, read, or write", i)
 		}
+		switch access := strings.TrimSpace(strings.ToLower(perms[i].ManageAccess)); access {
+		case "", "none":
+			perms[i].ManageAccess = "none"
+		case "read", "write":
+			perms[i].ManageAccess = access
+		default:
+			return fmt.Errorf("api_tokens[%d].manage_access must be none, read, or write", i)
+		}
 	}
 	return nil
 }
 
+func NormalizeRegisterTokens(tokens []RegisterToken) ([]RegisterToken, error) {
+	out := make([]RegisterToken, 0, len(tokens))
+	seen := map[string]struct{}{}
+	seenIDs := map[string]struct{}{}
+	for i, item := range tokens {
+		item.ID = strings.TrimSpace(item.ID)
+		if item.ID == "" {
+			item.ID = uuid.NewString()
+		}
+		if _, ok := seenIDs[item.ID]; ok {
+			return nil, fmt.Errorf("register_tokens[%d].id is duplicated", i)
+		}
+		seenIDs[item.ID] = struct{}{}
+		item.Name = strings.TrimSpace(item.Name)
+		item.Token = strings.TrimSpace(item.Token)
+		if item.Token == "" {
+			item.Token = uuid.NewString()
+		}
+		if _, ok := seen[item.Token]; ok {
+			return nil, fmt.Errorf("register_tokens[%d].token is duplicated", i)
+		}
+		seen[item.Token] = struct{}{}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
 func DefaultRuntime() Runtime {
 	var runtime Runtime
-	defaultRuntime(&runtime)
+	DefaultRuntimeValues(&runtime)
 	return runtime
 }
 
-func defaultRuntime(cfg *Runtime) {
+func DefaultRuntimeValues(cfg *Runtime) {
 	if cfg.Count == 0 {
 		cfg.Count = 10
 	}
@@ -225,15 +522,30 @@ func defaultRuntime(cfg *Runtime) {
 	if cfg.ResolveTimeoutSec == 0 {
 		cfg.ResolveTimeoutSec = 3
 	}
-	if cfg.OutboundInvokeAttempts == 0 {
-		cfg.OutboundInvokeAttempts = 3
+	if cfg.HTTPInvokeAttempts == 0 {
+		cfg.HTTPInvokeAttempts = 3
 	}
-	if cfg.OutboundMaxHealthIntervalSec == 0 {
-		cfg.OutboundMaxHealthIntervalSec = 300
+	if cfg.HTTPMaxHealthIntervalSec == 0 {
+		cfg.HTTPMaxHealthIntervalSec = 300
 	}
 }
 
-func defaultRateLimit(cfg *RateLimit) {
+func DefaultScheduler(cfg *Scheduler) {
+	if cfg.AgentOfflineAfterSec == 0 {
+		cfg.AgentOfflineAfterSec = 90
+	}
+	if cfg.GRPCMaxInflightPerAgent == 0 {
+		cfg.GRPCMaxInflightPerAgent = 4
+	}
+	if cfg.HTTPMaxInflightPerAgent == 0 {
+		cfg.HTTPMaxInflightPerAgent = 1
+	}
+	if cfg.PollIntervalSec == 0 {
+		cfg.PollIntervalSec = 2
+	}
+}
+
+func DefaultRateLimit(cfg *RateLimit) {
 	if cfg.Global.RequestsPerMinute == 0 {
 		cfg.Global.RequestsPerMinute = 600
 	}

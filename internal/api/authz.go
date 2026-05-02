@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 
 	"github.com/ztelliot/mtr/internal/model"
@@ -18,7 +18,11 @@ type TokenConfig struct {
 type TokenScope struct {
 	All            bool
 	ScheduleAccess ScheduleAccess
+	ManageAccess   ScheduleAccess
 	Agents         []string
+	DeniedAgents   []string
+	AgentTags      []string
+	DeniedTags     []string
 	Tools          map[model.Tool]ToolScope
 }
 
@@ -40,6 +44,7 @@ type PermissionsResponse struct {
 	Tools          map[model.Tool]ToolPermission `json:"tools"`
 	Agents         []string                      `json:"agents"`
 	ScheduleAccess ScheduleAccess                `json:"schedule_access"`
+	ManageAccess   ScheduleAccess                `json:"manage_access"`
 }
 
 type ToolPermission struct {
@@ -56,11 +61,12 @@ type principal struct {
 
 type principalContextKey struct{}
 
-var allTokenScope = TokenScope{All: true, ScheduleAccess: ScheduleAccessWrite, Agents: []string{"*"}}
+var allTokenScope = TokenScope{All: true, ScheduleAccess: ScheduleAccessWrite, ManageAccess: ScheduleAccessWrite, Agents: []string{"*"}}
 
 func normalizeTokenScope(scope TokenScope) TokenScope {
 	if scope.All {
 		scope.ScheduleAccess = ScheduleAccessWrite
+		scope.ManageAccess = ScheduleAccessWrite
 		if len(scope.Agents) == 0 {
 			scope.Agents = []string{"*"}
 		}
@@ -68,6 +74,9 @@ func normalizeTokenScope(scope TokenScope) TokenScope {
 	}
 	if scope.ScheduleAccess == "" {
 		scope.ScheduleAccess = ScheduleAccessNone
+	}
+	if scope.ManageAccess == "" {
+		scope.ManageAccess = ScheduleAccessNone
 	}
 	if scope.Tools == nil {
 		scope.Tools = map[model.Tool]ToolScope{}
@@ -95,29 +104,51 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 	if !ok {
 		return fmt.Errorf("tool %q is not allowed", req.Tool)
 	}
+	policies := s.policiesForJob(ctx, req)
+	toolPolicy, ok := policies.Get(req.Tool)
+	if !ok {
+		return fmt.Errorf("tool %q is not allowed", req.Tool)
+	}
 	if len(toolScope.IPVersions) > 0 && !containsIPVersion(toolScope.IPVersions, req.IPVersion) {
 		return fmt.Errorf("ip_version %d is not allowed for %s", req.IPVersion, req.Tool)
 	}
 	if toolScope.ResolveOnAgent != nil && req.ResolveOnAgent != *toolScope.ResolveOnAgent {
 		return fmt.Errorf("resolve_on_agent=%t is not allowed for %s", req.ResolveOnAgent, req.Tool)
 	}
-	if req.AgentID != "" && !scopeAllowsAgent(scope, req.AgentID) {
-		return fmt.Errorf("agent %q is not allowed", req.AgentID)
+	if req.AgentID != "" {
+		agents, err := s.agentsWithManagedLabels(ctx)
+		if err != nil {
+			return err
+		}
+		allowed := false
+		for _, agent := range agents {
+			if agent.ID == req.AgentID {
+				allowed = scopeAllowsAgentRecord(scope, agent)
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("agent %q is not allowed", req.AgentID)
+		}
 	}
 	if toolScope.AllowedArgs != nil {
+		allowedArgs := policy.IntersectAllowedArgs(toolPolicy.AllowedArgs, toolScope.AllowedArgs)
 		for key, value := range effectiveArgs(req) {
-			pattern, ok := toolScope.AllowedArgs[key]
+			pattern, ok := allowedArgs[key]
 			if !ok {
 				return fmt.Errorf("argument %q is not allowed for %s", key, req.Tool)
 			}
-			if pattern != "" {
-				re, err := regexp.Compile(pattern)
-				if err != nil {
-					return fmt.Errorf("argument %q has invalid permission pattern", key)
-				}
-				if !re.MatchString(value) {
+			if key == "port" {
+				if err := policy.ValidatePortAllowed(pattern, value); err != nil {
+					if errors.Is(err, policy.ErrInvalidPortRangeRule) {
+						return fmt.Errorf("argument %q has invalid permission pattern", key)
+					}
 					return fmt.Errorf("argument %q is invalid", key)
 				}
+				continue
+			}
+			if pattern != "" && !policy.AllowedArgContains(pattern, value) {
+				return fmt.Errorf("argument %q is invalid", key)
 			}
 		}
 	}
@@ -127,8 +158,9 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 func (s *Server) permissionsForContext(ctx context.Context) PermissionsResponse {
 	scope := principalFromContext(ctx).scope
 	tools := map[model.Tool]ToolPermission{}
+	policies := s.policiesForLabels([]string{model.AgentAllLabel})
 	for _, tool := range allTools() {
-		p, ok := s.policies.Get(tool)
+		p, ok := policies.Get(tool)
 		if !ok {
 			continue
 		}
@@ -147,6 +179,7 @@ func (s *Server) permissionsForContext(ctx context.Context) PermissionsResponse 
 		Tools:          tools,
 		Agents:         permissionAgents(scope),
 		ScheduleAccess: effectiveScheduleAccess(scope),
+		ManageAccess:   effectiveManageAccess(scope),
 	}
 }
 
@@ -161,6 +194,17 @@ func (s *Server) scheduleWriteAllowed(ctx context.Context) bool {
 	return effectiveScheduleAccess(scope) == ScheduleAccessWrite
 }
 
+func (s *Server) manageReadAllowed(ctx context.Context) bool {
+	scope := principalFromContext(ctx).scope
+	access := effectiveManageAccess(scope)
+	return access == ScheduleAccessRead || access == ScheduleAccessWrite
+}
+
+func (s *Server) manageWriteAllowed(ctx context.Context) bool {
+	scope := principalFromContext(ctx).scope
+	return effectiveManageAccess(scope) == ScheduleAccessWrite
+}
+
 func effectiveScheduleAccess(scope TokenScope) ScheduleAccess {
 	if scope.All {
 		return ScheduleAccessWrite
@@ -173,20 +217,43 @@ func effectiveScheduleAccess(scope TokenScope) ScheduleAccess {
 	}
 }
 
+func effectiveManageAccess(scope TokenScope) ScheduleAccess {
+	if scope.All {
+		return ScheduleAccessWrite
+	}
+	switch scope.ManageAccess {
+	case ScheduleAccessRead, ScheduleAccessWrite:
+		return scope.ManageAccess
+	default:
+		return ScheduleAccessNone
+	}
+}
+
 func scopeAllowsAgent(scope TokenScope, agentID string) bool {
 	if scopeAllowsAllAgents(scope) {
+		return !stringListContains(scope.DeniedAgents, agentID)
+	}
+	if len(scope.Agents) == 0 && len(scope.AgentTags) > 0 {
+		return !stringListContains(scope.DeniedAgents, agentID)
+	}
+	return stringListContains(scope.Agents, agentID) && !stringListContains(scope.DeniedAgents, agentID)
+}
+
+func scopeAllowsAgentRecord(scope TokenScope, agent model.Agent) bool {
+	if !scopeAllowsAgent(scope, agent.ID) {
+		return false
+	}
+	if len(scope.DeniedTags) > 0 && agentHasAnyLabel(agent, scope.DeniedTags) {
+		return false
+	}
+	if len(scope.AgentTags) == 0 {
 		return true
 	}
-	for _, allowed := range scope.Agents {
-		if allowed == agentID {
-			return true
-		}
-	}
-	return false
+	return agentHasAnyLabel(agent, scope.AgentTags)
 }
 
 func scopeAllowsAllAgents(scope TokenScope) bool {
-	if scope.All || len(scope.Agents) == 0 {
+	if scope.All || (len(scope.Agents) == 0 && len(scope.AgentTags) == 0) {
 		return true
 	}
 	for _, allowed := range scope.Agents {
@@ -197,30 +264,49 @@ func scopeAllowsAllAgents(scope TokenScope) bool {
 	return false
 }
 
-func scopeRestrictsAgents(scope TokenScope) bool {
-	return !scopeAllowsAllAgents(scope)
-}
-
 func permissionAgents(scope TokenScope) []string {
-	if scopeAllowsAllAgents(scope) {
+	if scopeAllowsAllAgents(scope) && len(scope.DeniedAgents) == 0 && len(scope.DeniedTags) == 0 {
 		return []string{"*"}
 	}
 	out := append([]string(nil), scope.Agents...)
+	for _, tag := range scope.AgentTags {
+		out = append(out, "tag:"+tag)
+	}
+	for _, denied := range scope.DeniedAgents {
+		out = append(out, "!"+denied)
+	}
+	for _, tag := range scope.DeniedTags {
+		out = append(out, "!tag:"+tag)
+	}
 	sort.Strings(out)
 	return out
+}
+
+func stringListContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func agentHasAnyLabel(agent model.Agent, labels []string) bool {
+	for _, allowed := range labels {
+		for _, label := range agent.Labels {
+			if label == allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func permissionArgs(p policy.Policy, toolScope ToolScope, all bool) map[string]string {
 	if all || toolScope.AllowedArgs == nil {
 		return cloneStringMap(p.AllowedArgs)
 	}
-	out := map[string]string{}
-	for key, pattern := range toolScope.AllowedArgs {
-		if _, ok := p.AllowedArgs[key]; ok {
-			out[key] = pattern
-		}
-	}
-	return out
+	return policy.IntersectAllowedArgs(p.AllowedArgs, toolScope.AllowedArgs)
 }
 
 func permissionIPVersions(toolScope ToolScope, all bool) []model.IPVersion {

@@ -24,10 +24,187 @@ export interface PermissionTool {
   requires_agent: boolean;
 }
 
+export interface TokenToolScope {
+  allowed_args?: Record<string, string>;
+  resolve_on_agent?: boolean;
+  ip_versions?: IPVersion[];
+}
+
 export interface Permissions {
   tools: Partial<Record<Tool, PermissionTool>>;
   agents: string[];
   schedule_access: "none" | "read" | "write";
+  manage_access?: "none" | "read" | "write";
+}
+
+export interface LimitSpec {
+  requests_per_minute: number;
+  burst: number;
+}
+
+export interface CIDRSpec extends LimitSpec {
+  ipv4_prefix: number;
+  ipv6_prefix: number;
+}
+
+export interface RateLimitConfig {
+  global: LimitSpec;
+  ip: LimitSpec;
+  cidr: CIDRSpec;
+  tools?: Record<string, { global: LimitSpec; cidr: LimitSpec; ip: LimitSpec }>;
+  exempt_cidrs?: string[];
+}
+
+export interface ManagedRateLimit {
+  revision?: number;
+  updated_at?: string;
+  rate_limit: RateLimitConfig;
+}
+
+export interface RuntimeSettings {
+  count: number;
+  max_hops: number;
+  probe_step_timeout_sec: number;
+  max_tool_timeout_sec: number;
+  http_timeout_sec: number;
+  dns_timeout_sec: number;
+  resolve_timeout_sec: number;
+  http_invoke_attempts: number;
+  http_max_health_interval_sec: number;
+}
+
+export interface SchedulerSettings {
+  agent_offline_after_sec: number;
+  grpc_max_inflight_per_agent: number;
+  http_max_inflight_per_agent: number;
+  poll_interval_sec: number;
+}
+
+export interface PolicySettings {
+  enabled: boolean;
+  allowed_args?: Record<string, string>;
+}
+
+export interface APITokenPermission {
+  id?: string;
+  name?: string;
+  secret: string;
+  rotate?: boolean;
+  all?: boolean;
+  schedule_access?: "none" | "read" | "write";
+  manage_access?: "none" | "read" | "write";
+  agents?: string[];
+  denied_agents?: string[];
+  agent_tags?: string[];
+  denied_tags?: string[];
+  tools?: Partial<Record<Tool, TokenToolScope>>;
+}
+
+export type ManagedTokenRequest = Omit<APITokenPermission, "id" | "secret" | "rotate">;
+
+export interface ManagedTokenListResponse {
+  revision?: number;
+  updated_at?: string;
+  tokens?: APITokenPermission[];
+}
+
+export interface ManagedTokenResponse {
+  revision?: number;
+  updated_at?: string;
+  token: APITokenPermission;
+}
+
+export interface RegisterToken {
+  id?: string;
+  name?: string;
+  token: string;
+  rotate?: boolean;
+}
+
+export type ManagedRegisterTokenRequest = Pick<RegisterToken, "name">;
+
+export interface ManagedRegisterTokenListResponse {
+  revision?: number;
+  updated_at?: string;
+  tokens?: RegisterToken[];
+}
+
+export interface ManagedRegisterTokenResponse {
+  revision?: number;
+  updated_at?: string;
+  token: RegisterToken;
+}
+
+export interface ManagedSettings {
+  revision?: number;
+  updated_at?: string;
+  rate_limit: RateLimitConfig;
+  label_configs?: Record<string, LabelConfigSettings>;
+  api_tokens?: APITokenPermission[];
+  register_tokens?: RegisterToken[];
+}
+
+export interface ManagedLabels {
+  revision?: number;
+  updated_at?: string;
+  label_configs?: Record<string, LabelConfigSettings>;
+}
+
+export interface ManagedLabelsAndAgents {
+  revision?: number;
+  updated_at?: string;
+  label_configs?: Record<string, LabelConfigSettings>;
+  agents: ManagedAgent[];
+}
+
+export interface LabelConfigSettings {
+  runtime?: RuntimeSettings | null;
+  scheduler?: SchedulerSettings | null;
+  tool_policies?: Partial<Record<Tool, PolicySettings>>;
+}
+
+export interface TLSSettings {
+  enabled?: boolean;
+  ca_files?: string[];
+  cert_file?: string;
+  key_file?: string;
+}
+
+export interface HTTPAgentConfig {
+  id: string;
+  transport?: "http";
+  enabled: boolean;
+  base_url: string;
+  http_token?: string;
+  labels?: string[];
+  tls?: TLSSettings;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AgentConfig {
+  id: string;
+  transport?: "grpc";
+  disabled?: boolean;
+  labels?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ManagedAgent extends Agent {
+  type?: "grpc" | "http";
+  transport: "grpc" | "http";
+  config?: AgentConfig;
+  http?: HTTPAgentConfig;
+}
+
+export interface ManagedAgentLabelUpdate {
+  id: string;
+  labels: string[];
+}
+
+export interface ManagedAgentLabelsRequest {
+  agents: ManagedAgentLabelUpdate[];
 }
 
 export interface GeoIPInfo {

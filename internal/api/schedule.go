@@ -161,12 +161,13 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
 	}
-	if !s.limiter.AllowTool(string(req.Tool), s.clientIP.Resolve(r)) {
+	if !s.limiterSnapshot().AllowTool(string(req.Tool), s.clientIP.Resolve(r)) {
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return scheduleRequestDetails{}, false
 	}
-	createReq.Args = s.policies.ServerArgs(createReq.Tool, createReq.Args)
-	if _, err := s.policies.ValidateSchedule(createReq); err != nil {
+	policies := s.policiesForJob(r.Context(), createReq)
+	createReq.Args = policies.ServerArgs(createReq.Tool, createReq.Args)
+	if _, err := policies.ValidateSchedule(createReq); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
 	}
@@ -174,7 +175,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusForbidden, err.Error())
 		return scheduleRequestDetails{}, false
 	}
-	if _, err := s.dispatchOptions(r.Context(), createReq); err != nil {
+	if _, err := s.dispatchOptions(r.Context(), createReq, policies); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
 	}
@@ -203,10 +204,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
 	scope := principalFromContext(ctx).scope
-	if scope.All {
-		return targets, nil
-	}
-	agents, err := s.store.ListAgents(ctx)
+	agents, err := s.agentsWithManagedLabels(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -217,29 +215,21 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, 
 			if !scheduleTargetMatchesAgent(target.Label, agent) {
 				continue
 			}
-			if !scopeAllowsAgent(scope, agent.ID) {
+			if !scopeAllowsAgentRecord(scope, agent) {
 				continue
 			}
 			if policy.AgentSupports(agent, tool, version) {
 				matched = true
+				target.AllowedAgentIDs = append(target.AllowedAgentIDs, agent.ID)
 			}
 		}
 		if !matched {
 			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, tool)
 		}
-		target.AllowedAgentIDs = scheduleTargetAllowedAgentIDs(scope)
+		sort.Strings(target.AllowedAgentIDs)
 		out = append(out, target)
 	}
 	return out, nil
-}
-
-func scheduleTargetAllowedAgentIDs(scope TokenScope) []string {
-	if !scopeRestrictsAgents(scope) {
-		return nil
-	}
-	out := append([]string(nil), scope.Agents...)
-	sort.Strings(out)
-	return out
 }
 
 func scheduleTargetMatchesAgent(label string, agent model.Agent) bool {

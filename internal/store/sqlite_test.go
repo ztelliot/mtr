@@ -47,6 +47,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 		Target:    "1.1.1.1",
 		Args:      map[string]string{"count": "4"},
 		IPVersion: model.IPv4,
+		AgentID:   "agent-1",
 		Status:    model.JobQueued,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -95,14 +96,21 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	if len(jobs) != 0 {
 		t.Fatalf("expected IPv6-only agent mask to skip IPv4 job: %#v", jobs)
 	}
-	claimed, err := st.ClaimQueuedJob(ctx, "job-1")
+	claimed, err := st.ClaimQueuedJob(ctx, "job-1", "agent-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("job should not be claimed by a different agent")
+	}
+	claimed, err = st.ClaimQueuedJob(ctx, "job-1", "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !claimed {
 		t.Fatal("expected queued job to be claimed")
 	}
-	claimed, err = st.ClaimQueuedJob(ctx, "job-1")
+	claimed, err = st.ClaimQueuedJob(ctx, "job-1", "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}

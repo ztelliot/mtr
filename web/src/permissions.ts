@@ -2,7 +2,7 @@ import { parseHostPort, requiresAgent } from "./jobForm";
 import type { Agent, IPVersion, JobFormState, Permissions, Tool } from "./types";
 
 export function toolAllowed(permissions: Permissions | null, tool: Tool): boolean {
-  return !permissions || Boolean(permissions.tools?.[tool]);
+  return Boolean(permissions?.tools?.[tool]);
 }
 
 export function canReadSchedules(permissions: Permissions | null): boolean {
@@ -13,22 +13,41 @@ export function canWriteSchedules(permissions: Permissions | null): boolean {
   return permissions?.schedule_access === "write";
 }
 
+export function canReadManage(permissions: Permissions | null): boolean {
+  return permissions?.manage_access === "read" || permissions?.manage_access === "write";
+}
+
+export function canWriteManage(permissions: Permissions | null): boolean {
+  return permissions?.manage_access === "write";
+}
+
 export function requiresAgentForTool(permissions: Permissions | null, tool: Tool): boolean {
   return permissions?.tools?.[tool]?.requires_agent ?? requiresAgent(tool);
 }
 
 export function filterAgentsByPermissions(agents: Agent[], permissions: Permissions | null): Agent[] {
   const allowedAgents = permissions?.agents ?? [];
-  if (!permissions || allowedAgents.length === 0 || allowedAgents.includes("*")) {
-    return agents;
+  if (!permissions) {
+    return [];
   }
-  const allowed = new Set(allowedAgents);
-  return agents.filter((agent) => allowed.has(agent.id));
+  const allowedIDs = new Set(allowedAgents.filter((value) => !value.startsWith("!") && !value.startsWith("tag:")));
+  const allowedTags = new Set(allowedAgents.filter((value) => value.startsWith("tag:")).map((value) => value.slice(4)));
+  const deniedIDs = new Set(allowedAgents.filter((value) => value.startsWith("!") && !value.startsWith("!tag:")).map((value) => value.slice(1)));
+  const deniedTags = new Set(allowedAgents.filter((value) => value.startsWith("!tag:")).map((value) => value.slice(5)));
+  const hasPositiveScope = allowedIDs.size > 0 || allowedTags.size > 0;
+  const allowAll = allowedAgents.length === 0 || allowedAgents.includes("*") || !hasPositiveScope;
+  return agents.filter((agent) => {
+    if (deniedIDs.has(agent.id) || agentHasAnyLabel(agent, deniedTags)) {
+      return false;
+    }
+    return allowAll || allowedIDs.has(agent.id) || agentHasAnyLabel(agent, allowedTags);
+  });
 }
 
 export function permissionFormError(
   form: JobFormState,
   permissions: Permissions | null,
+  agents: Agent[],
   t: (key: string, options?: Record<string, unknown>) => string
 ): string | null {
   if (!toolAllowed(permissions, form.tool)) {
@@ -41,7 +60,7 @@ export function permissionFormError(
   if (tool.ip_versions?.length && !tool.ip_versions.includes(form.ipVersion)) {
     return t("errors.ipVersionNotAllowed", { version: form.ipVersion });
   }
-  if (form.agentId && !agentAllowedByPermissions(permissions, form.agentId)) {
+  if (form.agentId && !agentAllowedByPermissions(permissions, form.agentId, agents)) {
     return t("errors.agentNotAllowed");
   }
   if ((form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") && !permissionAllowsArg(permissions, form.tool, "protocol", form.protocol)) {
@@ -122,9 +141,23 @@ export function httpMethodOptions(permissions: Permissions | null): Array<{ valu
   return options.filter((option) => permissionAllowsArg(permissions, "http", "method", option.value));
 }
 
-function agentAllowedByPermissions(permissions: Permissions | null, agentID: string): boolean {
+function agentAllowedByPermissions(permissions: Permissions | null, agentID: string, agents: Agent[] = []): boolean {
   const allowedAgents = permissions?.agents ?? [];
-  return !permissions || allowedAgents.length === 0 || allowedAgents.includes("*") || allowedAgents.includes(agentID);
+  const agent = agents.find((item) => item.id === agentID);
+  const allowedIDs = new Set(allowedAgents.filter((value) => !value.startsWith("!") && !value.startsWith("tag:")));
+  const allowedTags = new Set(allowedAgents.filter((value) => value.startsWith("tag:")).map((value) => value.slice(4)));
+  const deniedIDs = new Set(allowedAgents.filter((value) => value.startsWith("!") && !value.startsWith("!tag:")).map((value) => value.slice(1)));
+  const deniedTags = new Set(allowedAgents.filter((value) => value.startsWith("!tag:")).map((value) => value.slice(5)));
+  const hasPositiveScope = allowedIDs.size > 0 || allowedTags.size > 0;
+  const allowAll = allowedAgents.length === 0 || allowedAgents.includes("*") || !hasPositiveScope;
+  const tagAllowed = agent ? agentHasAnyLabel(agent, allowedTags) : false;
+  const tagDenied = agent ? agentHasAnyLabel(agent, deniedTags) : false;
+  return Boolean(
+    permissions &&
+      !deniedIDs.has(agentID) &&
+      !tagDenied &&
+      (allowAll || allowedIDs.has(agentID) || tagAllowed)
+  );
 }
 
 function permissionAllowsArg(permissions: Permissions | null, tool: Tool, arg: string, value: string): boolean {
@@ -132,19 +165,65 @@ function permissionAllowsArg(permissions: Permissions | null, tool: Tool, arg: s
     return true;
   }
   const toolPermission = permissions.tools?.[tool];
-  if (!toolPermission?.allowed_args || !(arg in toolPermission.allowed_args)) {
+  if (!toolPermission) {
     return false;
   }
-  return valueAllowed(toolPermission.allowed_args[arg], value);
+  if (!toolPermission.allowed_args) {
+    return true;
+  }
+  if (!(arg in toolPermission.allowed_args)) {
+    return false;
+  }
+  const rule = toolPermission.allowed_args[arg];
+  return arg === "port" ? portAllowed(rule, value) : csvValueAllowed(rule, value);
 }
 
-function valueAllowed(pattern: string | undefined, value: string): boolean {
-  if (pattern === undefined || pattern === "") {
+function csvValueAllowed(rule: string | undefined, value: string): boolean {
+  if (rule === undefined || rule.trim() === "") {
     return true;
   }
-  try {
-    return new RegExp(pattern).test(value);
-  } catch {
-    return true;
+  return rule.split(",").map((item) => item.trim()).includes(value);
+}
+
+function portAllowed(rule: string | undefined, value: string): boolean {
+  const portValue = value.trim();
+  if (!/^\d+$/.test(portValue)) {
+    return false;
   }
+  const port = Number(portValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return false;
+  }
+  return parsePortRanges(rule).some(([start, end]) => port >= start && port <= end);
+}
+
+function parsePortRanges(rule: string | undefined): Array<[number, number]> {
+  const normalized = rule?.trim() || "1-65535";
+  const ranges: Array<[number, number]> = [];
+
+  for (const rawPart of normalized.split(",")) {
+    const part = rawPart.trim();
+    if (!part) {
+      continue;
+    }
+    const bounds = part.split("-");
+    if (bounds.length > 2 || !bounds[0]) {
+      return [];
+    }
+    const start = Number(bounds[0].trim());
+    const end = bounds.length === 2 ? Number(bounds[1].trim()) : start;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end > 65535 || start > end) {
+      return [];
+    }
+    ranges.push([start, end]);
+  }
+
+  return ranges;
+}
+
+function agentHasAnyLabel(agent: Agent, labels: Set<string>): boolean {
+  if (labels.size === 0) {
+    return false;
+  }
+  return (agent.labels ?? []).some((label) => labels.has(label));
 }

@@ -18,12 +18,18 @@ import (
 
 var hostnameRE = regexp.MustCompile(`^[a-zA-Z0-9.-]{1,253}$`)
 
+const DefaultPortRange = "1-65535"
+
+var (
+	ErrInvalidPortRangeRule = errors.New("invalid port range rule")
+	ErrPortNotAllowed       = errors.New("port is not allowed")
+)
+
 type Policy struct {
-	Tool          model.Tool
-	Timeout       time.Duration
-	ProbeTimeout  time.Duration
-	AllowedArgs   map[string]string
-	HideFirstHops int
+	Tool         model.Tool
+	Timeout      time.Duration
+	ProbeTimeout time.Duration
+	AllowedArgs  map[string]string
 }
 
 type Set struct {
@@ -32,23 +38,7 @@ type Set struct {
 }
 
 func FromConfig(cfg map[string]config.Policy, runtime config.Runtime) Set {
-	out := PoliciesWithRuntime(runtime)
-	for name, p := range cfg {
-		if !p.Enabled {
-			delete(out.byTool, model.Tool(name))
-			continue
-		}
-		t := model.Tool(name)
-		existing := out.byTool[t]
-		if p.AllowedArgs != nil {
-			existing.AllowedArgs = p.AllowedArgs
-		}
-		if p.HideFirstHops > 0 {
-			existing.HideFirstHops = p.HideFirstHops
-		}
-		out.byTool[t] = existing
-	}
-	return out
+	return PoliciesWithRuntime(runtime).WithIntersection(cfg, runtime)
 }
 
 func DefaultPolicies() Set {
@@ -59,13 +49,95 @@ func PoliciesWithRuntime(runtime config.Runtime) Set {
 	runtime = normalizeRuntime(runtime)
 	probeTimeout := time.Duration(runtime.ProbeStepTimeoutSec) * time.Second
 	return Set{runtime: runtime, byTool: map[model.Tool]Policy{
-		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": `^(icmp|tcp)$`, "port": `^[1-9][0-9]{0,4}$`}},
-		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": `^(icmp|tcp)$`, "port": `^[1-9][0-9]{0,4}$`}},
-		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": `^(icmp|tcp)$`, "port": `^[1-9][0-9]{0,4}$`}},
-		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": `^(GET|HEAD)$`}},
-		model.ToolDNS:        {Tool: model.ToolDNS, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolDNS}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"type": `^(A|AAAA|CNAME|MX|TXT|NS)$`}},
-		model.ToolPort:       {Tool: model.ToolPort, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPort}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"port": `^[1-9][0-9]{0,4}$`}},
+		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
+		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
+		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
+		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD"}},
+		model.ToolDNS:        {Tool: model.ToolDNS, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolDNS}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"type": "A,AAAA,CNAME,MX,TXT,NS"}},
+		model.ToolPort:       {Tool: model.ToolPort, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPort}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"port": DefaultPortRange}},
 	}}
+}
+
+func (s Set) WithIntersection(cfg map[string]config.Policy, runtime config.Runtime) Set {
+	base := PoliciesWithRuntime(runtime)
+	out := Set{runtime: base.runtime, byTool: make(map[model.Tool]Policy, len(base.byTool))}
+	for tool, p := range base.byTool {
+		if existing, ok := s.byTool[tool]; ok {
+			p.AllowedArgs = cloneStringMap(existing.AllowedArgs)
+			out.byTool[tool] = p
+		}
+	}
+	for name, p := range cfg {
+		t := model.Tool(name)
+		existing, ok := out.byTool[t]
+		if !p.Enabled {
+			if _, known := base.byTool[t]; known {
+				delete(out.byTool, t)
+			}
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if p.AllowedArgs != nil {
+			existing.AllowedArgs = IntersectAllowedArgs(existing.AllowedArgs, p.AllowedArgs)
+		}
+		out.byTool[t] = existing
+	}
+	return out
+}
+
+func IntersectAllowedArgs(base map[string]string, limit map[string]string) map[string]string {
+	if base == nil {
+		return cloneStringMap(limit)
+	}
+	if limit == nil {
+		return cloneStringMap(base)
+	}
+	out := map[string]string{}
+	for key, baseRule := range base {
+		limitRule, ok := limit[key]
+		if !ok {
+			continue
+		}
+		if key == "port" {
+			rule, ok := IntersectPortRules(baseRule, limitRule)
+			if ok {
+				out[key] = rule
+			}
+			continue
+		}
+		values := intersectCSVValues(baseRule, limitRule)
+		if len(values) > 0 {
+			out[key] = strings.Join(values, ",")
+		}
+	}
+	return out
+}
+
+func IntersectPortRules(left string, right string) (string, bool) {
+	leftRanges, err := parsePortRanges(left)
+	if err != nil {
+		return "", false
+	}
+	rightRanges, err := parsePortRanges(right)
+	if err != nil {
+		return "", false
+	}
+	var out [][2]int
+	for _, a := range leftRanges {
+		for _, b := range rightRanges {
+			start := max(a[0], b[0])
+			end := min(a[1], b[1])
+			if start <= end {
+				out = append(out, [2]int{start, end})
+			}
+		}
+	}
+	if len(out) == 0 {
+		return "", false
+	}
+	return formatPortRanges(out), true
 }
 
 func normalizeRuntime(runtime config.Runtime) config.Runtime {
@@ -91,11 +163,11 @@ func normalizeRuntime(runtime config.Runtime) config.Runtime {
 	if runtime.ResolveTimeoutSec <= 0 {
 		runtime.ResolveTimeoutSec = defaults.ResolveTimeoutSec
 	}
-	if runtime.OutboundInvokeAttempts <= 0 {
-		runtime.OutboundInvokeAttempts = defaults.OutboundInvokeAttempts
+	if runtime.HTTPInvokeAttempts <= 0 {
+		runtime.HTTPInvokeAttempts = defaults.HTTPInvokeAttempts
 	}
-	if runtime.OutboundMaxHealthIntervalSec <= 0 {
-		runtime.OutboundMaxHealthIntervalSec = defaults.OutboundMaxHealthIntervalSec
+	if runtime.HTTPMaxHealthIntervalSec <= 0 {
+		runtime.HTTPMaxHealthIntervalSec = defaults.HTTPMaxHealthIntervalSec
 	}
 	return runtime
 }
@@ -213,6 +285,10 @@ func (s Set) ResolveTimeoutSeconds() int {
 	return normalizeRuntime(s.runtime).ResolveTimeoutSec
 }
 
+func (s Set) Runtime() config.Runtime {
+	return normalizeRuntime(s.runtime)
+}
+
 func (s Set) ValidateResolvedTarget(ctx context.Context, tool model.Tool, target string, version model.IPVersion) error {
 	_, _, err := s.ResolveTarget(ctx, tool, target, version)
 	return err
@@ -264,17 +340,137 @@ func (s Set) validate(req model.CreateJobRequest, requirePinned bool) (Policy, e
 		if !ok {
 			return Policy{}, fmt.Errorf("argument %q is not allowed for %s", k, req.Tool)
 		}
-		if pattern != "" && !regexp.MustCompile(pattern).MatchString(v) {
-			return Policy{}, fmt.Errorf("argument %q is invalid", k)
-		}
 		if k == "port" {
-			port, err := strconv.Atoi(v)
-			if err != nil || port <= 0 || port > 65535 {
+			if err := ValidatePortAllowed(pattern, v); err != nil {
 				return Policy{}, fmt.Errorf("argument %q is invalid", k)
 			}
+			continue
+		}
+		if pattern != "" && !AllowedArgContains(pattern, v) {
+			return Policy{}, fmt.Errorf("argument %q is invalid", k)
 		}
 	}
 	return p, nil
+}
+
+func ValidatePortAllowed(rule string, value string) error {
+	port, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || port < 1 || port > 65535 {
+		return ErrPortNotAllowed
+	}
+	ranges, err := parsePortRanges(rule)
+	if err != nil {
+		return err
+	}
+	for _, item := range ranges {
+		if port >= item[0] && port <= item[1] {
+			return nil
+		}
+	}
+	return ErrPortNotAllowed
+}
+
+func ValidatePortRangeRule(rule string) error {
+	_, err := parsePortRanges(rule)
+	return err
+}
+
+func parsePortRanges(rule string) ([][2]int, error) {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		rule = DefaultPortRange
+	}
+	parts := strings.Split(rule, ",")
+	ranges := make([][2]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		bounds := strings.Split(part, "-")
+		if len(bounds) > 2 {
+			return nil, ErrInvalidPortRangeRule
+		}
+		start, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil {
+			return nil, ErrInvalidPortRangeRule
+		}
+		end := start
+		if len(bounds) == 2 {
+			end, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err != nil {
+				return nil, ErrInvalidPortRangeRule
+			}
+		}
+		if start < 1 || end > 65535 || start > end {
+			return nil, ErrInvalidPortRangeRule
+		}
+		ranges = append(ranges, [2]int{start, end})
+	}
+	if len(ranges) == 0 {
+		return nil, ErrInvalidPortRangeRule
+	}
+	return ranges, nil
+}
+
+func formatPortRanges(ranges [][2]int) string {
+	parts := make([]string, 0, len(ranges))
+	for _, item := range ranges {
+		if item[0] == item[1] {
+			parts = append(parts, strconv.Itoa(item[0]))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d-%d", item[0], item[1]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func intersectCSVValues(left string, right string) []string {
+	leftValues := csvValues(left)
+	rightValues := csvValues(right)
+	seen := map[string]struct{}{}
+	for _, value := range rightValues {
+		seen[value] = struct{}{}
+	}
+	var out []string
+	for _, value := range leftValues {
+		if _, ok := seen[value]; ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func AllowedArgContains(rule string, value string) bool {
+	for _, allowed := range csvValues(rule) {
+		if allowed == value {
+			return true
+		}
+	}
+	return false
+}
+
+func csvValues(rule string) []string {
+	parts := strings.Split(rule, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func isServerOwnedArg(key string) bool {

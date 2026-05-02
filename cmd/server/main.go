@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"github.com/ztelliot/mtr/internal/api"
 	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/grpcwire"
-	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
 	"github.com/ztelliot/mtr/internal/scheduler"
 	"github.com/ztelliot/mtr/internal/store"
@@ -74,52 +72,63 @@ func main() {
 		st = pg
 		closer = pg.Close
 	default:
-		st = store.NewMemory()
+		mem := store.NewMemory()
+		settings, err := mem.GetManagedSettings(ctx)
+		if err != nil {
+			log.Error("load memory managed settings", "err", err)
+			os.Exit(1)
+		}
+		for _, token := range settings.APITokens {
+			if token.ManageAccess == "write" && token.Secret != "" {
+				log.Info("initialized admin api token", "token", token.Secret)
+				break
+			}
+		}
+		st = mem
 		closer = func() {}
 	}
 	defer closer()
 
-	policies := policy.FromConfig(cfg.ToolPolicies, cfg.Runtime)
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		log.Error("load managed settings", "err", err)
+		os.Exit(1)
+	}
+	policies := policy.DefaultPolicies()
+	globalScheduler := config.Scheduler{}
+	config.DefaultScheduler(&globalScheduler)
+	if cfg, ok := settings.LabelConfigs[config.AgentAllLabel]; ok && cfg.Scheduler != nil {
+		globalScheduler = *cfg.Scheduler
+	}
 	hub := scheduler.NewHub(
 		st,
 		policies,
-		cfg.RegisterToken,
-		time.Duration(cfg.Scheduler.AgentOfflineAfterSec)*time.Second,
-		time.Duration(cfg.Scheduler.PollIntervalSec)*time.Second,
-		cfg.Scheduler.GRPCMaxInflightPerAgent,
+		time.Duration(globalScheduler.AgentOfflineAfterSec)*time.Second,
+		time.Duration(globalScheduler.PollIntervalSec)*time.Second,
+		globalScheduler.GRPCMaxInflightPerAgent,
 		log,
 	)
-	hub.SetOutboundRuntime(
-		time.Duration(cfg.Runtime.OutboundMaxHealthIntervalSec)*time.Second,
-		cfg.Runtime.OutboundInvokeAttempts,
-	)
-	hub.SetInflightLimits(cfg.Scheduler.GRPCMaxInflightPerAgent, cfg.Scheduler.OutboundMaxInflightPerAgent)
-	outboundAgents, err := toSchedulerOutboundAgents(cfg.OutboundAgents, cfg.OutboundTLS)
-	if err != nil {
-		log.Error("load outbound agent tls", "err", err)
-		os.Exit(1)
-	}
-	hub.SetOutboundAgents(outboundAgents)
+	hub.ApplySettings(settings)
 	go hub.Start(ctx)
 	limiter, err := abuse.NewConfiguredLimiterWithError(abuse.RateLimitConfig{
 		Global: abuse.Limit{
-			RequestsPerMinute: cfg.RateLimit.Global.RequestsPerMinute,
-			Burst:             cfg.RateLimit.Global.Burst,
+			RequestsPerMinute: settings.RateLimit.Global.RequestsPerMinute,
+			Burst:             settings.RateLimit.Global.Burst,
 		},
 		IP: abuse.Limit{
-			RequestsPerMinute: cfg.RateLimit.IP.RequestsPerMinute,
-			Burst:             cfg.RateLimit.IP.Burst,
+			RequestsPerMinute: settings.RateLimit.IP.RequestsPerMinute,
+			Burst:             settings.RateLimit.IP.Burst,
 		},
 		CIDR: abuse.CIDRLimit{
 			Limit: abuse.Limit{
-				RequestsPerMinute: cfg.RateLimit.CIDR.RequestsPerMinute,
-				Burst:             cfg.RateLimit.CIDR.Burst,
+				RequestsPerMinute: settings.RateLimit.CIDR.RequestsPerMinute,
+				Burst:             settings.RateLimit.CIDR.Burst,
 			},
-			IPv4Prefix: cfg.RateLimit.CIDR.IPv4Prefix,
-			IPv6Prefix: cfg.RateLimit.CIDR.IPv6Prefix,
+			IPv4Prefix: settings.RateLimit.CIDR.IPv4Prefix,
+			IPv6Prefix: settings.RateLimit.CIDR.IPv6Prefix,
 		},
-		Tools:       toAbuseToolLimits(cfg.RateLimit.Tools),
-		ExemptCIDRs: cfg.RateLimit.ExemptCIDRs,
+		Tools:       api.AbuseToolLimits(settings.RateLimit.Tools),
+		ExemptCIDRs: settings.RateLimit.ExemptCIDRs,
 	})
 	if err != nil {
 		log.Error("configure rate limit", "err", err)
@@ -147,7 +156,10 @@ func main() {
 	handler, err := api.NewWithOptions(st, policies, limiter, hub, cfg.GeoIPURL, log, api.Options{
 		TrustedProxies:  cfg.TrustedProxies,
 		ClientIPHeaders: cfg.ClientIPHeaders,
-	}, toAPITokenConfigs(cfg.APITokenPermissions)...)
+		RootContext:     ctx,
+		RequireAuth:     true,
+		LabelConfigs:    settings.LabelConfigs,
+	}, api.TokenConfigsFromPermissions(settings.APITokens)...)
 	if err != nil {
 		log.Error("configure http client ip", "err", err)
 		os.Exit(1)
@@ -180,78 +192,6 @@ func firstExistingConfig(systemPath string, localPath string) string {
 		return systemPath
 	}
 	return localPath
-}
-
-func toAbuseToolLimits(in map[string]config.ToolLimitSpec) map[string]abuse.ToolLimit {
-	out := make(map[string]abuse.ToolLimit, len(in))
-	for tool, limit := range in {
-		out[tool] = abuse.ToolLimit{
-			Global: abuse.Limit{
-				RequestsPerMinute: limit.Global.RequestsPerMinute,
-				Burst:             limit.Global.Burst,
-			},
-			CIDR: abuse.Limit{
-				RequestsPerMinute: limit.CIDR.RequestsPerMinute,
-				Burst:             limit.CIDR.Burst,
-			},
-			IP: abuse.Limit{
-				RequestsPerMinute: limit.IP.RequestsPerMinute,
-				Burst:             limit.IP.Burst,
-			},
-		}
-	}
-	return out
-}
-
-func toSchedulerOutboundAgents(in []config.OutboundAgent, tlsConfig config.TLS) ([]scheduler.OutboundAgent, error) {
-	out := make([]scheduler.OutboundAgent, 0, len(in))
-	client, err := scheduler.NewOutboundHTTPClient(scheduler.OutboundTLS{
-		Enabled:  tlsConfig.Enabled,
-		CAFiles:  tlsConfig.CAFiles,
-		CertFile: tlsConfig.CertFile,
-		KeyFile:  tlsConfig.KeyFile,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("outbound tls: %w", err)
-	}
-	for _, agent := range in {
-		out = append(out, scheduler.OutboundAgent{
-			ID:         agent.ID,
-			BaseURL:    agent.BaseURL,
-			Token:      agent.HTTPToken,
-			Labels:     agent.Labels,
-			HTTPClient: client,
-		})
-	}
-	return out, nil
-}
-
-func toAPITokenConfigs(in []config.APITokenPermission) []api.TokenConfig {
-	out := make([]api.TokenConfig, 0, len(in))
-	for _, scope := range in {
-		tools := make(map[model.Tool]api.ToolScope, len(scope.Tools))
-		for tool, toolScope := range scope.Tools {
-			versions := make([]model.IPVersion, 0, len(toolScope.IPVersions))
-			for _, version := range toolScope.IPVersions {
-				versions = append(versions, model.IPVersion(version))
-			}
-			tools[model.Tool(tool)] = api.ToolScope{
-				AllowedArgs:    toolScope.AllowedArgs,
-				ResolveOnAgent: toolScope.ResolveOnAgent,
-				IPVersions:     versions,
-			}
-		}
-		out = append(out, api.TokenConfig{
-			Token: scope.Secret,
-			Scope: api.TokenScope{
-				All:            scope.All,
-				ScheduleAccess: api.ScheduleAccess(scope.ScheduleAccess),
-				Agents:         scope.Agents,
-				Tools:          tools,
-			},
-		})
-	}
-	return out
 }
 
 func isSQLiteDSN(dsn string) bool {

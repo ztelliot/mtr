@@ -30,7 +30,6 @@ type AgentHello struct {
 	Provider     string             `json:"provider,omitempty"`
 	ISP          string             `json:"isp,omitempty"`
 	Version      string             `json:"version,omitempty"`
-	Labels       []string           `json:"labels,omitempty"`
 	Token        string             `json:"token"`
 	Capabilities []model.Tool       `json:"capabilities"`
 	Protocols    model.ProtocolMask `json:"protocols"`
@@ -49,7 +48,6 @@ type JobSpec struct {
 	TimeoutSeconds        int               `json:"timeout_seconds"`
 	ProbeTimeoutSeconds   int               `json:"probe_timeout_seconds,omitempty"`
 	ResolveTimeoutSeconds int               `json:"resolve_timeout_seconds,omitempty"`
-	HideFirstHops         int               `json:"hide_first_hops,omitempty"`
 }
 
 type ResultEvent struct {

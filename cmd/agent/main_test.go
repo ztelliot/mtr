@@ -79,6 +79,43 @@ func TestHTTPAgentInvokeStreamsResultEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentInvokeRequiresBearerScheme(t *testing.T) {
+	handler := newHTTPAgentHandler(config.Agent{ID: "edge-fc-1", HTTPToken: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := `{"id":"job-1","tool":"ping","target":"127.0.0.1","ip_version":4,"args":{"count":"1"},"timeout_seconds":1}`
+
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(body))
+	req.Header.Set("Authorization", "secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("raw token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bearer token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHTTPAgentInvokeAuthFailuresAreRateLimited(t *testing.T) {
+	handler := newHTTPAgentHandler(config.Agent{ID: "edge-fc-1", HTTPToken: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := `{"id":"job-1","tool":"ping","target":"127.0.0.1","ip_version":4,"args":{"count":"1"},"timeout_seconds":1}`
+
+	for i := 0; i < 21; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.60:1234"
+		req.Header.Set("Authorization", "Bearer wrong")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if i == 20 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected auth failures to become rate limited, status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestHTTPAgentAllowsPinnedPathTools(t *testing.T) {
 	handler := newHTTPAgentHandler(config.Agent{
 		ID:            "edge-http-1",
@@ -302,12 +339,21 @@ func TestSleepContextStopsOnCancel(t *testing.T) {
 	}
 }
 
+func TestStartHTTPAgentServerRequiresHTTPToken(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _, err := startHTTPAgentServer(ctx, "127.0.0.1:0", config.Agent{ID: "edge-http"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("expected missing http_token to reject HTTP agent mode")
+	}
+}
+
 func TestSpeedtestRandomUsesStrictLimitAndSizeCap(t *testing.T) {
-	handler := newSpeedtestHandler(config.Speedtest{
+	ipLimited := newSpeedtestHandler(config.Speedtest{
 		DefaultBytes:            8,
 		MaxBytes:                16,
-		GlobalRequestsPerMinute: 1,
-		GlobalBurst:             1,
+		GlobalRequestsPerMinute: 100,
+		GlobalBurst:             100,
 		IPRequestsPerMinute:     1,
 		IPBurst:                 1,
 	}, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -315,7 +361,7 @@ func TestSpeedtestRandomUsesStrictLimitAndSizeCap(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=12", nil)
 	req.RemoteAddr = "203.0.113.1:1234"
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	ipLimited.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected token rejection, status = %d", rec.Code)
 	}
@@ -323,7 +369,15 @@ func TestSpeedtestRandomUsesStrictLimitAndSizeCap(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=12&token=secret", nil)
 	req.RemoteAddr = "203.0.113.1:1234"
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	ipLimited.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected invalid token to consume IP limit, status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=12&token=secret", nil)
+	req.RemoteAddr = "203.0.113.2:1234"
+	rec = httptest.NewRecorder()
+	ipLimited.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
 	}
@@ -331,10 +385,26 @@ func TestSpeedtestRandomUsesStrictLimitAndSizeCap(t *testing.T) {
 		t.Fatalf("body len = %d", rec.Body.Len())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=32&token=secret", nil)
-	req.RemoteAddr = "203.0.113.2:1234"
+	globalLimited := newSpeedtestHandler(config.Speedtest{
+		DefaultBytes:            8,
+		MaxBytes:                16,
+		GlobalRequestsPerMinute: 1,
+		GlobalBurst:             1,
+		IPRequestsPerMinute:     100,
+		IPBurst:                 100,
+	}, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=12&token=secret", nil)
+	req.RemoteAddr = "203.0.113.3:1234"
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	globalLimited.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first global-limited request status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=32&token=secret", nil)
+	req.RemoteAddr = "203.0.113.4:1234"
+	rec = httptest.NewRecorder()
+	globalLimited.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected global limit to apply before size cap, status = %d", rec.Code)
 	}
@@ -348,11 +418,40 @@ func TestSpeedtestRandomUsesStrictLimitAndSizeCap(t *testing.T) {
 		IPBurst:                 100,
 	}, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?bytes=32&token=secret", nil)
-	req.RemoteAddr = "203.0.113.3:1234"
+	req.RemoteAddr = "203.0.113.5:1234"
 	rec = httptest.NewRecorder()
 	capped.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected size cap rejection, status = %d", rec.Code)
+	}
+}
+
+func TestSpeedtestRandomIgnoresForwardedFor(t *testing.T) {
+	handler := newSpeedtestHandler(config.Speedtest{
+		DefaultBytes:            8,
+		MaxBytes:                16,
+		GlobalRequestsPerMinute: 100,
+		GlobalBurst:             100,
+		IPRequestsPerMinute:     1,
+		IPBurst:                 1,
+	}, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/speedtest/random?token=secret", nil)
+	req.RemoteAddr = "203.0.113.50:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.10")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/speedtest/random?token=secret", nil)
+	req.RemoteAddr = "203.0.113.50:4321"
+	req.Header.Set("X-Forwarded-For", "198.51.100.11")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected remote IP limit despite different XFF, status = %d", rec.Code)
 	}
 }
 

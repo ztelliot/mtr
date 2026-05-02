@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/grpcwire"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
@@ -20,24 +21,26 @@ import (
 )
 
 type Hub struct {
-	store               store.Store
-	policies            policy.Set
-	registerToken       string
-	log                 *slog.Logger
-	offlineAfter        time.Duration
-	pollInterval        time.Duration
-	grpcMaxInflight     int
-	outboundMaxInflight int
+	store                store.Store
+	policies             policy.Set
+	labelConfigs         map[string]config.LabelConfig
+	registerTokens       []string
+	log                  *slog.Logger
+	offlineAfter         time.Duration
+	pollInterval         time.Duration
+	grpcMaxInflight      int
+	httpAgentMaxInflight int
 
-	mu                        sync.Mutex
-	meta                      map[string]agentMeta
-	running                   map[string]map[string]struct{}
-	inflightCancels           map[string]context.CancelFunc
-	grpcCancels               map[string]chan string
-	subs                      map[string]map[chan model.JobEvent]struct{}
-	outbound                  []OutboundAgent
-	outboundMaxHealthInterval time.Duration
-	outboundInvokeAttempts    int
+	mu                         sync.Mutex
+	meta                       map[string]agentMeta
+	running                    map[string]map[string]struct{}
+	inflightCancels            map[string]context.CancelFunc
+	grpcCancels                map[string]chan string
+	subs                       map[string]map[chan model.JobEvent]struct{}
+	httpAgents                 []HTTPAgent
+	httpAgentCancels           map[string]context.CancelFunc
+	httpAgentMaxHealthInterval time.Duration
+	httpAgentInvokeAttempts    int
 }
 
 type agentMeta struct {
@@ -48,7 +51,7 @@ type agentMeta struct {
 
 const timedOutJobScanLimit = 200
 
-func NewHub(st store.Store, policies policy.Set, registerToken string, offlineAfter time.Duration, pollInterval time.Duration, maxInflight int, log *slog.Logger) *Hub {
+func NewHub(st store.Store, policies policy.Set, offlineAfter time.Duration, pollInterval time.Duration, maxInflight int, log *slog.Logger) *Hub {
 	if offlineAfter <= 0 {
 		offlineAfter = 90 * time.Second
 	}
@@ -59,60 +62,89 @@ func NewHub(st store.Store, policies policy.Set, registerToken string, offlineAf
 		maxInflight = 4
 	}
 	return &Hub{
-		store:                     st,
-		policies:                  policies,
-		registerToken:             registerToken,
-		log:                       log,
-		offlineAfter:              offlineAfter,
-		pollInterval:              pollInterval,
-		grpcMaxInflight:           maxInflight,
-		outboundMaxInflight:       1,
-		meta:                      map[string]agentMeta{},
-		running:                   map[string]map[string]struct{}{},
-		inflightCancels:           map[string]context.CancelFunc{},
-		grpcCancels:               map[string]chan string{},
-		subs:                      map[string]map[chan model.JobEvent]struct{}{},
-		outboundMaxHealthInterval: defaultOutboundMaxHealthInterval,
-		outboundInvokeAttempts:    defaultOutboundInvokeAttempts,
+		store:                      st,
+		policies:                   policies,
+		log:                        log,
+		offlineAfter:               offlineAfter,
+		pollInterval:               pollInterval,
+		grpcMaxInflight:            maxInflight,
+		httpAgentMaxInflight:       1,
+		meta:                       map[string]agentMeta{},
+		running:                    map[string]map[string]struct{}{},
+		inflightCancels:            map[string]context.CancelFunc{},
+		grpcCancels:                map[string]chan string{},
+		subs:                       map[string]map[chan model.JobEvent]struct{}{},
+		httpAgentCancels:           map[string]context.CancelFunc{},
+		httpAgentMaxHealthInterval: defaultHTTPAgentMaxHealthInterval,
+		httpAgentInvokeAttempts:    defaultHTTPAgentInvokeAttempts,
 	}
 }
 
-func (h *Hub) SetInflightLimits(grpcLimit int, outboundLimit int) {
+func (h *Hub) SetInflightLimits(grpcLimit int, httpAgentLimit int) {
 	if grpcLimit <= 0 {
 		grpcLimit = 4
 	}
-	if outboundLimit <= 0 {
-		outboundLimit = 1
+	if httpAgentLimit <= 0 {
+		httpAgentLimit = 1
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.grpcMaxInflight = grpcLimit
-	h.outboundMaxInflight = outboundLimit
+	h.httpAgentMaxInflight = httpAgentLimit
 }
 
-func (h *Hub) SetOutboundRuntime(maxHealthInterval time.Duration, invokeAttempts int) {
+func (h *Hub) SetHTTPAgentRuntime(maxHealthInterval time.Duration, invokeAttempts int) {
 	if maxHealthInterval <= 0 {
-		maxHealthInterval = defaultOutboundMaxHealthInterval
+		maxHealthInterval = defaultHTTPAgentMaxHealthInterval
 	}
 	if invokeAttempts <= 0 {
-		invokeAttempts = defaultOutboundInvokeAttempts
+		invokeAttempts = defaultHTTPAgentInvokeAttempts
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.outboundMaxHealthInterval = maxHealthInterval
-	h.outboundInvokeAttempts = invokeAttempts
+	h.httpAgentMaxHealthInterval = maxHealthInterval
+	h.httpAgentInvokeAttempts = invokeAttempts
+}
+
+func (h *Hub) ApplySettings(settings config.ManagedSettings) {
+	_ = config.NormalizeManagedSettings(&settings)
+	labelConfigs := config.NormalizeLabelConfigs(settings.LabelConfigs)
+	globalScheduler := config.Scheduler{}
+	config.DefaultScheduler(&globalScheduler)
+	globalRuntime := config.DefaultRuntime()
+	basePolicies := h.policiesSnapshot()
+	if cfg, ok := labelConfigs[config.AgentAllLabel]; ok {
+		if cfg.Scheduler != nil {
+			globalScheduler = *cfg.Scheduler
+		}
+		if cfg.Runtime != nil {
+			globalRuntime = *cfg.Runtime
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.policies = basePolicies
+	h.labelConfigs = labelConfigs
+	h.registerTokens = normalizedRegisterTokens(settings.RegisterTokens)
+	h.offlineAfter = time.Duration(globalScheduler.AgentOfflineAfterSec) * time.Second
+	h.pollInterval = time.Duration(globalScheduler.PollIntervalSec) * time.Second
+	h.grpcMaxInflight = globalScheduler.GRPCMaxInflightPerAgent
+	h.httpAgentMaxInflight = globalScheduler.HTTPMaxInflightPerAgent
+	h.httpAgentMaxHealthInterval = time.Duration(globalRuntime.HTTPMaxHealthIntervalSec) * time.Second
+	h.httpAgentInvokeAttempts = globalRuntime.HTTPInvokeAttempts
 }
 
 func (h *Hub) Start(ctx context.Context) {
-	h.startOutboundAgents(ctx)
-	ticker := time.NewTicker(h.pollInterval)
+	h.startConfiguredHTTPAgents(ctx)
+	ticker := time.NewTicker(h.currentPollInterval())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if n, err := h.store.MarkStaleAgentsOffline(ctx, h.offlineAfter); err != nil {
+			ticker.Reset(h.currentPollInterval())
+			if n, err := h.store.MarkStaleAgentsOffline(ctx, h.offlineAfterSnapshot()); err != nil {
 				h.log.Warn("mark stale agents offline", "err", err)
 			} else if n > 0 {
 				h.log.Debug("marked stale agents offline", "count", n)
@@ -131,11 +163,12 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		return
 	}
 	for _, sched := range schedules {
+		policies := h.policiesForLabels([]string{model.AgentAllLabel})
 		dueTargets := dueScheduleTargets(sched, now)
 		if len(dueTargets) == 0 {
 			continue
 		}
-		if _, ok := h.policies.Get(sched.Tool); !ok {
+		if _, ok := policies.Get(sched.Tool); !ok {
 			advanceScheduleTargets(&sched, dueTargets, now)
 			_ = h.store.UpdateScheduledJobRun(ctx, sched)
 			h.log.Debug("skip scheduled job with disabled tool", "schedule_id", sched.ID, "tool", sched.Tool)
@@ -147,7 +180,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 			ScheduledRevision: sched.Revision,
 			Tool:              sched.Tool,
 			Target:            sched.Target,
-			Args:              h.policies.ServerArgs(sched.Tool, sched.Args),
+			Args:              policies.ServerArgs(sched.Tool, sched.Args),
 			IPVersion:         sched.IPVersion,
 			ResolveOnAgent:    sched.ResolveOnAgent,
 			Status:            model.JobQueued,
@@ -166,7 +199,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 				job.IPVersion = literalVersion
 			}
 		} else if sched.Tool != model.ToolDNS {
-			resolvedTarget, resolvedVersion, err := h.policies.ResolveTarget(ctx, sched.Tool, sched.Target, sched.IPVersion)
+			resolvedTarget, resolvedVersion, err := policies.ResolveTarget(ctx, sched.Tool, sched.Target, sched.IPVersion)
 			if err != nil {
 				advanceScheduleTargets(&sched, dueTargets, now)
 				_ = h.store.UpdateScheduledJobRun(ctx, sched)
@@ -190,10 +223,23 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 				if _, ok := seenAgentIDs[agentID]; ok {
 					continue
 				}
+				agentPolicies := h.policiesForAgent(ctx, agentID)
+				validateReq := model.CreateJobRequest{
+					Tool:           sched.Tool,
+					Target:         sched.Target,
+					Args:           sched.Args,
+					IPVersion:      sched.IPVersion,
+					AgentID:        agentID,
+					ResolveOnAgent: sched.ResolveOnAgent,
+				}
+				if _, err := agentPolicies.ValidateSchedule(validateReq); err != nil {
+					continue
+				}
 				seenAgentIDs[agentID] = struct{}{}
 				run := job
 				run.ID = uuid.NewString()
 				run.AgentID = agentID
+				run.Args = agentPolicies.ServerArgs(sched.Tool, sched.Args)
 				runs = append(runs, run)
 			}
 		}
@@ -275,12 +321,15 @@ func syncScheduleAggregateRunFields(sched *model.ScheduledJob) {
 }
 
 func (h *Hub) scheduledRunAgentIDs(ctx context.Context, sched model.ScheduledJob, target model.ScheduleTarget, version model.IPVersion) ([]string, error) {
-	agents, err := h.store.ListAgents(ctx)
+	agents, err := h.agentsWithManagedLabels(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(agents))
 	for _, agent := range agents {
+		if h.agentConfigDisabled(ctx, agent.ID) {
+			continue
+		}
 		if !scheduledTargetMatchesAgent(target, agent) {
 			continue
 		}
@@ -324,7 +373,7 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 		return errors.New("first message must be hello")
 	}
 	hello := first.Agent
-	if h.registerToken != "" && hello.Token != h.registerToken {
+	if !h.registerTokenAllowed(hello.Token) {
 		return errors.New("invalid agent token")
 	}
 	agent := model.Agent{
@@ -334,7 +383,6 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 		Provider:     hello.Provider,
 		ISP:          hello.ISP,
 		Version:      hello.Version,
-		Labels:       hello.Labels,
 		TokenHash:    hashToken(hello.Token),
 		Capabilities: hello.Capabilities,
 		Protocols:    hello.Protocols,
@@ -381,6 +429,48 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 	return <-errCh
 }
 
+func (h *Hub) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, error) {
+	agents, err := h.store.ListAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	configs, err := h.store.ListAgentConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	grpcLabels := make(map[string][]string, len(configs))
+	for _, cfg := range configs {
+		grpcLabels[cfg.ID] = cfg.Labels
+	}
+	httpNodes, err := h.store.ListHTTPAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	httpLabels := make(map[string][]string, len(httpNodes))
+	for _, node := range httpNodes {
+		httpLabels[node.ID] = node.Labels
+	}
+	for i := range agents {
+		labels := grpcLabels[agents[i].ID]
+		if httpNodeLabels, ok := httpLabels[agents[i].ID]; ok {
+			labels = httpNodeLabels
+		}
+		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, labels)
+	}
+	return agents, nil
+}
+
+func (h *Hub) registerTokenAllowed(token string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, allowed := range h.registerTokens {
+		if token == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Hub) recvLoop(stream grpcwire.Control_ConnectServer, agentID string, errCh chan<- error) {
 	for {
 		msg, err := stream.Recv()
@@ -406,7 +496,7 @@ func (h *Hub) recvLoop(stream grpcwire.Control_ConnectServer, agentID string, er
 }
 
 func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, caps []model.Tool, protocols model.ProtocolMask, cancelCh <-chan string, errCh chan<- error) {
-	ticker := time.NewTicker(h.pollInterval)
+	ticker := time.NewTicker(h.pollIntervalForAgent(stream.Context(), agentID))
 	defer ticker.Stop()
 	for {
 		select {
@@ -422,12 +512,18 @@ func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, ca
 				return
 			}
 		case <-ticker.C:
-			if h.agentStale(agentID) {
+			ticker.Reset(h.pollIntervalForAgent(stream.Context(), agentID))
+			if h.agentConfigDisabled(stream.Context(), agentID) {
 				_ = h.store.MarkAgentOffline(stream.Context(), agentID)
-				h.log.Debug("skip stale agent dispatch", "agent_id", agentID, "offline_after", h.offlineAfter.String())
 				continue
 			}
-			maxInflight := h.grpcInflightLimit()
+			offlineAfter := h.offlineAfterForAgent(stream.Context(), agentID)
+			if h.agentStaleAfter(agentID, offlineAfter) {
+				_ = h.store.MarkAgentOffline(stream.Context(), agentID)
+				h.log.Debug("skip stale agent dispatch", "agent_id", agentID, "offline_after", offlineAfter.String())
+				continue
+			}
+			maxInflight := h.grpcInflightLimitForAgent(stream.Context(), agentID)
 			remaining := maxInflight - h.inflightCount(agentID)
 			if remaining <= 0 {
 				h.log.Debug("agent at inflight limit", "agent_id", agentID, "max_inflight", maxInflight, "transport", "grpc")
@@ -439,12 +535,13 @@ func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, ca
 				continue
 			}
 			for _, job := range jobs {
-				p, ok := h.policies.Get(job.Tool)
+				policies := h.policiesForAgent(stream.Context(), agentID)
+				p, ok := policies.Get(job.Tool)
 				if !ok {
 					h.log.Debug("skip job with disabled tool", "job_id", job.ID, "tool", job.Tool)
 					continue
 				}
-				claimed, err := h.store.ClaimQueuedJob(stream.Context(), job.ID)
+				claimed, err := h.store.ClaimQueuedJob(stream.Context(), job.ID, agentID)
 				if err != nil {
 					h.log.Warn("claim queued job failed", "job_id", job.ID, "err", err)
 					continue
@@ -456,7 +553,7 @@ func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, ca
 				h.markInflight(agentID, job.ID)
 				h.emitStarted(stream.Context(), job)
 				h.log.Debug("dispatch job", "agent_id", agentID, "job_id", job.ID, "tool", job.Tool, "ip_version", job.IPVersion)
-				if err := stream.Send(h.toServerJob(job, p)); err != nil {
+				if err := stream.Send(toServerJobWithPolicies(job, p, policies)); err != nil {
 					errCh <- err
 					return
 				}
@@ -472,6 +569,10 @@ func (h *Hub) handleResult(ctx context.Context, agentID string, ev grpcwire.Resu
 		return
 	}
 	typ := eventType(ev.Event)
+	if !h.agentOwnsJob(agentID, job) {
+		h.log.Warn("drop result for job not assigned to agent", "agent_id", agentID, "job_id", ev.JobID, "assigned_agent_id", job.AgentID, "event_type", typ)
+		return
+	}
 	if terminalJobStatus(job.Status) {
 		h.log.Debug("drop result for terminal job", "agent_id", agentID, "job_id", ev.JobID, "status", job.Status, "event_type", typ)
 		return
@@ -519,6 +620,20 @@ func (h *Hub) handleResult(ctx context.Context, agentID string, ev grpcwire.Resu
 		}
 		h.log.Debug("job completed", "agent_id", agentID, "job_id", ev.JobID, "status", status, "exit_code", *jobEvent.ExitCode)
 	}
+}
+
+func (h *Hub) agentOwnsJob(agentID string, job model.Job) bool {
+	if agentID == "" || job.AgentID != agentID {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	running := h.running[agentID]
+	if running == nil {
+		return false
+	}
+	_, ok := running[job.ID]
+	return ok
 }
 
 func (h *Hub) completeParentIfDone(ctx context.Context, parentID string) {
@@ -620,7 +735,7 @@ func (h *Hub) failTimedOutJobs(ctx context.Context) {
 		if h.deferFanoutParentTimeout(ctx, job, now) {
 			continue
 		}
-		if !h.jobTimedOut(job, now) {
+		if !h.jobTimedOut(ctx, job, now) {
 			continue
 		}
 		if h.failFanoutChildren(ctx, job) {
@@ -654,7 +769,7 @@ func (h *Hub) deferFanoutParentTimeout(ctx context.Context, job model.Job, now t
 	if job.StartedAt != nil {
 		start = *job.StartedAt
 	}
-	overallTimeout := h.policies.MaxToolTimeout()
+	overallTimeout := h.policiesForLabels([]string{model.AgentAllLabel}).MaxToolTimeout()
 	if overallTimeout > 0 && !start.IsZero() && !now.Before(start.Add(overallTimeout)) {
 		return false
 	}
@@ -667,9 +782,13 @@ func (h *Hub) deferFanoutParentTimeout(ctx context.Context, job model.Job, now t
 	return true
 }
 
-func (h *Hub) jobTimedOut(job model.Job, now time.Time) bool {
-	timeout := h.policies.TimeoutForJob(job)
-	if p, ok := h.policies.Get(job.Tool); ok && p.Timeout > 0 {
+func (h *Hub) jobTimedOut(ctx context.Context, job model.Job, now time.Time) bool {
+	policies := h.policiesForLabels([]string{model.AgentAllLabel})
+	if job.AgentID != "" {
+		policies = h.policiesForAgent(ctx, job.AgentID)
+	}
+	timeout := policies.TimeoutForJob(job)
+	if p, ok := policies.Get(job.Tool); ok && p.Timeout > 0 {
 		timeout = p.Timeout
 	}
 	if timeout <= 0 {
@@ -918,10 +1037,11 @@ func (h *Hub) PublishEvent(event model.JobEvent) {
 }
 
 func (h *Hub) toServerJob(job model.Job, p policy.Policy) *grpcwire.ServerMessage {
-	return &grpcwire.ServerMessage{
-		Type: "job",
-		Job:  h.toJobSpec(job, p),
-	}
+	return toServerJobWithPolicies(job, p, h.policiesSnapshot())
+}
+
+func toServerJobWithPolicies(job model.Job, p policy.Policy, policies policy.Set) *grpcwire.ServerMessage {
+	return &grpcwire.ServerMessage{Type: "job", Job: toJobSpecWithPolicies(job, p, policies)}
 }
 
 func toJobSpec(job model.Job, p policy.Policy) *grpcwire.JobSpec {
@@ -929,7 +1049,7 @@ func toJobSpec(job model.Job, p policy.Policy) *grpcwire.JobSpec {
 }
 
 func (h *Hub) toJobSpec(job model.Job, p policy.Policy) *grpcwire.JobSpec {
-	return toJobSpecWithPolicies(job, p, h.policies)
+	return toJobSpecWithPolicies(job, p, h.policiesSnapshot())
 }
 
 func toJobSpecWithPolicies(job model.Job, p policy.Policy, policies policy.Set) *grpcwire.JobSpec {
@@ -952,7 +1072,6 @@ func toJobSpecWithPolicies(job model.Job, p policy.Policy, policies policy.Set) 
 		TimeoutSeconds:        int(timeout.Seconds()),
 		ProbeTimeoutSeconds:   int(probeTimeout.Seconds()),
 		ResolveTimeoutSeconds: policies.ResolveTimeoutSeconds(),
-		HideFirstHops:         p.HideFirstHops,
 	}
 }
 
@@ -968,10 +1087,166 @@ func (h *Hub) grpcInflightLimit() int {
 	return h.grpcMaxInflight
 }
 
-func (h *Hub) outboundInflightLimit() int {
+func (h *Hub) currentPollInterval() time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.outboundMaxInflight
+	if h.pollInterval <= 0 {
+		return 2 * time.Second
+	}
+	return h.pollInterval
+}
+
+func (h *Hub) schedulerSnapshot() config.Scheduler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return config.Scheduler{
+		AgentOfflineAfterSec:    int(h.offlineAfter / time.Second),
+		PollIntervalSec:         int(h.pollInterval / time.Second),
+		GRPCMaxInflightPerAgent: h.grpcMaxInflight,
+		HTTPMaxInflightPerAgent: h.httpAgentMaxInflight,
+	}
+}
+
+func (h *Hub) schedulerForAgent(ctx context.Context, agentID string) config.Scheduler {
+	scheduler, _, _ := h.settingsForAgent(ctx, agentID)
+	return scheduler
+}
+
+func (h *Hub) grpcInflightLimitForAgent(ctx context.Context, agentID string) int {
+	scheduler := h.schedulerForAgent(ctx, agentID)
+	if scheduler.GRPCMaxInflightPerAgent <= 0 {
+		return 4
+	}
+	return scheduler.GRPCMaxInflightPerAgent
+}
+
+func (h *Hub) pollIntervalForAgent(ctx context.Context, agentID string) time.Duration {
+	scheduler := h.schedulerForAgent(ctx, agentID)
+	if scheduler.PollIntervalSec <= 0 {
+		return 2 * time.Second
+	}
+	return time.Duration(scheduler.PollIntervalSec) * time.Second
+}
+
+func (h *Hub) policiesSnapshot() policy.Set {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.policies
+}
+
+func (h *Hub) policiesForAgent(ctx context.Context, agentID string) policy.Set {
+	_, runtime, toolPolicies := h.settingsForAgent(ctx, agentID)
+	return h.policiesSnapshot().WithIntersection(toolPolicies, runtime)
+}
+
+func (h *Hub) policiesForLabels(labels []string) policy.Set {
+	base := h.policiesSnapshot()
+	runtime := base.Runtime()
+	toolPolicies := h.toolPoliciesForLabels(labels)
+	for _, cfg := range h.labelConfigsFor(labels) {
+		if cfg.Runtime != nil {
+			runtime = minRuntime(runtime, *cfg.Runtime)
+		}
+	}
+	return base.WithIntersection(toolPolicies, runtime)
+}
+
+func (h *Hub) settingsForAgent(ctx context.Context, agentID string) (config.Scheduler, config.Runtime, map[string]config.Policy) {
+	basePolicies := h.policiesSnapshot()
+	runtime := basePolicies.Runtime()
+	scheduler := h.schedulerSnapshot()
+	labels := h.labelsForAgent(ctx, agentID)
+	for _, cfg := range h.labelConfigsFor(labels) {
+		if cfg.Runtime != nil {
+			runtime = minRuntime(runtime, *cfg.Runtime)
+		}
+		if cfg.Scheduler != nil {
+			scheduler = minScheduler(scheduler, *cfg.Scheduler)
+		}
+	}
+	return scheduler, runtime, h.toolPoliciesForLabels(labels)
+}
+
+func (h *Hub) labelsForAgent(ctx context.Context, agentID string) []string {
+	agents, err := h.agentsWithManagedLabels(ctx)
+	if err != nil {
+		return model.NormalizeAgentLabels(agentID, nil)
+	}
+	for _, agent := range agents {
+		if agent.ID == agentID {
+			return agent.Labels
+		}
+	}
+	if node, err := h.store.GetHTTPAgent(ctx, agentID); err == nil {
+		return model.NormalizeAgentLabels(agentID, node.Labels)
+	}
+	if cfg, err := h.store.GetAgentConfig(ctx, agentID); err == nil {
+		return model.NormalizeAgentLabels(agentID, cfg.Labels)
+	}
+	return model.NormalizeAgentLabels(agentID, nil)
+}
+
+func (h *Hub) labelConfigsSnapshot() map[string]config.LabelConfig {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return cloneLabelConfigs(h.labelConfigs)
+}
+
+func (h *Hub) labelConfigsFor(labels []string) []config.LabelConfig {
+	configs := h.labelConfigsSnapshot()
+	out := make([]config.LabelConfig, 0, len(labels))
+	for _, label := range labels {
+		if cfg, ok := configs[label]; ok {
+			out = append(out, cfg)
+		}
+	}
+	return out
+}
+
+func (h *Hub) toolPoliciesForLabels(labels []string) map[string]config.Policy {
+	var merged map[string]config.Policy
+	for _, cfg := range h.labelConfigsFor(labels) {
+		if len(cfg.ToolPolicies) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = clonePolicies(cfg.ToolPolicies)
+			continue
+		}
+		merged = intersectConfigPolicies(merged, cfg.ToolPolicies)
+	}
+	return merged
+}
+
+func (h *Hub) agentConfigDisabled(ctx context.Context, agentID string) bool {
+	if node, err := h.store.GetHTTPAgent(ctx, agentID); err == nil {
+		return !node.Enabled
+	}
+	cfg, err := h.store.GetAgentConfig(ctx, agentID)
+	return err == nil && cfg.Disabled
+}
+
+func (h *Hub) offlineAfterSnapshot() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.offlineAfter <= 0 {
+		return 90 * time.Second
+	}
+	return h.offlineAfter
+}
+
+func (h *Hub) offlineAfterForAgent(ctx context.Context, agentID string) time.Duration {
+	scheduler := h.schedulerForAgent(ctx, agentID)
+	if scheduler.AgentOfflineAfterSec <= 0 {
+		return 90 * time.Second
+	}
+	return time.Duration(scheduler.AgentOfflineAfterSec) * time.Second
+}
+
+func (h *Hub) httpAgentInflightLimit() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.httpAgentMaxInflight
 }
 
 func (h *Hub) runningJobs(agentID string) []string {
@@ -1052,15 +1327,160 @@ func (h *Hub) agentStale(agentID string) bool {
 	return h.agentStaleLocked(agentID)
 }
 
+func (h *Hub) agentStaleAfter(agentID string, offlineAfter time.Duration) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.agentStaleAfterLocked(agentID, offlineAfter)
+}
+
 func (h *Hub) agentStaleLocked(agentID string) bool {
+	offlineAfter := h.offlineAfter
+	if offlineAfter <= 0 {
+		offlineAfter = 90 * time.Second
+	}
+	return h.agentStaleAfterLocked(agentID, offlineAfter)
+}
+
+func (h *Hub) agentStaleAfterLocked(agentID string, offlineAfter time.Duration) bool {
 	meta, ok := h.meta[agentID]
 	if !ok {
 		return true
 	}
-	return time.Since(meta.lastSeen) > h.offlineAfter
+	if offlineAfter <= 0 {
+		offlineAfter = 90 * time.Second
+	}
+	return time.Since(meta.lastSeen) > offlineAfter
 }
 
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizedRegisterTokens(tokens []config.RegisterToken) []string {
+	out := make([]string, 0, len(tokens))
+	seen := map[string]struct{}{}
+	for _, item := range tokens {
+		token := strings.TrimSpace(item.Token)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
+func minRuntime(base config.Runtime, next config.Runtime) config.Runtime {
+	config.DefaultRuntimeValues(&base)
+	config.DefaultRuntimeValues(&next)
+	base.Count = minPositive(base.Count, next.Count)
+	base.MaxHops = minPositive(base.MaxHops, next.MaxHops)
+	base.ProbeStepTimeoutSec = minPositive(base.ProbeStepTimeoutSec, next.ProbeStepTimeoutSec)
+	base.MaxToolTimeoutSec = minPositive(base.MaxToolTimeoutSec, next.MaxToolTimeoutSec)
+	base.HTTPTimeoutSec = minPositive(base.HTTPTimeoutSec, next.HTTPTimeoutSec)
+	base.DNSTimeoutSec = minPositive(base.DNSTimeoutSec, next.DNSTimeoutSec)
+	base.ResolveTimeoutSec = minPositive(base.ResolveTimeoutSec, next.ResolveTimeoutSec)
+	base.HTTPInvokeAttempts = minPositive(base.HTTPInvokeAttempts, next.HTTPInvokeAttempts)
+	base.HTTPMaxHealthIntervalSec = minPositive(base.HTTPMaxHealthIntervalSec, next.HTTPMaxHealthIntervalSec)
+	return base
+}
+
+func minScheduler(base config.Scheduler, next config.Scheduler) config.Scheduler {
+	config.DefaultScheduler(&base)
+	config.DefaultScheduler(&next)
+	base.AgentOfflineAfterSec = minPositive(base.AgentOfflineAfterSec, next.AgentOfflineAfterSec)
+	base.GRPCMaxInflightPerAgent = minPositive(base.GRPCMaxInflightPerAgent, next.GRPCMaxInflightPerAgent)
+	base.HTTPMaxInflightPerAgent = minPositive(base.HTTPMaxInflightPerAgent, next.HTTPMaxInflightPerAgent)
+	base.PollIntervalSec = minPositive(base.PollIntervalSec, next.PollIntervalSec)
+	return base
+}
+
+func minPositive(left int, right int) int {
+	if left <= 0 {
+		return right
+	}
+	if right <= 0 {
+		return left
+	}
+	if right < left {
+		return right
+	}
+	return left
+}
+
+func intersectConfigPolicies(left map[string]config.Policy, right map[string]config.Policy) map[string]config.Policy {
+	out := clonePolicies(left)
+	for name, rightPolicy := range right {
+		leftPolicy, ok := out[name]
+		if !rightPolicy.Enabled {
+			out[name] = clonePolicy(rightPolicy)
+			continue
+		}
+		if !ok {
+			out[name] = clonePolicy(rightPolicy)
+			continue
+		}
+		if !leftPolicy.Enabled {
+			out[name] = leftPolicy
+			continue
+		}
+		if rightPolicy.AllowedArgs != nil {
+			leftPolicy.AllowedArgs = policy.IntersectAllowedArgs(leftPolicy.AllowedArgs, rightPolicy.AllowedArgs)
+		}
+		out[name] = leftPolicy
+	}
+	return out
+}
+
+func clonePolicy(cfg config.Policy) config.Policy {
+	if cfg.AllowedArgs != nil {
+		cfg.AllowedArgs = cloneStringMap(cfg.AllowedArgs)
+	}
+	return cfg
+}
+
+func cloneLabelConfigs(configs map[string]config.LabelConfig) map[string]config.LabelConfig {
+	if configs == nil {
+		return nil
+	}
+	out := make(map[string]config.LabelConfig, len(configs))
+	for label, cfg := range configs {
+		if cfg.Runtime != nil {
+			runtime := *cfg.Runtime
+			cfg.Runtime = &runtime
+		}
+		if cfg.Scheduler != nil {
+			scheduler := *cfg.Scheduler
+			cfg.Scheduler = &scheduler
+		}
+		cfg.ToolPolicies = clonePolicies(cfg.ToolPolicies)
+		out[label] = cfg
+	}
+	return out
+}
+
+func clonePolicies(policies map[string]config.Policy) map[string]config.Policy {
+	if policies == nil {
+		return nil
+	}
+	out := make(map[string]config.Policy, len(policies))
+	for name, cfg := range policies {
+		out[name] = clonePolicy(cfg)
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }

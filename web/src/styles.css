@@ -127,12 +127,17 @@ body,
 }
 
 .tool-tabs .mantine-Tabs-tab {
+  --tab-hover-color: transparent;
   border: 0;
   color: light-dark(#6b7280, #a4adbb);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 22px;
   letter-spacing: 0;
   padding: 4px 0 8px;
+}
+
+.tool-tabs .mantine-Tabs-tab:hover {
+  background: transparent;
 }
 
 .tool-tabs .mantine-Tabs-tab::after {
@@ -257,6 +262,572 @@ body,
 .token-field .mantine-InputWrapper-description,
 .token-field .mantine-InputWrapper-error {
   grid-column: 2;
+}
+
+.manage-tabs-root,
+.manage-tabs {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.manage-tabs {
+  border: 0;
+  display: flex;
+  gap: 28px;
+  row-gap: 8px;
+}
+
+.responsive-label-compact {
+  display: none;
+}
+
+.manage-tabs::before {
+  display: none;
+}
+
+.manage-tabs .mantine-Tabs-tab {
+  --tab-hover-color: transparent;
+  border: 0;
+  color: light-dark(#64748b, #a4adbb);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  padding: 4px 0 8px;
+}
+
+.manage-tabs .mantine-Tabs-tab:hover {
+  background: transparent;
+  color: light-dark(#111827, #f4f7fb);
+}
+
+.manage-tabs .mantine-Tabs-tab::after {
+  background: transparent;
+  bottom: 0;
+  content: "";
+  height: 2px;
+  left: 0;
+  position: absolute;
+  right: 0;
+}
+
+.manage-tabs .mantine-Tabs-tab[data-active] {
+  color: light-dark(#111827, #ffffff);
+}
+
+.manage-tabs .mantine-Tabs-tab[data-active]::after {
+  background: currentColor;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root {
+  --ai-bd: 1px solid transparent;
+  --ai-bg: light-dark(#f8fafc, #28313b);
+  --ai-color: light-dark(#111827, #ffffff);
+  --ai-hover: light-dark(#eef2f7, #313b47);
+  --ai-hover-color: light-dark(#111827, #ffffff);
+  --button-bd: 1px solid transparent;
+  --button-bg: light-dark(#f8fafc, #28313b);
+  --button-color: light-dark(#111827, #ffffff);
+  --button-hover: light-dark(#eef2f7, #313b47);
+  --button-hover-color: light-dark(#111827, #ffffff);
+  background: light-dark(#f8fafc, #28313b) !important;
+  border: 0 !important;
+  box-shadow: none;
+  color: light-dark(#111827, #ffffff) !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root:hover {
+  background: light-dark(#eef2f7, #313b47) !important;
+  color: light-dark(#111827, #ffffff) !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root {
+  min-height: 40px;
+  padding-inline: 16px !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-section[data-position="left"] {
+  margin-inline-end: 8px;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root::before {
+  display: none;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root[data-variant="subtle"] {
+  background: light-dark(#ffffff, #242a32) !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root[data-variant="subtle"]:hover {
+  background: light-dark(#f8fafc, #2c333d) !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-ActionIcon-root[data-variant="subtle"] {
+  background: transparent !important;
+  color: light-dark(#475569, #d9dee7) !important;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-ActionIcon-root[data-variant="subtle"]:hover {
+  background: light-dark(#f1f5f9, #252b34) !important;
+  color: light-dark(#111827, #ffffff) !important;
+}
+
+.manage-refresh-button[data-loading] .mantine-Button-inner {
+  opacity: 1;
+  transform: none;
+}
+
+.manage-refresh-button[data-disabled],
+.manage-refresh-button:disabled {
+  color: light-dark(#111827, #ffffff) !important;
+}
+
+.manage-refresh-icon {
+  transform-origin: center;
+}
+
+.manage-refresh-icon.is-spinning {
+  animation: manage-refresh-spin 800ms linear infinite;
+}
+
+@keyframes manage-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Pill-root {
+  align-items: center;
+  background: light-dark(#f8fafc, #252b34);
+  border: 1px solid light-dark(#d8dee6, #455263);
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 6px;
+  height: 26px;
+  padding-inline: 10px 6px;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Pill-label {
+  align-items: center;
+  display: inline-flex;
+  height: 100%;
+  line-height: 1;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Pill-remove {
+  align-items: center;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  margin-left: 0;
+  min-height: 18px;
+  min-width: 18px;
+  padding: 0;
+  width: 18px;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Pill-remove svg {
+  height: 14px;
+  width: 14px;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-PillsInput-pill {
+  margin: 2px 6px 2px 0;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-PillGroup-group {
+  align-items: center;
+  column-gap: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Button-root[disabled],
+:where(.manage-page, .manage-modal-scope) .mantine-ActionIcon-root[disabled] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Switch-track {
+  --switch-bg: light-dark(#d7dde5, #141a22);
+  border-color: light-dark(#cbd5e1, #46515f);
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Switch-input:checked + .mantine-Switch-track {
+  --switch-bg: light-dark(#334155, #506982);
+  border-color: light-dark(#334155, #6e8298);
+}
+
+:where(.manage-page, .manage-modal-scope) .mantine-Switch-thumb {
+  background: light-dark(#ffffff, #f8fafc);
+  border-color: transparent;
+}
+
+.manage-agent-box {
+  border-color: light-dark(#e5e7eb, #343b46);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.manage-table-actions {
+  text-align: right;
+  width: 78px;
+}
+
+th.manage-table-actions {
+  text-align: left;
+}
+
+.manage-table-actions .mantine-Group-root {
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+.manage-table {
+  font-size: 13px;
+}
+
+.manage-table th,
+.manage-table td {
+  padding-block: 8px;
+  padding-inline: 10px;
+}
+
+.manage-table th {
+  color: light-dark(#475569, #c7d1df);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.manage-table td {
+  color: light-dark(#1f2937, #d9dee7);
+  font-size: 13px;
+}
+
+.manage-table .mantine-Text-root {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.manage-table .manage-token-secret {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  max-width: 320px;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.manage-table .manage-inline-name {
+  max-width: 280px;
+}
+
+.manage-table .manage-inline-name .mantine-Input-input {
+  min-height: 30px;
+}
+
+.manage-table .manage-inline-name .mantine-Button-root {
+  height: 30px;
+  min-height: 30px;
+  min-width: 34px;
+  padding-inline: 8px !important;
+}
+
+.manage-table .mantine-Badge-root {
+  font-size: 11px;
+  height: 22px;
+  padding-inline: 8px;
+}
+
+.manage-token-access {
+  align-items: center;
+  min-width: 0;
+}
+
+.manage-token-access .mantine-Badge-root {
+  max-width: 100%;
+  text-transform: none;
+}
+
+.manage-table .mantine-ActionIcon-root {
+  --ai-size: 30px;
+  height: 30px;
+  min-height: 30px;
+  min-width: 30px;
+  width: 30px;
+}
+
+.manage-section-block {
+  min-width: 0;
+  position: relative;
+}
+
+.manage-section-body {
+  min-width: 0;
+}
+
+.manage-modal-scope > .mantine-Stack-root > .manage-section-block > .manage-section-body {
+  padding-inline: 23px;
+}
+
+.manage-modal-scope .manage-tool-sections .manage-section-body {
+  padding-inline: 0;
+}
+
+.manage-section-header {
+  align-items: center;
+  border-radius: 6px;
+  min-height: 36px;
+  padding: 7px 12px;
+}
+
+.manage-section-marker {
+  background: light-dark(#64748b, #7f93ad);
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 16px;
+  width: 3px;
+}
+
+.manage-section-title {
+  color: light-dark(#475569, #c7d1df);
+  flex: 0 0 auto;
+  font-size: 15px;
+  line-height: 1.1;
+}
+
+.manage-section-rule {
+  background: light-dark(#e2e8f0, #343b46);
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 24px;
+}
+
+.manage-section-action {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.manage-section-override-switch .mantine-Switch-label {
+  color: light-dark(#475569, #dbe5f2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.manage-tool-sections .manage-section-header {
+  background: transparent;
+  min-height: 28px;
+  padding: 3px 0;
+}
+
+.manage-tool-sections .manage-section-block {
+  padding-left: 6px;
+}
+
+.manage-modal-scope .manage-tool-sections .manage-section-block {
+  padding-left: 0;
+}
+
+.manage-tool-sections .manage-section-marker {
+  height: 13px;
+}
+
+.manage-tool-sections .manage-section-title {
+  color: light-dark(#64748b, #aeb8c7);
+  font-size: 13px;
+}
+
+.manage-node-enable-switch .mantine-Switch-body {
+  align-items: center;
+}
+
+.manage-tool-enable-switch .mantine-Switch-body {
+  align-items: center;
+}
+
+.manage-tool-policy-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.manage-tool-policy-card {
+  background: light-dark(#ffffff, #171c23);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.manage-tool-policy-card-header {
+  margin-bottom: 12px;
+}
+
+.manage-tool-policy-name {
+  color: light-dark(#334155, #cdd8e8);
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.manage-tool-policy-card-body {
+  min-width: 0;
+}
+
+.manage-tool-policy-card-body .manage-tool-args-grid {
+  --sg-spacing-x: 12px;
+  --sg-spacing-y: 10px;
+}
+
+.manage-tool-policy-card-body .manage-tool-args-grid:empty {
+  display: none;
+}
+
+.manage-tool-args-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.manage-nowrap-multiselect.mantine-MultiSelect-input,
+.manage-nowrap-multiselect .mantine-MultiSelect-input,
+.manage-tool-policy-card .mantine-MultiSelect-input {
+  flex-wrap: nowrap;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.manage-nowrap-multiselect.mantine-MultiSelect-input::-webkit-scrollbar,
+.manage-nowrap-multiselect .mantine-MultiSelect-input::-webkit-scrollbar,
+.manage-tool-policy-card .mantine-MultiSelect-input::-webkit-scrollbar {
+  display: none;
+}
+
+.manage-nowrap-multiselect.mantine-MultiSelect-input .mantine-PillGroup-group,
+.manage-nowrap-multiselect .mantine-PillGroup-group,
+.manage-tool-policy-card .mantine-PillGroup-group {
+  flex-wrap: nowrap;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-inline-end: 0;
+  scrollbar-width: none;
+  width: 100%;
+}
+
+.manage-nowrap-multiselect.mantine-MultiSelect-input .mantine-PillGroup-group::-webkit-scrollbar,
+.manage-nowrap-multiselect .mantine-PillGroup-group::-webkit-scrollbar,
+.manage-tool-policy-card .mantine-PillGroup-group::-webkit-scrollbar {
+  display: none;
+}
+
+.manage-nowrap-multiselect .mantine-Pill-root,
+.manage-tool-policy-card .mantine-Pill-root {
+  flex: 0 0 auto;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.manage-nowrap-multiselect .mantine-Pill-label,
+.manage-tool-policy-card .mantine-Pill-label {
+  flex: 0 0 auto;
+  min-width: max-content;
+  white-space: nowrap;
+}
+
+.manage-nowrap-multiselect .mantine-MultiSelect-inputField,
+.manage-tool-policy-card .mantine-MultiSelect-inputField {
+  flex: 0 0 72px;
+  min-width: 72px;
+  width: 72px;
+}
+
+.manage-tool-policy-card .manage-tool-enable-switch {
+  flex: 0 0 auto;
+}
+
+.manage-form-grid,
+.manage-rate-grid,
+.manage-limit-fields,
+.manage-tool-args-grid {
+  --sg-spacing-x: 12px;
+  --sg-spacing-y: 14px;
+}
+
+.manage-form-grid > *,
+.manage-limit-fields > *,
+.manage-tool-args-grid > * {
+  min-width: 0;
+}
+
+.manage-form-grid .mantine-InputWrapper-label,
+.manage-limit-fields .mantine-InputWrapper-label,
+.manage-tool-args-grid .mantine-InputWrapper-label,
+:where(.manage-page, .manage-modal-scope) .mantine-InputWrapper-label,
+:where(.manage-page, .manage-modal-scope) .mantine-TagsInput-label {
+  color: light-dark(#374151, #d9dee7);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin-bottom: 4px;
+}
+
+.manage-form-grid .mantine-Input-input,
+.manage-limit-fields .mantine-Input-input,
+.manage-tool-args-grid .mantine-Input-input,
+:where(.manage-page, .manage-modal-scope) .mantine-Input-input,
+:where(.manage-page, .manage-modal-scope) .mantine-TagsInput-input {
+  min-height: 36px;
+}
+
+.manage-node-fields {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.manage-rate-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.manage-limit-group {
+  grid-column: span 1;
+  min-width: 0;
+}
+
+.manage-limit-group-cidr {
+  grid-column: 1 / -1;
+}
+
+.manage-exempt-cidrs {
+  align-self: end;
+  min-width: 0;
+}
+
+.manage-limit-card-header {
+  margin-bottom: 12px;
+}
+
+.manage-limit-title {
+  color: light-dark(#334155, #cdd8e8);
+  font-size: 14px;
+}
+
+.manage-limit-fields > * {
+  min-width: 0;
+}
+
+@media (max-width: 1440px) {
+  .manage-rate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .manage-limit-group-cidr {
+    grid-column: 1 / -1;
+  }
+
+  .manage-limit-fields-cidr {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
 }
 
 .query-panel,
@@ -1463,6 +2034,22 @@ body,
 }
 
 @media (max-width: 1080px) {
+  .manage-rate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .manage-limit-group {
+    grid-column: 1 / -1;
+  }
+
+  .manage-limit-group-cidr {
+    grid-column: 1 / -1;
+  }
+
+  .manage-limit-fields-cidr {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .top-nav {
     align-items: center;
     flex-direction: row;
@@ -1603,6 +2190,52 @@ body,
 }
 
 @media (max-width: 720px) {
+  .manage-tabs-root,
+  .manage-tabs {
+    width: 100%;
+  }
+
+  .manage-tabs-root {
+    overflow-x: auto;
+  }
+
+  .manage-tabs {
+    flex-wrap: nowrap;
+    gap: 24px;
+    min-width: max-content;
+    row-gap: 0;
+  }
+
+  .manage-tabs .mantine-Tabs-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .responsive-label-full {
+    display: none;
+  }
+
+  .responsive-label-compact {
+    display: inline;
+  }
+
+  .manage-tool-policy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manage-rate-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manage-limit-fields-cidr {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .manage-limit-group,
+  .manage-limit-group-cidr {
+    grid-column: 1 / -1;
+  }
+
   .page {
     min-height: 100vh;
   }

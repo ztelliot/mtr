@@ -1,4 +1,4 @@
-import type { Agent, CreateJobRequest, CreateScheduledJobRequest, GeoIPInfo, Job, JobEvent, Permissions, RuntimeConfig, ScheduledJob, StreamEvent, VersionInfo } from "./types";
+import type { Agent, AgentConfig, APITokenPermission, CreateJobRequest, CreateScheduledJobRequest, GeoIPInfo, HTTPAgentConfig, Job, JobEvent, ManagedAgent, ManagedAgentLabelsRequest, ManagedLabels, ManagedLabelsAndAgents, ManagedRateLimit, ManagedRegisterTokenListResponse, ManagedRegisterTokenRequest, ManagedRegisterTokenResponse, ManagedTokenListResponse, ManagedTokenRequest, ManagedTokenResponse, Permissions, RateLimitConfig, RegisterToken, RuntimeConfig, ScheduledJob, StreamEvent, VersionInfo } from "./types";
 
 type EventPayload = StreamEvent & { agent_id?: string };
 
@@ -99,6 +99,160 @@ export class ApiClient {
     return this.request<GeoIPInfo>(`/v1/geoip/${encodeURIComponent(ip)}`);
   }
 
+  async getManagedRateLimit(): Promise<ManagedRateLimit> {
+    const response = await this.request<ManagedRateLimit | RateLimitConfig>("/v1/manage/rate-limit");
+    if ("rate_limit" in response) {
+      return response;
+    }
+    return { rate_limit: response };
+  }
+
+  async updateManagedRateLimit(payload: ManagedRateLimit): Promise<ManagedRateLimit> {
+    const response = await this.request<ManagedRateLimit | RateLimitConfig>("/v1/manage/rate-limit", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    if ("rate_limit" in response) {
+      return response;
+    }
+    return { rate_limit: response };
+  }
+
+  async getManagedLabels(): Promise<ManagedLabels> {
+    return this.request<ManagedLabels>("/v1/manage/labels");
+  }
+
+  async updateManagedLabels(payload: ManagedLabels): Promise<ManagedLabels> {
+    return this.request<ManagedLabels>("/v1/manage/labels", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async updateManagedLabelsAndAgents(payload: ManagedLabels & ManagedAgentLabelsRequest): Promise<ManagedLabelsAndAgents> {
+    const response = await this.request<ManagedLabelsAndAgents | null>("/v1/manage/labels/state", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    return { revision: response?.revision, updated_at: response?.updated_at, label_configs: response?.label_configs ?? {}, agents: Array.isArray(response?.agents) ? response.agents : [] };
+  }
+
+  async listManagedTokens(): Promise<ManagedTokenListResponse> {
+    const response = await this.request<ManagedTokenListResponse | APITokenPermission[] | null>("/v1/manage/tokens");
+    if (Array.isArray(response)) {
+      return { tokens: response };
+    }
+    return { revision: response?.revision, updated_at: response?.updated_at, tokens: Array.isArray(response?.tokens) ? response.tokens : [] };
+  }
+
+  async createManagedToken(payload: ManagedTokenRequest): Promise<ManagedTokenResponse> {
+    const response = await this.request<ManagedTokenResponse | APITokenPermission>("/v1/manage/tokens", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    return tokenResponse(response);
+  }
+
+  async updateManagedToken(id: string, payload: ManagedTokenRequest): Promise<ManagedTokenResponse> {
+    const response = await this.request<ManagedTokenResponse | APITokenPermission>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+    return tokenResponse(response);
+  }
+
+  async rotateManagedToken(id: string): Promise<ManagedTokenResponse> {
+    const response = await this.request<ManagedTokenResponse | APITokenPermission>(`/v1/manage/tokens/${encodeURIComponent(id)}/rotate`, {
+      method: "POST"
+    });
+    return tokenResponse(response);
+  }
+
+  async deleteManagedToken(id: string): Promise<ManagedTokenListResponse> {
+    const response = await this.request<ManagedTokenListResponse | void>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+    return response ?? { tokens: [] };
+  }
+
+  async listManagedRegisterTokens(): Promise<ManagedRegisterTokenListResponse> {
+    const response = await this.request<ManagedRegisterTokenListResponse | RegisterToken[] | null>("/v1/manage/register-tokens");
+    if (Array.isArray(response)) {
+      return { tokens: response };
+    }
+    return { revision: response?.revision, updated_at: response?.updated_at, tokens: Array.isArray(response?.tokens) ? response.tokens : [] };
+  }
+
+  async createManagedRegisterToken(payload: ManagedRegisterTokenRequest): Promise<ManagedRegisterTokenResponse> {
+    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>("/v1/manage/register-tokens", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    return registerTokenResponse(response);
+  }
+
+  async updateManagedRegisterToken(id: string, payload: ManagedRegisterTokenRequest): Promise<ManagedRegisterTokenResponse> {
+    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+    return registerTokenResponse(response);
+  }
+
+  async rotateManagedRegisterToken(id: string): Promise<ManagedRegisterTokenResponse> {
+    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>(`/v1/manage/register-tokens/${encodeURIComponent(id)}/rotate`, {
+      method: "POST"
+    });
+    return registerTokenResponse(response);
+  }
+
+  async deleteManagedRegisterToken(id: string): Promise<ManagedRegisterTokenListResponse> {
+    const response = await this.request<ManagedRegisterTokenListResponse | void>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+    return response ?? { tokens: [] };
+  }
+
+  async createHTTPAgent(payload: HTTPAgentConfig): Promise<HTTPAgentConfig> {
+    return this.request<HTTPAgentConfig>("/v1/manage/agents", {
+      method: "POST",
+      body: JSON.stringify({ ...payload, transport: "http" })
+    });
+  }
+
+  async updateHTTPAgent(id: string, payload: HTTPAgentConfig): Promise<HTTPAgentConfig> {
+    return this.request<HTTPAgentConfig>(`/v1/manage/agents/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...payload, transport: "http" })
+    });
+  }
+
+  async listManagedAgents(): Promise<ManagedAgent[]> {
+    const agents = await this.request<ManagedAgent[] | null>("/v1/manage/agents");
+    return Array.isArray(agents) ? agents : [];
+  }
+
+  async updateAgentConfig(id: string, payload: AgentConfig): Promise<AgentConfig> {
+    return this.request<AgentConfig>(`/v1/manage/agents/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...payload, transport: "grpc" })
+    });
+  }
+
+  async updateManagedAgentLabels(payload: ManagedAgentLabelsRequest): Promise<ManagedAgent[]> {
+    const agents = await this.request<ManagedAgent[] | null>("/v1/manage/agents/labels", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    return Array.isArray(agents) ? agents : [];
+  }
+
+  async deleteManagedAgent(id: string): Promise<void> {
+    return this.request<void>(`/v1/manage/agents/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+  }
+
   jobStreamUrl(id: string): string {
     const url = new URL(
       `${this.baseUrl}/v1/jobs/${encodeURIComponent(id)}/stream`,
@@ -153,4 +307,18 @@ function jobEventFromPayload(jobID: string, payload: EventPayload, index: number
     event,
     created_at: ""
   };
+}
+
+function tokenResponse(response: ManagedTokenResponse | APITokenPermission): ManagedTokenResponse {
+  if ("token" in response) {
+    return response;
+  }
+  return { token: response };
+}
+
+function registerTokenResponse(response: ManagedRegisterTokenResponse | RegisterToken): ManagedRegisterTokenResponse {
+  if ("revision" in response || "updated_at" in response) {
+    return response as ManagedRegisterTokenResponse;
+  }
+  return { token: response as RegisterToken };
 }

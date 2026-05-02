@@ -14,6 +14,13 @@ RUN pnpm build && \
       ':80 {' \
       '  root * /usr/share/caddy' \
       '  encode zstd gzip' \
+      '  header {' \
+      '    Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data:; font-src '\''self'\'' data:; connect-src '\''self'\'' http: https: ws: wss:; object-src '\''none'\''; base-uri '\''self'\''; frame-ancestors '\''none'\''; form-action '\''self'\''"' \
+      '    Referrer-Policy "no-referrer"' \
+      '    X-Content-Type-Options "nosniff"' \
+      '    X-Frame-Options "DENY"' \
+      '    Permissions-Policy "camera=(), microphone=(), geolocation=()"' \
+      '  }' \
       '' \
       '  handle /config.json {' \
       '    header Cache-Control "no-store"' \
