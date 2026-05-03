@@ -1,4 +1,5 @@
 .codex
+.env
 certs/
 mtr.db*
 node_modules/

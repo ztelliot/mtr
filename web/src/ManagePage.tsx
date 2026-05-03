@@ -52,8 +52,7 @@ const emptyRuntime: RuntimeSettings = {
 
 const emptyScheduler: SchedulerSettings = {
   agent_offline_after_sec: 90,
-  grpc_max_inflight_per_agent: 4,
-  http_max_inflight_per_agent: 1,
+  max_inflight_per_agent: 4,
   poll_interval_sec: 2
 };
 
@@ -61,6 +60,7 @@ const emptyRateLimit: RateLimitConfig = {
   global: { requests_per_minute: 600, burst: 200 },
   ip: { requests_per_minute: 60, burst: 20 },
   cidr: { requests_per_minute: 300, burst: 100, ipv4_prefix: 32, ipv6_prefix: 128 },
+  geoip: { requests_per_minute: 120, burst: 60 },
   tools: {},
   exempt_cidrs: []
 };
@@ -112,7 +112,12 @@ export const __managePageTest = {
   changedLabelAgents,
   customLabels,
   displayTokenToolScope,
+  httpAgentRequiredFieldsMissing,
+  labelSummaries,
+  managedHTTPAgentFromConfig,
+  normalizeIPVersions,
   normalizeToken,
+  normalizeTokenToolScope,
   setPolicyEnabled,
   selectTokenTools,
   withTokenDefaults
@@ -152,9 +157,8 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
   const labelRows = useMemo(() => labelSummaries(allManagedAgents, settings.label_configs ?? {}), [allManagedAgents, settings.label_configs]);
   const nodeOptions = useMemo(() => allManagedAgents.map((agent) => ({ value: agent.id, label: nodeOptionLabel(agent) })), [allManagedAgents]);
   const labelOptions = useMemo(() => labelRows.map((row) => ({ value: row.label, label: `${row.label} (${row.count})` })), [labelRows]);
-  const httpAgentIdMissing = httpAgentModalOpen && !editingHTTPAgentId && !httpAgentForm.id.trim();
-  const httpAgentURLMissing = httpAgentModalOpen && !httpAgentForm.base_url.trim();
-  const httpAgentSubmitDisabled = !writable || httpAgentIdMissing || httpAgentURLMissing;
+  const httpAgentMissingFields = httpAgentRequiredFieldsMissing(httpAgentForm, editingHTTPAgentId, httpAgentModalOpen);
+  const httpAgentSubmitDisabled = !writable || httpAgentMissingFields.id || httpAgentMissingFields.baseURL || httpAgentMissingFields.token;
   const accessOptions = useMemo(() => localizedAccessOptions(t), [t]);
 
   useEffect(() => {
@@ -227,12 +231,13 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
     const id = (editingHTTPAgentId || httpAgentForm.id).trim();
     const baseURL = httpAgentForm.base_url.trim();
-    if (!id || !baseURL) {
+    const httpToken = httpAgentForm.http_token?.trim() ?? "";
+    if (!id || !baseURL || !httpToken) {
       return;
     }
     setSavingHTTPAgent(true);
     try {
-      const payload = { ...httpAgentForm, id, transport: "http" as const, base_url: baseURL };
+      const payload = { ...httpAgentForm, id, transport: "http" as const, base_url: baseURL, http_token: httpToken };
       const saved = withHTTPAgentDefaults(editingHTTPAgentId ? await client.updateHTTPAgent(editingHTTPAgentId, payload) : await client.createHTTPAgent(payload));
       setHTTPAgents((current) => upsertManagedHTTPAgent(current, saved));
       closeHTTPAgentModal();
@@ -899,9 +904,9 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
           <Stack gap="md">
             <Stack className="manage-node-fields" gap="md">
               <SimpleGrid cols={{ base: 1, md: 2 }}>
-                <TextInput label={t("manage.id")} value={httpAgentForm.id} disabled={!writable || Boolean(editingHTTPAgentId)} error={httpAgentIdMissing} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, id: event.currentTarget.value })} />
-                <TextInput label={t("manage.url")} value={httpAgentForm.base_url} disabled={!writable} error={httpAgentURLMissing} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, base_url: event.currentTarget.value })} />
-                <PasswordInput label={t("manage.token")} value={httpAgentForm.http_token ?? ""} disabled={!writable} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, http_token: event.currentTarget.value })} />
+                <TextInput label={t("manage.id")} value={httpAgentForm.id} disabled={!writable || Boolean(editingHTTPAgentId)} error={httpAgentMissingFields.id} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, id: event.currentTarget.value })} />
+                <TextInput label={t("manage.url")} value={httpAgentForm.base_url} disabled={!writable} error={httpAgentMissingFields.baseURL} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, base_url: event.currentTarget.value })} />
+                <PasswordInput label={t("manage.token")} value={httpAgentForm.http_token ?? ""} disabled={!writable} error={httpAgentMissingFields.token} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, http_token: event.currentTarget.value })} />
                 <Box className="manage-node-labels-field">
                   <TagsInput label={t("manage.labels")} value={httpAgentForm.labels ?? []} disabled={!writable} onChange={(labels) => setHTTPAgentForm({ ...httpAgentForm, labels })} />
                 </Box>
@@ -1145,8 +1150,7 @@ function RuntimeEditor({ value, disabled, onChange, t }: { value: RuntimeSetting
 function SchedulerEditor({ value, disabled, onChange, t }: { value: SchedulerSettings; disabled: boolean; onChange: (value: SchedulerSettings) => void; t: (key: string) => string }) {
   return (
     <SimpleGrid className="manage-form-grid manage-form-grid-scheduler" cols={{ base: 2, md: 3, lg: 4 }}>
-      <NumberField label={t("manage.grpcInflight")} value={value.grpc_max_inflight_per_agent} disabled={disabled} onChange={(next) => onChange({ ...value, grpc_max_inflight_per_agent: next })} />
-      <NumberField label={t("manage.httpAgentInflight")} value={value.http_max_inflight_per_agent} disabled={disabled} onChange={(next) => onChange({ ...value, http_max_inflight_per_agent: next })} />
+      <NumberField label={t("manage.maxInflight")} value={value.max_inflight_per_agent} disabled={disabled} onChange={(next) => onChange({ ...value, max_inflight_per_agent: next })} />
       <NumberField label={t("manage.pollInterval")} value={value.poll_interval_sec} disabled={disabled} onChange={(next) => onChange({ ...value, poll_interval_sec: next })} />
       <NumberField label={t("manage.offlineAfter")} value={value.agent_offline_after_sec} disabled={disabled} onChange={(next) => onChange({ ...value, agent_offline_after_sec: next })} />
     </SimpleGrid>
@@ -1168,6 +1172,7 @@ function RateLimitEditor({ value, disabled, onChange, t }: { value: RateLimitCon
           onChange={(limit) => onChange({ ...value, cidr: limit })}
           onExemptChange={(exempt) => onChange({ ...value, exempt_cidrs: exempt })}
         />
+        <LimitInputs prefix={t("manage.geoipLimit")} limit={value.geoip} disabled={disabled} t={t} onChange={(limit) => onChange({ ...value, geoip: limit })} />
       </div>
     </Stack>
   );
@@ -1248,15 +1253,18 @@ function TokenToolPolicySections({ value, disabled, onChange, t }: { value: Part
           <ManageSection key={tool} title={tool} marker={false}>
             <Stack gap="md">
               <ToolArgsEditor tool={tool} args={scope.allowed_args ?? {}} disabled={disabled} t={t} onChange={(allowedArgs) => onChange(tool, { ...rawScope, allowed_args: allowedArgs })} />
-              <SimpleGrid cols={{ base: 1, md: 2 }}>
-                <MultiSelect
-                  className="manage-nowrap-multiselect"
-                  label={t("form.ipVersion")}
-                  data={ipVersionOptions.map((version) => ({ value: String(version), label: version === 0 ? t("form.automatic") : `IPv${version}` }))}
-                  value={(scope.ip_versions ?? ipVersionOptions).map(String)}
-                  disabled={disabled}
-                  onChange={(versions) => onChange(tool, { ...rawScope, ip_versions: normalizeIPVersions(versions) })}
-                />
+              <SimpleGrid cols={{ base: 1, md: tool === "dns" ? 1 : 2 }}>
+                {tool !== "dns" && (
+                  <MultiSelect
+                    className="manage-nowrap-multiselect"
+                    label={t("form.ipVersion")}
+                    data={ipVersionOptions.map((version) => ({ value: String(version), label: version === 0 ? t("form.automatic") : `IPv${version}` }))}
+                    value={(scope.ip_versions ?? ipVersionOptions).map(String)}
+                    disabled={disabled}
+                    clearable={false}
+                    onChange={(versions) => onChange(tool, { ...rawScope, ip_versions: normalizeIPVersions(versions) })}
+                  />
+                )}
                 <Select
                   label={t("manage.resolveOnAgent")}
                   data={[
@@ -1330,23 +1338,35 @@ function ConfigBadges({ config, t }: { config: LabelConfigSettings; t: (key: str
 
 function upsertManagedHTTPAgent(httpAgents: ManagedAgent[], node: HTTPAgentConfig): ManagedAgent[] {
   const next = httpAgents.filter((item) => item.id !== node.id);
-  next.push(managedHTTPAgentFromConfig(node));
+  next.push(managedHTTPAgentFromConfig(node, httpAgents.find((item) => item.id === node.id)));
   return next.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function httpAgentRequiredFieldsMissing(node: HTTPAgentConfig, editingID = "", active = true): { id: boolean; baseURL: boolean; token: boolean } {
+  if (!active) {
+    return { id: false, baseURL: false, token: false };
+  }
+  return {
+    id: !editingID && !node.id.trim(),
+    baseURL: !node.base_url.trim(),
+    token: !node.http_token?.trim()
+  };
 }
 
 function managedAgentType(agent: ManagedAgent): "grpc" | "http" {
   return agent.type ?? agent.transport;
 }
 
-function managedHTTPAgentFromConfig(node: HTTPAgentConfig): ManagedAgent {
+function managedHTTPAgentFromConfig(node: HTTPAgentConfig, previous?: ManagedAgent): ManagedAgent {
   return {
+    ...previous,
     id: node.id,
-    labels: node.labels,
-    capabilities: [],
-    protocols: 0,
-    status: node.enabled ? "online" : "offline",
-    last_seen_at: node.updated_at ?? "",
-    created_at: node.created_at ?? "",
+    labels: normalizedManagedLabels(node.id, "http", node.labels),
+    capabilities: previous?.capabilities ?? [],
+    protocols: previous?.protocols ?? 0,
+    status: node.enabled ? previous?.status ?? "offline" : "offline",
+    last_seen_at: previous?.last_seen_at ?? node.updated_at ?? "",
+    created_at: previous?.created_at ?? node.created_at ?? "",
     type: "http",
     transport: "http",
     config: {
@@ -1378,6 +1398,7 @@ function withSettingsDefaults(settings: ManagedSettings): ManagedSettings {
       global: { ...emptyRateLimit.global, ...settings.rate_limit?.global },
       ip: { ...emptyRateLimit.ip, ...settings.rate_limit?.ip },
       cidr: { ...emptyRateLimit.cidr, ...settings.rate_limit?.cidr },
+      geoip: { ...emptyRateLimit.geoip, ...settings.rate_limit?.geoip },
       exempt_cidrs: settings.rate_limit?.exempt_cidrs ?? []
     },
     api_tokens: settings.api_tokens ?? [],
@@ -1442,10 +1463,13 @@ function labelSortKey(label: string): string {
   if (label === "agent") {
     return `0:${label}`;
   }
-  if (label.startsWith("id:")) {
+  if (label === "agent:grpc" || label === "agent:http") {
     return `1:${label}`;
   }
-  return `2:${label}`;
+  if (!label.startsWith("id:")) {
+    return `2:${label}`;
+  }
+  return `3:${label}`;
 }
 
 function agentIDsForLabel(agents: ManagedAgent[], label: string): string[] {
@@ -1471,7 +1495,7 @@ function applyLabelMembership(agents: ManagedAgent[], label: string, selectedIDs
     } else if (!selected.has(agent.id) && hasLabel && !isReservedLabel(label)) {
       nextLabels = labels.filter((item) => item !== label);
     }
-    const normalizedLabels = managedLabelsForAgent(agent.id, nextLabels);
+    const normalizedLabels = managedLabelsForAgent(agent, nextLabels);
     if (managedAgentType(agent) === "http") {
       const http = withHTTPAgentDefaults(agent.http ?? { ...emptyHTTPAgent, id: agent.id });
       http.labels = nextLabels;
@@ -1497,8 +1521,12 @@ function customLabels(labels?: string[]): string[] {
   return uniqueStrings((labels ?? []).filter((label) => !isReservedLabel(label)));
 }
 
-function managedLabelsForAgent(id: string, labels: string[]): string[] {
-  return uniqueStrings(["agent", `id:${id}`, ...labels]);
+function managedLabelsForAgent(agent: ManagedAgent, labels: string[]): string[] {
+  return normalizedManagedLabels(agent.id, managedAgentType(agent), labels);
+}
+
+function normalizedManagedLabels(id: string, transport: "grpc" | "http", labels?: string[]): string[] {
+  return uniqueStrings(["agent", `agent:${transport}`, `id:${id}`, ...(labels ?? [])]);
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -1517,7 +1545,7 @@ function uniqueStrings(values: string[]): string[] {
 
 function isReservedLabel(label: string): boolean {
   const trimmed = label.trim();
-  return trimmed === "agent" || trimmed.startsWith("id:");
+  return trimmed === "agent" || trimmed === "agent:grpc" || trimmed === "agent:http" || trimmed.startsWith("id:");
 }
 
 function isAgentLabel(label: string): boolean {
@@ -1704,11 +1732,11 @@ function normalizeTokenTools(current: Partial<Record<Tool, TokenToolScope>>): Pa
   return Object.fromEntries(Object.entries(current).map(([tool, scope]) => [tool, normalizeTokenToolScope(tool as Tool, scope)])) as Partial<Record<Tool, TokenToolScope>>;
 }
 
-function normalizeTokenToolScope(_tool: Tool, scope?: TokenToolScope): TokenToolScope {
+function normalizeTokenToolScope(tool: Tool, scope?: TokenToolScope): TokenToolScope {
   const next = scope ?? {};
   return {
     ...next,
-    ip_versions: sameIPVersions(next.ip_versions, ipVersionOptions) ? undefined : next.ip_versions
+    ip_versions: tool === "dns" || sameIPVersions(next.ip_versions, ipVersionOptions) ? undefined : next.ip_versions
   };
 }
 
@@ -1718,7 +1746,7 @@ function sameIPVersions(left?: IPVersion[], right?: IPVersion[]): boolean {
 
 function normalizeIPVersions(values: string[]): IPVersion[] | undefined {
   const versions = values.map((value) => Number(value)).filter((value): value is IPVersion => value === 0 || value === 4 || value === 6);
-  return sameIPVersions(versions, ipVersionOptions) ? undefined : versions;
+  return versions.length === 0 || sameIPVersions(versions, ipVersionOptions) ? undefined : versions;
 }
 
 function resolveOnAgentValue(value: string | null): boolean | undefined {

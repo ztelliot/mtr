@@ -105,7 +105,7 @@ func main() {
 		policies,
 		time.Duration(globalScheduler.AgentOfflineAfterSec)*time.Second,
 		time.Duration(globalScheduler.PollIntervalSec)*time.Second,
-		globalScheduler.GRPCMaxInflightPerAgent,
+		globalScheduler.MaxInflightPerAgent,
 		log,
 	)
 	hub.ApplySettings(settings)
@@ -126,6 +126,10 @@ func main() {
 			},
 			IPv4Prefix: settings.RateLimit.CIDR.IPv4Prefix,
 			IPv6Prefix: settings.RateLimit.CIDR.IPv6Prefix,
+		},
+		GeoIP: abuse.Limit{
+			RequestsPerMinute: settings.RateLimit.GeoIP.RequestsPerMinute,
+			Burst:             settings.RateLimit.GeoIP.Burst,
 		},
 		Tools:       api.AbuseToolLimits(settings.RateLimit.Tools),
 		ExemptCIDRs: settings.RateLimit.ExemptCIDRs,
@@ -168,6 +172,10 @@ func main() {
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	go func() {
 		log.Info("http listening", "addr", cfg.HTTPAddr)

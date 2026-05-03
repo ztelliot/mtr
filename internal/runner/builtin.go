@@ -487,7 +487,7 @@ func runBuiltinHTTP(ctx context.Context, job model.Job, sink StreamSink) (*model
 		return result, err
 	}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			address, err := httpDialAddress(job, address)
 			if err != nil {
@@ -503,10 +503,16 @@ func runBuiltinHTTP(ctx context.Context, job model.Job, sink StreamSink) (*model
 			return dialer.DialContext(ctx, network, address)
 		},
 	}
+	defer transport.CloseIdleConnections()
 	if tlsServerName != "" {
 		transport.TLSClientConfig = &tls.Config{ServerName: tlsServerName}
 	}
-	client := &http.Client{Transport: transport}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	requestStart = time.Now()
 	resp, err := client.Do(req)
 	if err != nil {

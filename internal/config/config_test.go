@@ -138,7 +138,7 @@ func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
 	settings.LabelConfigs = map[string]LabelConfig{
 		" edge ": {
 			Runtime:   &Runtime{Count: 2},
-			Scheduler: &Scheduler{GRPCMaxInflightPerAgent: 1},
+			Scheduler: &Scheduler{MaxInflightPerAgent: 1},
 			ToolPolicies: map[string]Policy{
 				"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp"}},
 			},
@@ -158,7 +158,7 @@ func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
 	if cfg.Runtime == nil || cfg.Runtime.Count != 2 || cfg.Runtime.MaxHops == 0 {
 		t.Fatalf("label runtime not defaulted: %#v", cfg.Runtime)
 	}
-	if cfg.Scheduler == nil || cfg.Scheduler.GRPCMaxInflightPerAgent != 1 || cfg.Scheduler.PollIntervalSec == 0 {
+	if cfg.Scheduler == nil || cfg.Scheduler.MaxInflightPerAgent != 1 || cfg.Scheduler.PollIntervalSec == 0 {
 		t.Fatalf("label scheduler not defaulted: %#v", cfg.Scheduler)
 	}
 	if cfg.ToolPolicies["ping"].AllowedArgs["protocol"] != "tcp" {

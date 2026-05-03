@@ -463,8 +463,22 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	if _, ok := perms.Tools[model.ToolTraceroute]; ok || perms.ScheduleAccess != ScheduleAccessNone {
 		t.Fatalf("restricted token permissions = %#v", perms)
 	}
-	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "HEAD" || perms.Tools[model.ToolPort].AllowedArgs["port"] != "1-1000" || len(perms.Agents) != 1 || perms.Agents[0] != "edge-1" {
+	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "HEAD" || perms.Tools[model.ToolPort].AllowedArgs["port"] != "1-1000" {
 		t.Fatalf("restricted token permissions = %#v", perms)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer token-1")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agents status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agentViews []model.AgentView
+	if err := json.Unmarshal(rec.Body.Bytes(), &agentViews); err != nil {
+		t.Fatal(err)
+	}
+	if len(agentViews) != 1 || agentViews[0].ID != "edge-1" || agentViews[0].Tools[model.ToolHTTP].AllowedArgs["method"] != "HEAD" {
+		t.Fatalf("restricted token agents = %#v", agentViews)
 	}
 
 	body := `{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true}`
@@ -1626,6 +1640,48 @@ func TestGeoIPProxyRejectsInvalidIP(t *testing.T) {
 	}
 }
 
+func TestGeoIPProxyUsesDedicatedGlobalRateLimit(t *testing.T) {
+	oldGeoIPHTTPClient := geoIPHTTPClient
+	geoIPHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"asn":{"number":13335},"country":{"name":"Australia"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	defer func() { geoIPHTTPClient = oldGeoIPHTTPClient }()
+
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1, Burst: 1},
+		IP:     abuse.Limit{RequestsPerMinute: 1, Burst: 1},
+		CIDR:   abuse.CIDRLimit{Limit: abuse.Limit{RequestsPerMinute: 1, Burst: 1}, IPv4Prefix: 24, IPv6Prefix: 64},
+		GeoIP:  abuse.Limit{RequestsPerMinute: 10, Burst: 2},
+	}), nil, "http://geoip.test", slog.Default())
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/geoip/1.0.0.1", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("geoip request %d status = %d, body = %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/geoip/1.0.0.1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third geoip request status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("regular request should still have its own global bucket, status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestManagedRuntimeSettingsApplyToNewJobs(t *testing.T) {
 	st := store.NewMemory()
 	policies := policy.DefaultPolicies()
@@ -1772,6 +1828,194 @@ func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
 	}
 }
 
+func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LabelConfigs = map[string]config.LabelConfig{
+		"head-only": {
+			ToolPolicies: map[string]config.Policy{
+				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD"}},
+			},
+		},
+	}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, agent := range []model.Agent{
+		{ID: "edge-get", Capabilities: []model.Tool{model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-head", Capabilities: []model.Tool{model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-empty", Capabilities: []model.Tool{model.ToolDNS}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	} {
+		if err := st.UpsertAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-head", Labels: []string{"head-only"}}); err != nil {
+		t.Fatal(err)
+	}
+	policies := policy.FromConfig(map[string]config.Policy{
+		"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET,HEAD"}},
+	}, config.DefaultRuntime())
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{
+		Token: "token",
+		Scope: TokenScope{
+			Agents: []string{"*"},
+			Tools:  map[model.Tool]ToolScope{model.ToolHTTP: {}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("permissions status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var perms PermissionsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &perms); err != nil {
+		t.Fatal(err)
+	}
+	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "GET,HEAD" {
+		t.Fatalf("global http permissions = %#v", perms.Tools[model.ToolHTTP])
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agents status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agents []model.AgentView
+	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 || strings.Contains(rec.Body.String(), "capabilities") {
+		t.Fatalf("agents should include only nodes with effective tools and hide capabilities: %s", rec.Body.String())
+	}
+	byID := map[string]model.AgentView{}
+	for _, agent := range agents {
+		byID[agent.ID] = agent
+	}
+	if byID["edge-get"].Tools[model.ToolHTTP].AllowedArgs["method"] != "GET,HEAD" {
+		t.Fatalf("edge-get permissions = %#v", byID["edge-get"])
+	}
+	if byID["edge-head"].Tools[model.ToolHTTP].AllowedArgs["method"] != "HEAD" {
+		t.Fatalf("edge-head permissions = %#v", byID["edge-head"])
+	}
+}
+
+func TestScheduleTargetsRespectPerAgentLabelPolicies(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LabelConfigs = map[string]config.LabelConfig{
+		"no-ping": {
+			ToolPolicies: map[string]config.Policy{
+				"ping": {Enabled: false},
+			},
+		},
+	}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	upsertTestAgent(t, ctx, st, "edge-denied", []string{"blue", "no-ping"})
+	policies := policy.DefaultPolicies()
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: settings.APITokens[0].Secret, Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite, ScheduleAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"blue","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("schedule target with label-disabled tool status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LabelConfigs = map[string]config.LabelConfig{
+		"head-only": {
+			ToolPolicies: map[string]config.Policy{
+				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD"}},
+			},
+		},
+		"get-ok": {
+			ToolPolicies: map[string]config.Policy{
+				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET"}},
+			},
+		},
+	}
+	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, agent := range []struct {
+		id     string
+		labels []string
+	}{
+		{id: "edge-head", labels: []string{"head-only"}},
+		{id: "edge-get", labels: []string{"get-ok"}},
+	} {
+		if err := st.UpsertAgent(ctx, model.Agent{
+			ID:           agent.id,
+			Capabilities: []model.Tool{model.ToolHTTP},
+			Protocols:    model.ProtocolAll,
+			Status:       model.AgentOnline,
+			LastSeenAt:   now,
+			CreatedAt:    now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		upsertTestAgentConfigLabels(t, ctx, st, agent.id, agent.labels)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: settings.APITokens[0].Secret, Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite, ScheduleAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"http","target":"https://1.1.1.1","args":{"method":"GET"},"resolve_on_agent":true,"schedule_targets":[{"label":"head-only","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("schedule target with label-invalid args status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"http","target":"https://1.1.1.1","args":{"method":"GET"},"resolve_on_agent":true,"schedule_targets":[{"label":"agent","interval_seconds":60}]}`))
+	req.Header.Set("Authorization", "Bearer "+settings.APITokens[0].Secret)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("schedule target with mixed policy agents status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var sched model.ScheduledJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
+		t.Fatal(err)
+	}
+	if len(sched.ScheduleTargets) != 1 || !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-get"}) {
+		t.Fatalf("schedule should freeze only per-agent-policy-valid agents: %#v", sched.ScheduleTargets)
+	}
+}
+
 func TestManagedRateLimitEndpointUsesLowercaseJSONAndDoesNotPersistInvalidConfig(t *testing.T) {
 	st := store.NewMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1807,6 +2051,9 @@ func TestManagedRateLimitEndpointUsesLowercaseJSONAndDoesNotPersistInvalidConfig
 		if _, ok := rateLimitRaw[key]; !ok {
 			t.Fatalf("rate-limit response missing lowercase field %q: %#v", key, raw)
 		}
+	}
+	if geoIPRaw, ok := rateLimitRaw["geoip"].(map[string]any); !ok || geoIPRaw["requests_per_minute"] != float64(120) || geoIPRaw["burst"] != float64(60) {
+		t.Fatalf("rate-limit response missing geoip defaults: %#v", rateLimitRaw["geoip"])
 	}
 
 	next := before
@@ -2069,6 +2316,23 @@ func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
 	}
 }
 
+func TestManagedTokenPayloadsAreSizeLimited(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := bytes.NewReader([]byte(`{"name":"` + strings.Repeat("x", int(defaultJSONBodyLimit)) + `"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/tokens", body)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("large api token body status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestManagedLabelsEndpointKeepsAgentRuntimeAndRemovesSettingsRoute(t *testing.T) {
 	st := store.NewMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -2132,8 +2396,8 @@ func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testi
 	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
 
 	body, _ := json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{
-		{ID: "edge-grpc", Labels: []string{"new", config.AgentAllLabel, "id:edge-grpc"}},
-		{ID: "edge-http", Labels: []string{"new-http"}},
+		{ID: "edge-grpc", Labels: []string{"new", config.AgentAllLabel, config.AgentGRPCLabel, "id:edge-grpc"}},
+		{ID: "edge-http", Labels: []string{"new-http", config.AgentHTTPLabel, "id:edge-http"}},
 	}})
 	req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -2295,6 +2559,66 @@ func TestCreateHTTPAgentRejectsDuplicateID(t *testing.T) {
 	}
 }
 
+func TestDeleteManagedAgentRemovesConfigOnlyGRPCAgent(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-config", Labels: []string{"blue"}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/manage/agents", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list config-only grpc agent status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var agents []ManagedAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].ID != "edge-config" || agents[0].Status != model.AgentOffline || !reflect.DeepEqual(agents[0].Labels, []string{"agent", "agent:grpc", "id:edge-config", "blue"}) {
+		t.Fatalf("config-only grpc agent listing = %#v", agents)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v1/manage/agents/edge-config", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete config-only grpc agent status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	configs, err := st.ListAgentConfigs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range configs {
+		if cfg.ID == "edge-config" {
+			t.Fatalf("config-only agent was not deleted: %#v", configs)
+		}
+	}
+}
+
+func TestUpdateMissingManagedAgentWithoutTransportReturnsNotFound(t *testing.T) {
+	st := store.NewMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/missing", strings.NewReader(`{"labels":["blue"]}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing agent update status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestManageWriteAuditsAllowedAndDeniedActions(t *testing.T) {
 	st := store.NewMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -2450,14 +2774,14 @@ func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
 	if len(grpcAgents) != 1 || grpcAgents[0].ID != "edge-grpc" || grpcAgents[0].Transport != "grpc" {
 		t.Fatalf("grpc agents = %#v", grpcAgents)
 	}
-	if !stringListContains(grpcAgents[0].Labels, "configured-grpc") || stringListContains(grpcAgents[0].Labels, "grpc-live") {
+	if !reflect.DeepEqual(grpcAgents[0].Labels, []string{"agent", "agent:grpc", "id:edge-grpc", "configured-grpc"}) {
 		t.Fatalf("grpc managed labels should come from server config: %#v", grpcAgents[0].Labels)
 	}
 	httpAgents := byType["http"]
 	if len(httpAgents) != 1 || httpAgents[0].ID != "edge-http" || httpAgents[0].Transport != "http" {
 		t.Fatalf("http agents = %#v", httpAgents)
 	}
-	if !reflect.DeepEqual(httpAgents[0].Labels, []string{"agent", "id:edge-http", "configured"}) {
+	if !reflect.DeepEqual(httpAgents[0].Labels, []string{"agent", "agent:http", "id:edge-http", "configured"}) {
 		t.Fatalf("http labels = %#v", httpAgents[0].Labels)
 	}
 	if httpAgents[0].HTTP == nil || !reflect.DeepEqual(httpAgents[0].HTTP.Labels, []string{"configured"}) {

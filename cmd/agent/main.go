@@ -206,6 +206,10 @@ func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, 
 		Handler:           handler,
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -289,7 +293,7 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 		}
 
 		var spec grpcwire.JobSpec
-		if err := json.NewDecoder(req.Body).Decode(&spec); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<20)).Decode(&spec); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}

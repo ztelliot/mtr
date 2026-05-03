@@ -2,6 +2,7 @@ import type { GeoIPInfo } from "./types";
 
 const ipv4Pattern =
   /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const defaultGeoIPConcurrency = 3;
 
 export function normalizeIPAddress(value: string | null | undefined): string | undefined {
   const candidate = value?.trim();
@@ -54,6 +55,36 @@ export function formatLocation(info: GeoIPInfo | null | undefined): string | und
     .map((part) => part?.trim())
     .filter(Boolean)
     .join(", ") || undefined;
+}
+
+export async function fetchGeoIPQueued<T>(
+  ips: string[],
+  fetchOne: (ip: string) => Promise<T>,
+  concurrency = defaultGeoIPConcurrency
+): Promise<Array<readonly [string, T | null]>> {
+  const queue = uniqueIPAddresses(ips);
+  const limit = Math.max(1, Math.floor(concurrency));
+  const out: Array<readonly [string, T | null]> = [];
+  let index = 0;
+
+  async function worker() {
+    for (;;) {
+      const current = index;
+      index += 1;
+      const ip = queue[current];
+      if (!ip) {
+        return;
+      }
+      try {
+        out[current] = [ip, await fetchOne(ip)] as const;
+      } catch {
+        out[current] = [ip, null] as const;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, () => worker()));
+  return out.filter((entry): entry is readonly [string, T | null] => Boolean(entry));
 }
 
 function isIPv4(value: string): boolean {

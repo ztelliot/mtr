@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatASN, formatLocation, ipFromDNSRecord, normalizeIPAddress, splitDNSRecord, uniqueIPAddresses } from "./geoip";
+import { fetchGeoIPQueued, formatASN, formatLocation, ipFromDNSRecord, normalizeIPAddress, splitDNSRecord, uniqueIPAddresses } from "./geoip";
 
 describe("geoip helpers", () => {
   it("recognizes IPv4 and IPv6 values", () => {
@@ -39,5 +39,28 @@ describe("geoip helpers", () => {
     };
     expect(formatASN(info)).toBe("AS13335 Cloudflare, Inc.");
     expect(formatLocation(info)).toBe("Brisbane, Queensland, Australia");
+  });
+
+  it("queues GeoIP lookups with a concurrency limit", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const results = await fetchGeoIPQueued(
+      ["1.0.0.1", "1.0.0.1", "8.8.8.8", "9.9.9.9"],
+      async (ip) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return ip;
+      },
+      2
+    );
+
+    expect(maxActive).toBeLessThanOrEqual(2);
+    expect(results).toEqual([
+      ["1.0.0.1", "1.0.0.1"],
+      ["8.8.8.8", "8.8.8.8"],
+      ["9.9.9.9", "9.9.9.9"]
+    ]);
   });
 });

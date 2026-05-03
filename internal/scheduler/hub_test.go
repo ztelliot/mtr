@@ -703,30 +703,21 @@ func TestCompleteParentIfDoneSucceedsWhenSomeChildrenFailed(t *testing.T) {
 	}
 }
 
-func TestHubInflightLimitsSeparateTransports(t *testing.T) {
+func TestHubInflightLimit(t *testing.T) {
 	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 9, slog.Default())
 
-	if got := hub.grpcInflightLimit(); got != 9 {
-		t.Fatalf("default grpc inflight = %d, want 9", got)
-	}
-	if got := hub.httpAgentInflightLimit(); got != 1 {
-		t.Fatalf("default httpAgents inflight = %d, want 1", got)
+	if got := hub.inflightLimit(); got != 9 {
+		t.Fatalf("default inflight = %d, want 9", got)
 	}
 
-	hub.SetInflightLimits(6, 2)
-	if got := hub.grpcInflightLimit(); got != 6 {
-		t.Fatalf("configured grpc inflight = %d, want 6", got)
-	}
-	if got := hub.httpAgentInflightLimit(); got != 2 {
-		t.Fatalf("configured httpAgents inflight = %d, want 2", got)
+	hub.SetInflightLimit(6)
+	if got := hub.inflightLimit(); got != 6 {
+		t.Fatalf("configured inflight = %d, want 6", got)
 	}
 
-	hub.SetInflightLimits(0, 0)
-	if got := hub.grpcInflightLimit(); got != 4 {
-		t.Fatalf("fallback grpc inflight = %d, want 4", got)
-	}
-	if got := hub.httpAgentInflightLimit(); got != 1 {
-		t.Fatalf("fallback httpAgents inflight = %d, want 1", got)
+	hub.SetInflightLimit(0)
+	if got := hub.inflightLimit(); got != 4 {
+		t.Fatalf("fallback inflight = %d, want 4", got)
 	}
 }
 

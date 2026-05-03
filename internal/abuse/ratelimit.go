@@ -20,6 +20,7 @@ type RateLimitConfig struct {
 	Global      Limit
 	IP          Limit
 	CIDR        CIDRLimit
+	GeoIP       Limit
 	Tools       map[string]ToolLimit
 	ExemptCIDRs []string
 }
@@ -41,6 +42,7 @@ type Limiter struct {
 	global      Limit
 	ip          Limit
 	cidrLimit   Limit
+	geoIP       Limit
 	tools       map[string]ToolLimit
 	cidr        CIDRLimit
 	exemptCIDRs []netip.Prefix
@@ -67,6 +69,7 @@ func NewConfiguredLimiterWithError(cfg RateLimitConfig) (*Limiter, error) {
 	cfg.IP = normalizeLimit(cfg.IP, 60, 20)
 	cfg.CIDR = normalizeCIDR(cfg.CIDR)
 	cfg.CIDR.Limit = normalizeLimit(cfg.CIDR.Limit, 300, 100)
+	cfg.GeoIP = normalizeLimit(cfg.GeoIP, 120, 60)
 	exemptCIDRs, err := parseExemptCIDRs(cfg.ExemptCIDRs)
 	if err != nil {
 		return nil, err
@@ -83,6 +86,7 @@ func NewConfiguredLimiterWithError(cfg RateLimitConfig) (*Limiter, error) {
 		global:      cfg.Global,
 		ip:          cfg.IP,
 		cidrLimit:   cfg.CIDR.Limit,
+		geoIP:       cfg.GeoIP,
 		tools:       tools,
 		cidr:        cfg.CIDR,
 		exemptCIDRs: exemptCIDRs,
@@ -128,6 +132,13 @@ func (l *Limiter) AllowTool(tool string, clientIP ...string) bool {
 		return false
 	}
 	return l.allow("tool:ip:"+tool+":"+l.ipKey(clientIP[0]), limit.IP)
+}
+
+func (l *Limiter) AllowGeoIP() bool {
+	if l == nil {
+		return true
+	}
+	return l.allow("geoip:global", l.geoIP)
 }
 
 func (l *Limiter) allow(key string, limit Limit) bool {

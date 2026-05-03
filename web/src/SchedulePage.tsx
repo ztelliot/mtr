@@ -25,7 +25,7 @@ import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
 import { formatBytes, formatDateTime, formatHistoryDateTime, formatInterval, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
-import { ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
+import { fetchGeoIPQueued, ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
 import { buildCreateJobRequest, defaultFormState, navTools, normalizeTargetForTool, parseHostPort } from "./jobForm";
 import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
@@ -34,6 +34,7 @@ import { targetResolvedIP } from "./streamEvents";
 import type { Agent, CreateScheduledJobRequest, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, ScheduledJob, ScheduleTarget, ScheduleTargetRequest, Tool } from "./types";
 
 type ScheduleLabelOption = { value: string; label: string };
+type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 type ScheduleTimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 type ScheduleMetricKind =
@@ -49,6 +50,13 @@ type ScheduleMetricKind =
   | "httpSpeed"
   | "httpBytes";
 type ScheduleStatColumn = "last" | "min" | "max" | "mean" | "stdev";
+
+export const __schedulePageTest = {
+  agentsForScheduleLabel,
+  agentsForScheduleLabels,
+  scheduleIPVersionOptions,
+  schedulePermissionFormError
+};
 
 export function SchedulePage({
   client,
@@ -92,6 +100,7 @@ export function SchedulePage({
   const scheduleWriteAllowed = canWriteSchedules(permissions);
   const routeAgents = useMemo(() => capableAgents(agents, form.tool), [agents, form.tool]);
   const scheduleLabelOptions = useMemo(() => scheduleLabelsForAgents(routeAgents, t), [routeAgents, t]);
+  const scheduleIPOptions = useMemo(() => scheduleIPVersionOptions(permissions, form, routeAgents, scheduleLabels, t), [form, permissions, routeAgents, scheduleLabels, t]);
   const selectedSchedule = schedules.find((schedule) => schedule.id === selectedScheduleId);
   const editingSchedule = schedules.find((schedule) => schedule.id === editingScheduleId);
   const isEditingSchedule = Boolean(editingSchedule);
@@ -137,8 +146,9 @@ export function SchedulePage({
   );
   const intervalError = scheduleTargetDrafts.every((target) => intervalIsValid(target.interval_seconds)) ? null : t("errors.intervalRequired");
   const scheduleTargetError = scheduleTargetFormError(scheduleLabels, scheduleLabelOptions, t);
-  const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...form, agentId: "schedule-target" } : form;
-  const formError = localizedFormError(validationForm, permissions, t) || permissionFormError(form, permissions, agents, t);
+  const schedulePermissionForm = { ...form, agentId: "" };
+  const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...schedulePermissionForm, agentId: schedulePermissionForm.agentId || "schedule-target" } : schedulePermissionForm;
+  const formError = localizedFormError(validationForm, permissions, t) || schedulePermissionFormError(form, permissions, routeAgents, scheduleLabels, t);
   const showFormError = attemptedSubmit && (formError || scheduleTargetError || intervalError);
 
   useEffect(() => {
@@ -158,6 +168,13 @@ export function SchedulePage({
       return validValues.has("agent") ? ["agent"] : [];
     });
   }, [scheduleLabelOptions]);
+
+  useEffect(() => {
+    if (form.tool === "dns" || scheduleIPOptions.length === 0 || scheduleIPOptions.some((option) => option.value === String(form.ipVersion))) {
+      return;
+    }
+    updateForm("ipVersion", Number(scheduleIPOptions[0].value) as IPVersion);
+  }, [form.ipVersion, form.tool, scheduleIPOptions]);
 
   useEffect(() => {
     if (!client || !canReadSchedules(permissions)) {
@@ -218,17 +235,7 @@ export function SchedulePage({
       return;
     }
     missing.forEach((ip) => pendingGeoIPRef.current.add(ip));
-    void Promise.all(
-      missing.map(async (ip) => {
-        try {
-          return [ip, await client.getGeoIP(ip)] as const;
-        } catch {
-          return [ip, null] as const;
-        } finally {
-          pendingGeoIPRef.current.delete(ip);
-        }
-      })
-    ).then((entries) => {
+    void fetchGeoIPQueued(missing, (ip) => client.getGeoIP(ip)).then((entries) => {
       setGeoIPByIP((current) => {
         const next = { ...current };
         for (const [ip, info] of entries) {
@@ -236,6 +243,8 @@ export function SchedulePage({
         }
         return next;
       });
+    }).finally(() => {
+      missing.forEach((ip) => pendingGeoIPRef.current.delete(ip));
     });
   }, [client, geoIPByIP, scheduleGeoIPTargets]);
 
@@ -529,18 +538,18 @@ export function SchedulePage({
                 value={intervalSeconds}
                 onChange={setIntervalSeconds}
               />
-              {form.tool !== "dns" && ipVersionOptions(permissions, form.tool).length > 1 && (
+              {form.tool !== "dns" && scheduleIPOptions.length > 1 && (
                 <Select
                   className="schedule-ip-field"
                   checkIconPosition="left"
                   disabled={submitting}
                   label={t("form.ipVersion")}
-                  data={ipVersionOptions(permissions, form.tool)}
+                  data={scheduleIPOptions}
                   value={String(form.ipVersion)}
                   onChange={(value) => updateForm("ipVersion", Number(value ?? 0) as IPVersion)}
                 />
               )}
-              <DynamicFields form={form} permissions={permissions} updateForm={updateForm} disabled={submitting} t={t} />
+              <DynamicFields form={schedulePermissionForm} permissions={permissions} agents={routeAgents} updateForm={updateForm} disabled={submitting} t={t} />
               <MultiSelect
                 className="schedule-label-field"
                 checkIconPosition="left"
@@ -562,7 +571,7 @@ export function SchedulePage({
                     <Input.Wrapper className="schedule-remote-dns-field schedule-switch-field" label={t("form.remoteDns")}>
                       <Switch
                         aria-label={t("form.remoteDns")}
-                        checked={resolveOnAgentValue(permissions, form)}
+                        checked={resolveOnAgentValue(permissions, schedulePermissionForm)}
                         className="remote-dns-switch"
                         disabled={submitting || permissions?.tools?.[form.tool]?.resolve_on_agent !== undefined}
                         onChange={(event) => updateForm("resolveOnAgent", event.currentTarget.checked)}
@@ -872,6 +881,85 @@ function scheduleLabelsForAgents(agents: Agent[], t: (key: string, options?: Rec
     options.push({ group: t("schedule.nodes"), items: nodeItems });
   }
   return options;
+}
+
+function schedulePermissionFormError(
+  form: JobFormState,
+  permissions: Permissions | null,
+  agents: Agent[],
+  labels: string[],
+  t: Translate
+): string | null {
+  const tokenError = permissionFormError({ ...form, agentId: "" }, permissions, agents, t);
+  if (tokenError) {
+    return tokenError;
+  }
+  for (const label of labels) {
+    const candidates = agentsForScheduleLabel(agents, label);
+    if (candidates.length === 0) {
+      return t("errors.noAvailableNodes");
+    }
+    const candidateErrors = candidates.map((agent) => permissionFormError({ ...form, agentId: agent.id }, permissions, agents, t));
+    if (candidateErrors.every(Boolean)) {
+      return candidateErrors.find(Boolean) ?? t("errors.noAvailableNodes");
+    }
+  }
+  return null;
+}
+
+function scheduleIPVersionOptions(
+  permissions: Permissions | null,
+  form: JobFormState,
+  agents: Agent[],
+  labels: string[],
+  t: Translate
+): Array<{ value: string; label: string }> {
+  const options = ipVersionOptions(permissions, form.tool);
+  if (form.tool === "dns" || labels.length === 0 || options.length === 0) {
+    return options;
+  }
+  return options.filter((option) =>
+    schedulePermissionFormError(
+      { ...form, ipVersion: Number(option.value) as IPVersion },
+      permissions,
+      agents,
+      labels,
+      t
+    ) === null
+  );
+}
+
+function agentsForScheduleLabels(agents: Agent[], labels: string[]): Agent[] {
+  const seen = new Set<string>();
+  const out: Agent[] = [];
+  for (const label of labels) {
+    for (const agent of agentsForScheduleLabel(agents, label)) {
+      if (!seen.has(agent.id)) {
+        seen.add(agent.id);
+        out.push(agent);
+      }
+    }
+  }
+  return out;
+}
+
+function agentsForScheduleLabel(agents: Agent[], label: string): Agent[] {
+  const trimmed = label.trim();
+  if (!trimmed) {
+    return [];
+  }
+  if (trimmed === "agent") {
+    return agents;
+  }
+  if (trimmed.startsWith("id:")) {
+    const agentID = trimmed.slice(3);
+    return agents.filter((agent) => agent.id === agentID || agentHasScheduleLabel(agent, trimmed));
+  }
+  return agents.filter((agent) => agentHasScheduleLabel(agent, trimmed));
+}
+
+function agentHasScheduleLabel(agent: Agent, label: string): boolean {
+  return (agent.labels ?? []).some((item) => item.trim() === label);
 }
 
 function flatScheduleLabelOptions(options: ScheduleLabelOptionData[]): ScheduleLabelOption[] {

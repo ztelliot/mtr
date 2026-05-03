@@ -31,13 +31,13 @@ import { brandUrlTargetsCurrentApp, loadConfig, normalizeBaseUrl, saveStoredApiB
 import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
-import { normalizeIPAddress } from "./geoip";
+import { fetchGeoIPQueued, normalizeIPAddress } from "./geoip";
 import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailures";
 import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
 import { ManagePage } from "./ManagePage";
-import { canReadManage, canReadSchedules, dnsTypeOptions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed } from "./permissions";
+import { canReadManage, canReadSchedules, dnsTypeOptions, effectivePermissions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed, toolAllowedForAgent } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTables";
 import { SchedulePage } from "./SchedulePage";
@@ -95,8 +95,21 @@ export function App() {
     [allowedNavTools, form.tool, page]
   );
   const activeNavValue = page === "schedules" || page === "manage" ? page : form.tool;
-  const availableFanoutAgents = useMemo(() => capableAgents(visibleAgents, form.tool), [visibleAgents, form.tool]);
-  const routeAgents = useMemo(() => capableAgents(visibleAgents, form.tool), [visibleAgents, form.tool]);
+  const selectedFormAgent = visibleAgents.find((agent) => agent.id === form.agentId) ?? null;
+  const agentSupportsCurrentForm = (agent: Agent) => {
+    if (!toolAllowedForAgent(permissions, form.tool, agent)) {
+      return false;
+    }
+    return permissionFormError({ ...form, agentId: agent.id }, permissions, visibleAgents, t) === null;
+  };
+  const availableFanoutAgents = useMemo(
+    () => capableAgents(visibleAgents, form.tool).filter(agentSupportsCurrentForm),
+    [permissions, visibleAgents, safeAgents, form, t]
+  );
+  const routeAgents = useMemo(
+    () => capableAgents(visibleAgents, form.tool).filter(agentSupportsCurrentForm),
+    [permissions, visibleAgents, safeAgents, form, t]
+  );
   const allEvents = useMemo(() => Object.values(eventsByJobId).flat(), [eventsByJobId]);
   const currentJob = activeJobs[0] ?? null;
   const resultTool = currentJob?.tool ?? form.tool;
@@ -123,7 +136,7 @@ export function App() {
     () => collectGeoIPTargets(isFanout, nodeRows, mtrRows, mtrTargetIP),
     [isFanout, mtrRows, mtrTargetIP, nodeRows]
   );
-  const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, safeAgents, t);
+  const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, visibleAgents, t);
   const onlineAgents = visibleAgents.filter((agent) => agent.status === "online").length;
   const noFanoutAgents = submissionIsFanout && availableFanoutAgents.length === 0;
   const canSubmitCurrentTool = toolAllowed(permissions, form.tool);
@@ -194,11 +207,12 @@ export function App() {
   }, [form, page, permissions]);
 
   useEffect(() => {
-    const tool = permissions?.tools?.[form.tool];
+    const effective = effectivePermissions(permissions, selectedFormAgent);
+    const tool = effective?.tools?.[form.tool];
     if (!tool) {
       return;
     }
-    const ips = ipVersionOptions(permissions, form.tool);
+    const ips = ipVersionOptions(effective, form.tool);
     if (form.tool !== "dns" && ips.length > 0 && !ips.some((option) => option.value === String(form.ipVersion))) {
       updateForm("ipVersion", Number(ips[0].value) as IPVersion);
       return;
@@ -207,21 +221,21 @@ export function App() {
       updateForm("resolveOnAgent", tool.resolve_on_agent);
       return;
     }
-    const protocols = protocolOptions(permissions, form.tool);
+    const protocols = protocolOptions(effective, form.tool);
     if ((form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") && protocols.length > 0 && !protocols.some((option) => option.value === form.protocol)) {
       updateForm("protocol", protocols[0].value);
       return;
     }
-    const dnsTypes = dnsTypeOptions(permissions);
+    const dnsTypes = dnsTypeOptions(effective);
     if (form.tool === "dns" && dnsTypes.length > 0 && !dnsTypes.includes(form.dnsType)) {
       updateForm("dnsType", dnsTypes[0] as JobFormState["dnsType"]);
       return;
     }
-    const methods = httpMethodOptions(permissions);
+    const methods = httpMethodOptions(effective);
     if (form.tool === "http" && methods.length > 0 && !methods.some((option) => option.value === form.method)) {
       updateForm("method", methods[0].value);
     }
-  }, [form.dnsType, form.ipVersion, form.method, form.protocol, form.resolveOnAgent, form.tool, permissions]);
+  }, [form.agentId, form.dnsType, form.ipVersion, form.method, form.protocol, form.resolveOnAgent, form.tool, permissions, selectedFormAgent]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -277,17 +291,7 @@ export function App() {
       return;
     }
     missing.forEach((ip) => pendingGeoIPRef.current.add(ip));
-    void Promise.all(
-      missing.map(async (ip) => {
-        try {
-          return [ip, await client.getGeoIP(ip)] as const;
-        } catch {
-          return [ip, null] as const;
-        } finally {
-          pendingGeoIPRef.current.delete(ip);
-        }
-      })
-    ).then((entries) => {
+    void fetchGeoIPQueued(missing, (ip) => client.getGeoIP(ip)).then((entries) => {
       setGeoIPByIP((current) => {
         const next = { ...current };
         for (const [ip, info] of entries) {
@@ -295,6 +299,8 @@ export function App() {
         }
         return next;
       });
+    }).finally(() => {
+      missing.forEach((ip) => pendingGeoIPRef.current.delete(ip));
     });
   }, [client, geoIPByIP, geoIPTargets]);
 
@@ -347,7 +353,7 @@ export function App() {
       setPermissionsLoadFailed(false);
       setError(null);
     } catch {
-      setPermissions({ tools: {}, agents: [], schedule_access: "none" });
+        setPermissions({ tools: {}, schedule_access: "none" });
       setAgents([]);
       setPermissionsLoadFailed(true);
       setError(t("errors.permissionsUnavailable"));
@@ -424,7 +430,7 @@ export function App() {
     setActiveJobs([]);
     eventsByJobIdRef.current = {};
     setEventsByJobId({});
-    const requestForm = formWithPermissionDefaults(form, permissions);
+    const requestForm = formWithPermissionDefaults(form, permissions, visibleAgents);
 
     try {
       if (submissionIsFanout) {
@@ -840,12 +846,12 @@ export function App() {
                         checkIconPosition="left"
                         disabled={controlsLocked}
                         label={t("form.ipVersion")}
-                        data={ipVersionOptions(permissions, form.tool)}
+                        data={ipVersionOptions(permissions, form.tool, selectedFormAgent)}
                         value={String(form.ipVersion)}
                         onChange={(value) => updateForm("ipVersion", Number(value ?? 0) as IPVersion)}
                       />
                     )}
-                    <DynamicFields form={form} permissions={permissions} updateForm={updateForm} disabled={controlsLocked} t={t} />
+                    <DynamicFields form={form} permissions={permissions} agents={visibleAgents} updateForm={updateForm} disabled={controlsLocked} t={t} />
                     {requiresAgentForTool(permissions, form.tool) && (
                       <Select
                         className="agent-field"
@@ -866,6 +872,7 @@ export function App() {
                         className="remote-dns-field"
                         disabled={controlsLocked}
                         form={form}
+                        agents={visibleAgents}
                         permissions={permissions}
                         t={t}
                         updateForm={updateForm}

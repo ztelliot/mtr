@@ -76,7 +76,7 @@ Server 也可以主动调用通过 `/v1/manage/agents` 创建的托管 HTTP Agen
 `mode: http` 或 `mode: grpc,http` 时，会暴露 `/invoke` 端点；HTTP 模式必须配置
 `http_token`。可以设置 Agent 的 `http_path_prefix`，把这些 HTTP 端点挂到 `/api`
 或 `/v1` 之类的前缀下；此时托管 Agent 的 `base_url` 也要包含同样的前缀。Server
-在启动时会探测一次 `/healthz`，用于获取版本、地域、服务商、能力、协议和脱敏设置，
+在启动时会探测一次 `/healthz`，用于获取版本、地域、服务商、能力和协议，
 之后只会在连接失败后的恢复过程中再次使用 `/healthz`。HTTP Agent 的监听 TLS 由
 Agent 配置里的 `http_tls` 控制；每个托管 HTTP Agent 记录也可配置调用该 Agent 的
 TLS 参数。客户端 TLS 校验只检查配置的 CA 链，因此集群内访问地址不需要和证书 SAN 一致。
@@ -245,7 +245,7 @@ docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
 Kubernetes 示例包含 `deploy/web.yaml`，会部署
 `ghcr.io/ztelliot/mtr-web:latest`，创建 `mtr-web` Service，并通过
 `mtr-web-config` 覆盖容器内的 `/usr/share/caddy/config.json`。本地集群可用
-下面的方式快速验证：
+下面的方式快速验证：先按 Kubernetes 部署小节创建 Secrets，再应用基础资源：
 
 ```sh
 kubectl apply -k deploy
@@ -254,8 +254,10 @@ kubectl -n mtr port-forward svc/mtr-web 8081:80
 ```
 
 如果通过 `http://localhost:8081` 访问工作台，请把 `mtr-web-config` 中的
-`apiBaseUrl` 设置为 `http://localhost:8080`；或者在两个服务前放置 Ingress
-或网关，将 `/v1` 路由到 `mtr-server`，将 `/` 路由到 `mtr-web`。
+`apiBaseUrl` 设置为 `http://localhost:8080`，并把 `apiToken` 设置为有效的
+API token。公开部署时应使用权限受限的前端 token，而不是初始 admin token。
+也可以在两个服务前放置 Ingress 或网关，将 `/v1` 路由到 `mtr-server`，将
+`/` 路由到 `mtr-web`。
 
 `deploy/agent.yaml` DaemonSet 可以从 Kubernetes Node annotations 生成每个节点的
 Agent 元数据，但这个逻辑只在部署层完成，Agent 二进制本身并不知道 Kubernetes。
@@ -282,8 +284,8 @@ kubectl annotate node <node> \
 `3` 表示同时支持两者。`capabilities` 是逗号分隔的工具列表。缺少 annotation 时，
 initContainer 会把 fallback 值写入生成后的配置文件。
 
-工作台可以创建 `ping`、`traceroute`、`mtr`、`http` 和 `dns` 任务，列出 Agent，
-并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。临时 `traceroute` 和
+工作台可以创建 `ping`、`traceroute`、`mtr`、`http`、`dns` 和 `port` 任务，
+列出 Agent，并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。临时 `traceroute` 和
 `mtr` 任务需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`；计划任务则使用
 `schedule_targets` 标签选择节点，而不是单个 `agent_id`。
 
@@ -430,7 +432,6 @@ docker run -d --name mtr-agent \
   --pids-limit 256 \
   --cpus 1 \
   --memory 512m \
-  -e MTR_ID=edge-docker-1 \
   -v /etc/mtr/agent.yaml:/etc/mtr/agent.yaml:ro \
   -v /etc/mtr/tls/agent:/var/run/mtr/tls:ro \
   ghcr.io/ztelliot/mtr-agent:latest
@@ -443,9 +444,11 @@ docker run -d --name mtr-agent \
   --workdir /var/lib/mtr
 ```
 
-Agent 默认以 gRPC 长连接主动连 Server，不需要暴露端口。只有在 `mode: http` 或
-`mode: grpc,http` 且确实需要外部调用 `/invoke` 时，才为 Agent 添加 `-p 9000:9000`，
-并应放在受控网关之后。除非明确需要宿主机网络视角，否则不要使用 `--network host`。
+Agent 默认以 gRPC 长连接主动连 Server，不需要暴露端口。请在 `/etc/mtr/agent.yaml`
+中设置 Agent 唯一 `id`、`server_addr` 和 `register_token`；配置文件值会优先于
+`MTR_` 环境变量。只有在 `mode: http` 或 `mode: grpc,http` 且确实需要外部调用
+`/invoke` 时，才为 Agent 添加 `-p 9000:9000`，并应放在受控网关之后。除非明确需要
+宿主机网络视角，否则不要使用 `--network host`。
 
 ## systemd 部署加固
 
@@ -494,18 +497,22 @@ systemd-analyze security mtr-agent.service
 - `agent.yaml`：`DaemonSet` 形式的 Agent，每个 Pod 自动用自身 Pod 名作为 `MTR_ID`。
 - `networkpolicy.yaml`：拒绝进入 Agent Pod 的入站流量。
 - `secrets.example.yaml`：需要替换占位符后再应用的 Secret 模板。
-- `kustomization.yaml`：便于 `kubectl apply -k deploy`。
+- `kustomization.yaml`：用于 `kubectl apply -k deploy` 的基础资源；它有意不包含
+  `secrets.example.yaml`。
 
 这套清单默认假设：
 
 - PostgreSQL 由外部服务提供，`database-url` 通过 Secret 注入。
 - gRPC 控制面走 `mtr-server.mtr.svc.cluster.local:8443`，因此 Server 证书 SAN 已按这个域名示例生成。
 - 所有 Agent 共享同一张客户端证书，但每个 Pod 通过 `MTR_ID=metadata.name` 保持唯一逻辑身份。
+- Agent Pod 从 `mtr-agent-env` Secret 读取注册 token，且该值必须匹配 Server
+  managed settings 中保存的 Agent 注册 token。
 - Server 保持 `replicas: 1`。当前调度 Hub 维护的是进程内连接状态，因此这份基础清单不直接做多副本控制面。
 - API token、Agent 注册 token、限流、全局配置、按标签生效的调度/运行参数、标签策略和托管 HTTP Agent
   都存储在 Server managed settings 中，不再从 Kubernetes Server ConfigMap 或 Secret 读取。
 
-创建 Secret 时，可直接编辑 `deploy/secrets.example.yaml` 中的占位符，也可以用命令行生成：
+创建 Secret 时，可以先编辑 `deploy/secrets.example.yaml` 中的占位符并单独应用该文件，
+也可以用命令行生成：
 
 ```sh
 kubectl apply -f deploy/namespace.yaml
@@ -518,11 +525,18 @@ kubectl -n mtr create secret generic mtr-server-tls \
   --from-file=tls.crt=certs/server.crt \
   --from-file=tls.key=certs/server.key
 
+kubectl -n mtr create secret generic mtr-agent-env \
+  --from-literal=register-token='<managed-register-token>'
+
 kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=ca.crt=certs/ca.crt \
   --from-file=tls.crt=certs/agent-shared.crt \
   --from-file=tls.key=certs/agent-shared.key
 ```
+
+`<managed-register-token>` 是管理页或 `/v1/manage/register-tokens` 返回的 token
+值。空数据库首次启动时，Server 会在日志中打印初始 admin API token；使用该 token
+创建 Agent 注册 token 后，再把返回值写入 `mtr-agent-env`。
 
 然后应用基础清单：
 

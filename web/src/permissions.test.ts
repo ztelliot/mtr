@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultFormState } from "./jobForm";
-import { dnsTypeOptions, filterAgentsByPermissions, httpMethodOptions, permissionFormError, protocolOptions, toolAllowed } from "./permissions";
+import { dnsTypeOptions, filterAgentsByPermissions, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, toolAllowed, toolAllowedForAgent } from "./permissions";
 import type { Agent, Permissions } from "./types";
 
 const fullPermissions: Permissions = {
@@ -12,15 +12,14 @@ const fullPermissions: Permissions = {
     port: { allowed_args: { port: "1-65535" }, ip_versions: [0, 4, 6], requires_agent: false },
     traceroute: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
   },
-  agents: ["*"],
   schedule_access: "write",
   manage_access: "write"
 };
 
 describe("permission helpers", () => {
   const agents: Agent[] = [
-    testAgent("edge-1", ["blue"]),
-    testAgent("edge-2", ["green"])
+    testAgent("edge-1", ["blue"], fullPermissions.tools),
+    testAgent("edge-2", ["green"], fullPermissions.tools)
   ];
 
   it("treats allowed args as backend CSV rules", () => {
@@ -76,41 +75,74 @@ describe("permission helpers", () => {
     expect(toolAllowed(null, "ping")).toBe(false);
   });
 
-  it("filters agents with tag and deny permission scopes", () => {
+  it("filters agents by returned node tool permissions", () => {
     const agents: Agent[] = [
-      testAgent("edge-1", ["blue"]),
-      testAgent("edge-2", ["blue", "blocked"]),
-      testAgent("edge-3", ["green"])
+      testAgent("edge-1", ["blue"], { ping: fullPermissions.tools.ping }),
+      testAgent("edge-2", ["blue", "blocked"], {}),
+      testAgent("edge-3", ["green"], { http: fullPermissions.tools.http })
     ];
-    expect(
-      filterAgentsByPermissions(agents, {
-        ...fullPermissions,
-        agents: ["tag:blue", "!tag:blocked", "!edge-3"]
-      }).map((agent) => agent.id)
-    ).toEqual(["edge-1"]);
+    expect(filterAgentsByPermissions(agents, fullPermissions).map((agent) => agent.id)).toEqual(["edge-1", "edge-3"]);
   });
 
-  it("treats deny-only agent scopes as all except denied", () => {
-    const agents: Agent[] = [
-      testAgent("edge-1", ["blue"]),
-      testAgent("edge-2", ["blocked"])
-    ];
-    expect(
-      filterAgentsByPermissions(agents, {
-        ...fullPermissions,
-        agents: ["!tag:blocked"]
-      }).map((agent) => agent.id)
-    ).toEqual(["edge-1"]);
+  it("validates manually typed agent IDs against returned agent permissions", () => {
+    const scopedAgents = [testAgent("edge-1", ["blue"], { ping: fullPermissions.tools.ping })];
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "edge-1" }, fullPermissions, scopedAgents, testTranslate)).toBeNull();
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "edge-2" }, fullPermissions, scopedAgents, testTranslate)).toBe("errors.agentNotAllowed");
   });
 
-  it("validates manually typed agent IDs against tag scopes using loaded agent labels", () => {
-    const permissions = {
+  it("uses per-agent effective tool permissions when an agent is selected", () => {
+    const scopedAgents = [
+      testAgent("edge-1", ["blue"], {
+        http: { allowed_args: { method: "HEAD" }, ip_versions: [0, 4, 6], requires_agent: false }
+      })
+    ];
+    expect(toolAllowedForAgent(fullPermissions, "http", scopedAgents[0])).toBe(true);
+    expect(httpMethodOptions(fullPermissions, scopedAgents[0]).map((option) => option.value)).toEqual(["HEAD"]);
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", agentId: "edge-1", method: "GET" }, fullPermissions, scopedAgents, testTranslate)).toBe("errors.optionNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", agentId: "edge-1", method: "HEAD" }, fullPermissions, scopedAgents, testTranslate)).toBeNull();
+  });
+
+  it("treats empty IP version permissions as no allowed versions", () => {
+    const scoped = {
       ...fullPermissions,
-      agents: ["tag:blue"]
-    };
-    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "edge-1" }, permissions, agents, testTranslate)).toBeNull();
-    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "edge-2" }, permissions, agents, testTranslate)).toBe("errors.agentNotAllowed");
-    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", agentId: "edge-3" }, permissions, agents, testTranslate)).toBe("errors.agentNotAllowed");
+      tools: {
+        ...fullPermissions.tools,
+        ping: { allowed_args: { protocol: "icmp,tcp" }, ip_versions: [], requires_agent: false }
+      }
+    } satisfies Permissions;
+
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", ipVersion: 4 }, scoped, agents, testTranslate)).toBe("errors.ipVersionNotAllowed");
+  });
+
+  it("checks auto IP literal targets against agent protocol support", () => {
+    const v4OnlyAgents = [testAgent("edge-v4", ["blue"], fullPermissions.tools, 1)];
+
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "2606:4700:4700::1111", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBe("errors.ipVersionNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "2606:4700:4700::1111", ipVersion: 6, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBe("errors.ipVersionNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://[2606:4700:4700::1111]", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBe("errors.ipVersionNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "1.1.1.1", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBeNull();
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "::ffff:1.1.1.1", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBeNull();
+    expect(permissionFormError({ ...defaultFormState, tool: "ping", target: "0:0:0:0:0:ffff:101:101", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBeNull();
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://[::ffff:1.1.1.1]", ipVersion: 0, agentId: "edge-v4" }, fullPermissions, v4OnlyAgents, testTranslate)).toBeNull();
+  });
+
+  it("filters default IP version options by agent protocol support", () => {
+    const v4OnlyAgent = testAgent("edge-v4", ["blue"], {
+      ping: { allowed_args: { protocol: "icmp,tcp" }, requires_agent: false }
+    }, 1);
+
+    expect(ipVersionOptions(fullPermissions, "ping", v4OnlyAgent).map((option) => option.value)).toEqual(["0", "4"]);
+  });
+
+  it("aligns target validation with backend policy rules", () => {
+    expect(localizedFormError({ ...defaultFormState, tool: "http", target: "example.com" }, fullPermissions, testTranslate)).toBe("errors.httpTargetRequired");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "example.com;id" }, fullPermissions, testTranslate)).toBe("errors.targetForbiddenChars");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "example..com" }, fullPermissions, testTranslate)).toBe("errors.targetHostRequired");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "[2606:4700:4700::1111]" }, fullPermissions, testTranslate)).toBe("errors.targetHostRequired");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "127.0.0.1" }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotAllowed");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "2606:4700:4700::1111", ipVersion: 4 }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotIPv4");
+    expect(localizedFormError({ ...defaultFormState, tool: "http", target: "https://[::ffff:127.0.0.1]" }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotAllowed");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "0:0:0:0:0:ffff:127.0.0.1" }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotAllowed");
   });
 });
 
@@ -118,12 +150,12 @@ function testTranslate(key: string): string {
   return key;
 }
 
-function testAgent(id: string, labels: string[]): Agent {
+function testAgent(id: string, labels: string[], tools: Agent["tools"], protocols = 3): Agent {
   return {
     id,
     labels,
-    capabilities: ["ping"],
-    protocols: 3,
+    tools,
+    protocols,
     status: "online",
     last_seen_at: "",
     created_at: ""

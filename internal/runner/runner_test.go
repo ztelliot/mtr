@@ -452,6 +452,26 @@ func TestHTTPProbeDialUsesResolvedTargetOnlyForConnection(t *testing.T) {
 	}
 }
 
+func TestHTTPProbeDisablesEnvironmentProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	result, err := runBuiltinHTTP(context.Background(), model.Job{
+		Tool:   model.ToolHTTP,
+		Target: srv.URL,
+		Args:   map[string]string{"method": "HEAD"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Summary["http_code"] != http.StatusNoContent {
+		t.Fatalf("http_code = %#v, summary = %#v", result.Summary["http_code"], result.Summary)
+	}
+}
+
 func TestHTTPProbeOmitsSNIForIPLiteral(t *testing.T) {
 	req, sni, err := newHTTPProbeRequest(context.Background(), "GET", "https://1.1.1.1/status")
 	if err != nil {
@@ -509,6 +529,37 @@ func TestRunBuiltinHTTPReturnsPartialSummaryOnTimeout(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected no stream events for single-result http probe, events = %#v", events)
+	}
+}
+
+func TestRunBuiltinHTTPDoesNotFollowRedirects(t *testing.T) {
+	redirectHit := false
+	redirectSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, redirectSrv.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	result, err := runBuiltinHTTP(context.Background(), model.Job{
+		Tool:   model.ToolHTTP,
+		Target: srv.URL,
+		Args:   map[string]string{"method": "HEAD"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirectHit {
+		t.Fatal("redirect target should not be requested")
+	}
+	if result.Summary["http_code"] != http.StatusFound {
+		t.Fatalf("http_code = %#v, summary = %#v", result.Summary["http_code"], result.Summary)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("redirect status should be returned directly, exit_code = %d", result.ExitCode)
 	}
 }
 

@@ -21,15 +21,14 @@ import (
 )
 
 type Hub struct {
-	store                store.Store
-	policies             policy.Set
-	labelConfigs         map[string]config.LabelConfig
-	registerTokens       []string
-	log                  *slog.Logger
-	offlineAfter         time.Duration
-	pollInterval         time.Duration
-	grpcMaxInflight      int
-	httpAgentMaxInflight int
+	store          store.Store
+	policies       policy.Set
+	labelConfigs   map[string]config.LabelConfig
+	registerTokens []string
+	log            *slog.Logger
+	offlineAfter   time.Duration
+	pollInterval   time.Duration
+	maxInflight    int
 
 	mu                         sync.Mutex
 	meta                       map[string]agentMeta
@@ -67,8 +66,7 @@ func NewHub(st store.Store, policies policy.Set, offlineAfter time.Duration, pol
 		log:                        log,
 		offlineAfter:               offlineAfter,
 		pollInterval:               pollInterval,
-		grpcMaxInflight:            maxInflight,
-		httpAgentMaxInflight:       1,
+		maxInflight:                maxInflight,
 		meta:                       map[string]agentMeta{},
 		running:                    map[string]map[string]struct{}{},
 		inflightCancels:            map[string]context.CancelFunc{},
@@ -80,17 +78,13 @@ func NewHub(st store.Store, policies policy.Set, offlineAfter time.Duration, pol
 	}
 }
 
-func (h *Hub) SetInflightLimits(grpcLimit int, httpAgentLimit int) {
-	if grpcLimit <= 0 {
-		grpcLimit = 4
-	}
-	if httpAgentLimit <= 0 {
-		httpAgentLimit = 1
+func (h *Hub) SetInflightLimit(limit int) {
+	if limit <= 0 {
+		limit = 4
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.grpcMaxInflight = grpcLimit
-	h.httpAgentMaxInflight = httpAgentLimit
+	h.maxInflight = limit
 }
 
 func (h *Hub) SetHTTPAgentRuntime(maxHealthInterval time.Duration, invokeAttempts int) {
@@ -128,8 +122,7 @@ func (h *Hub) ApplySettings(settings config.ManagedSettings) {
 	h.registerTokens = normalizedRegisterTokens(settings.RegisterTokens)
 	h.offlineAfter = time.Duration(globalScheduler.AgentOfflineAfterSec) * time.Second
 	h.pollInterval = time.Duration(globalScheduler.PollIntervalSec) * time.Second
-	h.grpcMaxInflight = globalScheduler.GRPCMaxInflightPerAgent
-	h.httpAgentMaxInflight = globalScheduler.HTTPMaxInflightPerAgent
+	h.maxInflight = globalScheduler.MaxInflightPerAgent
 	h.httpAgentMaxHealthInterval = time.Duration(globalRuntime.HTTPMaxHealthIntervalSec) * time.Second
 	h.httpAgentInvokeAttempts = globalRuntime.HTTPInvokeAttempts
 }
@@ -214,31 +207,31 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		seenAgentIDs := map[string]struct{}{}
 		runs := make([]model.Job, 0)
 		for _, target := range dueTargets {
-			agentIDs, err := h.scheduledRunAgentIDs(ctx, sched, target, job.IPVersion)
+			agents, err := h.scheduledRunAgents(ctx, sched, target, job.IPVersion)
 			if err != nil {
 				h.log.Warn("list scheduled run agents", "schedule_id", sched.ID, "schedule_target_label", target.Label, "err", err)
 				continue
 			}
-			for _, agentID := range agentIDs {
-				if _, ok := seenAgentIDs[agentID]; ok {
+			for _, agent := range agents {
+				if _, ok := seenAgentIDs[agent.ID]; ok {
 					continue
 				}
-				agentPolicies := h.policiesForAgent(ctx, agentID)
+				agentPolicies := h.policiesForLabels(agent.Labels)
 				validateReq := model.CreateJobRequest{
 					Tool:           sched.Tool,
 					Target:         sched.Target,
 					Args:           sched.Args,
 					IPVersion:      sched.IPVersion,
-					AgentID:        agentID,
+					AgentID:        agent.ID,
 					ResolveOnAgent: sched.ResolveOnAgent,
 				}
 				if _, err := agentPolicies.ValidateSchedule(validateReq); err != nil {
 					continue
 				}
-				seenAgentIDs[agentID] = struct{}{}
+				seenAgentIDs[agent.ID] = struct{}{}
 				run := job
 				run.ID = uuid.NewString()
-				run.AgentID = agentID
+				run.AgentID = agent.ID
 				run.Args = agentPolicies.ServerArgs(sched.Tool, sched.Args)
 				runs = append(runs, run)
 			}
@@ -320,12 +313,12 @@ func syncScheduleAggregateRunFields(sched *model.ScheduledJob) {
 	sched.LastRunAt = lastRunAt
 }
 
-func (h *Hub) scheduledRunAgentIDs(ctx context.Context, sched model.ScheduledJob, target model.ScheduleTarget, version model.IPVersion) ([]string, error) {
+func (h *Hub) scheduledRunAgents(ctx context.Context, sched model.ScheduledJob, target model.ScheduleTarget, version model.IPVersion) ([]model.Agent, error) {
 	agents, err := h.agentsWithManagedLabels(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(agents))
+	out := make([]model.Agent, 0, len(agents))
 	for _, agent := range agents {
 		if h.agentConfigDisabled(ctx, agent.ID) {
 			continue
@@ -337,10 +330,10 @@ func (h *Hub) scheduledRunAgentIDs(ctx context.Context, sched model.ScheduledJob
 			continue
 		}
 		if policy.AgentSupports(agent, sched.Tool, version) {
-			ids = append(ids, agent.ID)
+			out = append(out, agent)
 		}
 	}
-	return ids, nil
+	return out, nil
 }
 
 func scheduledTargetAllowsAgent(target model.ScheduleTarget, agentID string) bool {
@@ -394,7 +387,7 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 		return err
 	}
 
-	cancelQueueSize := h.grpcInflightLimit() * 2
+	cancelQueueSize := h.inflightLimit() * 2
 	if cancelQueueSize < 1 {
 		cancelQueueSize = 1
 	}
@@ -452,10 +445,12 @@ func (h *Hub) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, error
 	}
 	for i := range agents {
 		labels := grpcLabels[agents[i].ID]
+		transport := model.AgentTransportGRPC
 		if httpNodeLabels, ok := httpLabels[agents[i].ID]; ok {
 			labels = httpNodeLabels
+			transport = model.AgentTransportHTTP
 		}
-		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, labels)
+		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, transport, labels)
 	}
 	return agents, nil
 }
@@ -523,19 +518,20 @@ func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, ca
 				h.log.Debug("skip stale agent dispatch", "agent_id", agentID, "offline_after", offlineAfter.String())
 				continue
 			}
-			maxInflight := h.grpcInflightLimitForAgent(stream.Context(), agentID)
+			maxInflight := h.inflightLimitForAgent(stream.Context(), agentID)
 			remaining := maxInflight - h.inflightCount(agentID)
 			if remaining <= 0 {
 				h.log.Debug("agent at inflight limit", "agent_id", agentID, "max_inflight", maxInflight, "transport", "grpc")
 				continue
 			}
-			jobs, err := h.store.ListQueuedJobs(stream.Context(), agentID, caps, protocols, remaining)
+			policies := h.policiesForAgent(stream.Context(), agentID)
+			policyCaps := policyCapabilities(policies, caps)
+			jobs, err := h.store.ListQueuedJobs(stream.Context(), agentID, policyCaps, protocols, remaining)
 			if err != nil {
 				h.log.Warn("list queued jobs", "err", err)
 				continue
 			}
 			for _, job := range jobs {
-				policies := h.policiesForAgent(stream.Context(), agentID)
 				p, ok := policies.Get(job.Tool)
 				if !ok {
 					h.log.Debug("skip job with disabled tool", "job_id", job.ID, "tool", job.Tool)
@@ -560,6 +556,16 @@ func (h *Hub) sendLoop(stream grpcwire.Control_ConnectServer, agentID string, ca
 			}
 		}
 	}
+}
+
+func policyCapabilities(policies policy.Set, caps []model.Tool) []model.Tool {
+	out := make([]model.Tool, 0, len(caps))
+	for _, cap := range caps {
+		if _, ok := policies.Get(cap); ok {
+			out = append(out, cap)
+		}
+	}
+	return out
 }
 
 func (h *Hub) handleResult(ctx context.Context, agentID string, ev grpcwire.ResultEvent) {
@@ -1081,10 +1087,10 @@ func (h *Hub) inflightCount(agentID string) int {
 	return len(h.running[agentID])
 }
 
-func (h *Hub) grpcInflightLimit() int {
+func (h *Hub) inflightLimit() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.grpcMaxInflight
+	return h.maxInflight
 }
 
 func (h *Hub) currentPollInterval() time.Duration {
@@ -1100,10 +1106,9 @@ func (h *Hub) schedulerSnapshot() config.Scheduler {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return config.Scheduler{
-		AgentOfflineAfterSec:    int(h.offlineAfter / time.Second),
-		PollIntervalSec:         int(h.pollInterval / time.Second),
-		GRPCMaxInflightPerAgent: h.grpcMaxInflight,
-		HTTPMaxInflightPerAgent: h.httpAgentMaxInflight,
+		AgentOfflineAfterSec: int(h.offlineAfter / time.Second),
+		PollIntervalSec:      int(h.pollInterval / time.Second),
+		MaxInflightPerAgent:  h.maxInflight,
 	}
 }
 
@@ -1112,12 +1117,12 @@ func (h *Hub) schedulerForAgent(ctx context.Context, agentID string) config.Sche
 	return scheduler
 }
 
-func (h *Hub) grpcInflightLimitForAgent(ctx context.Context, agentID string) int {
+func (h *Hub) inflightLimitForAgent(ctx context.Context, agentID string) int {
 	scheduler := h.schedulerForAgent(ctx, agentID)
-	if scheduler.GRPCMaxInflightPerAgent <= 0 {
+	if scheduler.MaxInflightPerAgent <= 0 {
 		return 4
 	}
-	return scheduler.GRPCMaxInflightPerAgent
+	return scheduler.MaxInflightPerAgent
 }
 
 func (h *Hub) pollIntervalForAgent(ctx context.Context, agentID string) time.Duration {
@@ -1170,7 +1175,7 @@ func (h *Hub) settingsForAgent(ctx context.Context, agentID string) (config.Sche
 func (h *Hub) labelsForAgent(ctx context.Context, agentID string) []string {
 	agents, err := h.agentsWithManagedLabels(ctx)
 	if err != nil {
-		return model.NormalizeAgentLabels(agentID, nil)
+		return model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, nil)
 	}
 	for _, agent := range agents {
 		if agent.ID == agentID {
@@ -1178,12 +1183,12 @@ func (h *Hub) labelsForAgent(ctx context.Context, agentID string) []string {
 		}
 	}
 	if node, err := h.store.GetHTTPAgent(ctx, agentID); err == nil {
-		return model.NormalizeAgentLabels(agentID, node.Labels)
+		return model.NormalizeAgentLabels(agentID, model.AgentTransportHTTP, node.Labels)
 	}
 	if cfg, err := h.store.GetAgentConfig(ctx, agentID); err == nil {
-		return model.NormalizeAgentLabels(agentID, cfg.Labels)
+		return model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, cfg.Labels)
 	}
-	return model.NormalizeAgentLabels(agentID, nil)
+	return model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, nil)
 }
 
 func (h *Hub) labelConfigsSnapshot() map[string]config.LabelConfig {
@@ -1241,12 +1246,6 @@ func (h *Hub) offlineAfterForAgent(ctx context.Context, agentID string) time.Dur
 		return 90 * time.Second
 	}
 	return time.Duration(scheduler.AgentOfflineAfterSec) * time.Second
-}
-
-func (h *Hub) httpAgentInflightLimit() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.httpAgentMaxInflight
 }
 
 func (h *Hub) runningJobs(agentID string) []string {
@@ -1393,8 +1392,7 @@ func minScheduler(base config.Scheduler, next config.Scheduler) config.Scheduler
 	config.DefaultScheduler(&base)
 	config.DefaultScheduler(&next)
 	base.AgentOfflineAfterSec = minPositive(base.AgentOfflineAfterSec, next.AgentOfflineAfterSec)
-	base.GRPCMaxInflightPerAgent = minPositive(base.GRPCMaxInflightPerAgent, next.GRPCMaxInflightPerAgent)
-	base.HTTPMaxInflightPerAgent = minPositive(base.HTTPMaxInflightPerAgent, next.HTTPMaxInflightPerAgent)
+	base.MaxInflightPerAgent = minPositive(base.MaxInflightPerAgent, next.MaxInflightPerAgent)
 	base.PollIntervalSec = minPositive(base.PollIntervalSec, next.PollIntervalSec)
 	return base
 }

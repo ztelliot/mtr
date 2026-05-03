@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -143,6 +145,56 @@ func TestCallHTTPAgentRejectsUntypedEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentNDJSONLineLimit(t *testing.T) {
+	reader := bufio.NewReader(bytes.NewReader(bytes.Repeat([]byte("x"), httpAgentNDJSONLineLimit+1)))
+	if _, err := readHTTPAgentNDJSONLine(reader); err == nil {
+		t.Fatal("expected oversized event line to fail")
+	}
+}
+
+func TestHTTPAgentApplyHealthRejectsIdentityMismatch(t *testing.T) {
+	agent := HTTPAgent{ID: "edge-http"}
+	if err := agent.applyHealth(httpAgentHealth{}); err == nil {
+		t.Fatal("expected missing identity")
+	}
+	if err := agent.applyHealth(httpAgentHealth{AgentID: "other"}); err == nil {
+		t.Fatal("expected identity mismatch")
+	}
+	if err := agent.applyHealth(httpAgentHealth{AgentID: "edge-http", Capabilities: []model.Tool{model.ToolPing}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.Capabilities) != 1 || agent.Capabilities[0] != model.ToolPing {
+		t.Fatalf("health not applied: %#v", agent)
+	}
+}
+
+func TestCheckHTTPAgentHealthRequiresMatchingAgentID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"agent":  map[string]any{"id": "other", "capabilities": []string{"ping"}, "protocols": 3},
+		})
+	}))
+	defer srv.Close()
+
+	err := checkHTTPAgentHealth(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL})
+	if err == nil {
+		t.Fatal("expected mismatched health identity to fail")
+	}
+}
+
+func TestCheckHTTPAgentHealthRejectsInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	err := checkHTTPAgentHealth(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL})
+	if err == nil {
+		t.Fatal("expected invalid health JSON to fail")
+	}
+}
+
 func TestCallHTTPAgentHTTPErrorIsNotConnectionError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -182,6 +234,7 @@ func TestCheckHTTPAgentHealth(t *testing.T) {
 				"commit":  "abc123",
 			},
 			"agent": map[string]any{
+				"id":           "edge-http",
 				"country":      "CN",
 				"region":       "edge",
 				"provider":     "kubernetes",
@@ -193,12 +246,12 @@ func TestCheckHTTPAgentHealth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	health, err := probeHTTPAgentHealth(context.Background(), HTTPAgent{BaseURL: srv.URL, Token: "secret"})
+	health, err := probeHTTPAgentHealth(context.Background(), HTTPAgent{ID: "edge-http", BaseURL: srv.URL, Token: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sawAuth {
-		t.Fatal("health check did not send bearer token")
+	if sawAuth {
+		t.Fatal("health check should not send bearer token")
 	}
 	if health.Version != "v1.2.3 abc123" {
 		t.Fatalf("version = %q", health.Version)
@@ -281,6 +334,25 @@ func TestCheckHTTPAgentHealthRejectsNon2xx(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentClientDisablesEnvironmentProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	client, err := NewHTTPAgentHTTPClient(HTTPAgentTLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport, ok := client.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+		t.Fatalf("expected proxy-disabled transport, got %#v", client.Transport)
+	}
+}
+
+func TestHTTPAgentFallbackClientDisablesEnvironmentProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	client := httpAgentHTTPClient(HTTPAgent{})
+	if transport, ok := client.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+		t.Fatalf("expected proxy-disabled fallback transport, got %#v", client.Transport)
+	}
+}
+
 func TestHTTPAgentLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 	var healthCalls int32
 	var invokeCalls int32
@@ -292,6 +364,7 @@ func TestHTTPAgentLoopChecksHealthAndKeepsStartupVersion(t *testing.T) {
 				"status":  "ok",
 				"version": "v9.8.7",
 				"agent": map[string]any{
+					"id":           "edge-http",
 					"country":      "CN",
 					"region":       "edge",
 					"provider":     "kubernetes",

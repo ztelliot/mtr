@@ -343,16 +343,47 @@ type Agent struct {
 	CreatedAt    time.Time    `json:"created_at"`
 }
 
+type AgentToolPermission struct {
+	AllowedArgs    map[string]string `json:"allowed_args,omitempty"`
+	ResolveOnAgent *bool             `json:"resolve_on_agent,omitempty"`
+	IPVersions     []IPVersion       `json:"ip_versions,omitempty"`
+	RequiresAgent  bool              `json:"requires_agent"`
+}
+
+type AgentView struct {
+	ID         string                       `json:"id"`
+	Country    string                       `json:"country,omitempty"`
+	Region     string                       `json:"region,omitempty"`
+	Provider   string                       `json:"provider,omitempty"`
+	ISP        string                       `json:"isp,omitempty"`
+	Version    string                       `json:"version,omitempty"`
+	Labels     []string                     `json:"labels,omitempty"`
+	Tools      map[Tool]AgentToolPermission `json:"tools"`
+	Protocols  ProtocolMask                 `json:"protocols"`
+	Status     AgentStatus                  `json:"status"`
+	LastSeenAt time.Time                    `json:"last_seen_at"`
+	CreatedAt  time.Time                    `json:"created_at"`
+}
+
 const (
 	AgentAllLabel      = "agent"
+	AgentGRPCLabel     = "agent:grpc"
+	AgentHTTPLabel     = "agent:http"
 	AgentIDLabelPrefix = "id:"
+)
+
+type AgentTransport string
+
+const (
+	AgentTransportGRPC AgentTransport = "grpc"
+	AgentTransportHTTP AgentTransport = "http"
 )
 
 func AgentIDLabel(agentID string) string {
 	return AgentIDLabelPrefix + strings.TrimSpace(agentID)
 }
 
-func NormalizeAgentLabels(agentID string, labels []string) []string {
+func NormalizeAgentLabels(agentID string, transport AgentTransport, labels []string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(labels)+2)
 	add := func(label string) {
@@ -367,6 +398,12 @@ func NormalizeAgentLabels(agentID string, labels []string) []string {
 		out = append(out, label)
 	}
 	add(AgentAllLabel)
+	switch transport {
+	case AgentTransportGRPC:
+		add(AgentGRPCLabel)
+	case AgentTransportHTTP:
+		add(AgentHTTPLabel)
+	}
 	add(AgentIDLabel(agentID))
 	for _, label := range labels {
 		if IsReservedAgentLabel(label) {
@@ -379,7 +416,7 @@ func NormalizeAgentLabels(agentID string, labels []string) []string {
 
 func IsReservedAgentLabel(label string) bool {
 	label = strings.TrimSpace(label)
-	return label == AgentAllLabel || strings.HasPrefix(label, AgentIDLabelPrefix)
+	return label == AgentAllLabel || label == AgentGRPCLabel || label == AgentHTTPLabel || strings.HasPrefix(label, AgentIDLabelPrefix)
 }
 
 type CreateJobRequest struct {

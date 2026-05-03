@@ -27,6 +27,13 @@ import (
 	"github.com/ztelliot/mtr/internal/version"
 )
 
+const (
+	defaultJSONBodyLimit      int64 = 1 << 20
+	managedAgentBodyLimit     int64 = 64 << 10
+	geoIPUpstreamBodyLimit    int64 = 64 << 10
+	geoIPUpstreamBodyLimitPad int64 = 1 << 10
+)
+
 type Server struct {
 	store        store.Store
 	policies     policy.Set
@@ -210,6 +217,10 @@ func decodeStrictJSON(body io.Reader, dst any) error {
 	return nil
 }
 
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	return decodeStrictJSON(http.MaxBytesReader(w, r.Body, defaultJSONBodyLimit), dst)
+}
+
 func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.permissionsForContext(r.Context()))
 }
@@ -234,7 +245,7 @@ func (s *Server) policiesForJob(ctx context.Context, req model.CreateJobRequest)
 }
 
 func (s *Server) policiesForAgent(ctx context.Context, agentID string) policy.Set {
-	labels := model.NormalizeAgentLabels(agentID, nil)
+	labels := model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, nil)
 	if agents, err := s.agentsWithManagedLabels(ctx); err == nil {
 		for _, agent := range agents {
 			if agent.ID == agentID {
@@ -243,11 +254,11 @@ func (s *Server) policiesForAgent(ctx context.Context, agentID string) policy.Se
 			}
 		}
 	}
-	if len(labels) == 2 {
+	if len(labels) == 3 {
 		if node, err := s.store.GetHTTPAgent(ctx, agentID); err == nil {
-			labels = model.NormalizeAgentLabels(agentID, node.Labels)
+			labels = model.NormalizeAgentLabels(agentID, model.AgentTransportHTTP, node.Labels)
 		} else if cfg, err := s.store.GetAgentConfig(ctx, agentID); err == nil {
-			labels = model.NormalizeAgentLabels(agentID, cfg.Labels)
+			labels = model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, cfg.Labels)
 		}
 	}
 	return s.policiesForLabels(labels)
@@ -288,7 +299,7 @@ func (s *Server) getVersion(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var req model.CreateJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -423,7 +434,7 @@ func (s *Server) fanoutDispatchTargets(ctx context.Context, req model.CreateJobR
 		if s.agentDisabled(ctx, agent.ID) {
 			continue
 		}
-		agentPolicies := s.policiesForAgent(ctx, agent.ID)
+		agentPolicies := s.policiesForLabels(agent.Labels)
 		if _, err := agentPolicies.Validate(withAgentID(req, agent.ID)); err != nil {
 			continue
 		}
@@ -457,7 +468,7 @@ func (s *Server) pinnedDispatchTarget(ctx context.Context, agentID string, tool 
 		if s.agentDisabled(ctx, agent.ID) {
 			return fallback, "", errAgentOffline
 		}
-		agentPolicies := s.policiesForAgent(ctx, agent.ID)
+		agentPolicies := s.policiesForLabels(agent.Labels)
 		if _, ok := agentPolicies.Get(tool); !ok {
 			return fallback, model.JobErrorUnsupportedTool, nil
 		}
@@ -654,16 +665,38 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := principalFromContext(r.Context()).scope
-	filtered := agents[:0]
+	filtered := make([]model.AgentView, 0, len(agents))
 	for _, agent := range agents {
 		if s.agentDisabled(r.Context(), agent.ID) {
 			continue
 		}
-		if scopeAllowsAgentRecord(scope, agent) {
-			filtered = append(filtered, agent)
+		if !scopeAllowsAgentRecord(scope, agent) {
+			continue
 		}
+		tools := s.agentToolPermissions(agent, scope)
+		if len(tools) == 0 {
+			continue
+		}
+		filtered = append(filtered, agentView(agent, tools))
 	}
 	writeJSON(w, http.StatusOK, filtered)
+}
+
+func agentView(agent model.Agent, tools map[model.Tool]ToolPermission) model.AgentView {
+	return model.AgentView{
+		ID:         agent.ID,
+		Country:    agent.Country,
+		Region:     agent.Region,
+		Provider:   agent.Provider,
+		ISP:        agent.ISP,
+		Version:    agent.Version,
+		Labels:     append([]string(nil), agent.Labels...),
+		Tools:      tools,
+		Protocols:  agent.Protocols,
+		Status:     agent.Status,
+		LastSeenAt: agent.LastSeenAt,
+		CreatedAt:  agent.CreatedAt,
+	}
 }
 
 func (s *Server) agentDisabled(ctx context.Context, id string) bool {
@@ -697,10 +730,12 @@ func (s *Server) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, er
 	}
 	for i := range agents {
 		labels := grpcLabels[agents[i].ID]
+		transport := model.AgentTransportGRPC
 		if httpNodeLabels, ok := httpLabels[agents[i].ID]; ok {
 			labels = httpNodeLabels
+			transport = model.AgentTransportHTTP
 		}
-		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, labels)
+		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, transport, labels)
 	}
 	return agents, nil
 }
@@ -790,7 +825,11 @@ func (s *Server) updateManagedAgent(w http.ResponseWriter, r *http.Request) {
 		var err error
 		transport, err = s.managedAgentTransportForID(r.Context(), id)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 	}
@@ -805,7 +844,7 @@ func (s *Server) updateManagedAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func readManagedAgentBody(w http.ResponseWriter, r *http.Request) ([]byte, string, bool) {
-	raw, err := io.ReadAll(r.Body)
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, managedAgentBodyLimit))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return nil, "", false
@@ -841,7 +880,25 @@ func (s *Server) managedAgentTransportForID(ctx context.Context, id string) (str
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
-	return "grpc", nil
+	configs, err := s.store.ListAgentConfigs(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, cfg := range configs {
+		if cfg.ID == id {
+			return "grpc", nil
+		}
+	}
+	liveAgents, err := s.store.ListAgents(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, agent := range liveAgents {
+		if agent.ID == id {
+			return "grpc", nil
+		}
+	}
+	return "", store.ErrNotFound
 }
 
 func (s *Server) updateGRPCAgentConfig(w http.ResponseWriter, r *http.Request, raw []byte) {
@@ -881,7 +938,7 @@ func (s *Server) updateManagedAgentLabels(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var payload managedAgentLabelsPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1008,7 +1065,11 @@ func (s *Server) deleteManagedAgent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	transport, err := s.managedAgentTransportForID(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	action := "manage.grpc_agent.delete"
@@ -1037,7 +1098,16 @@ func (s *Server) deleteManagedAgent(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteAgent(r.Context(), id); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
-			status = http.StatusNotFound
+			if cfgErr := s.store.DeleteAgentConfig(r.Context(), id); cfgErr == nil {
+				s.auditManage(r.Context(), action, id, "allow", "")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			} else if errors.Is(cfgErr, store.ErrNotFound) {
+				status = http.StatusNotFound
+			} else {
+				writeError(w, status, cfgErr.Error())
+				return
+			}
 		}
 		writeError(w, status, err.Error())
 		return
@@ -1069,11 +1139,35 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 		if err != nil {
 			return nil, err
 		}
+		seen := map[string]struct{}{}
 		for _, agent := range agents {
 			if _, ok := httpByID[agent.ID]; ok {
 				continue
 			}
+			seen[agent.ID] = struct{}{}
 			out = append(out, ManagedAgent{Agent: agent, Type: "grpc", Transport: "grpc", Config: byID[agent.ID]})
+		}
+		for _, cfg := range configs {
+			if _, ok := seen[cfg.ID]; ok {
+				continue
+			}
+			if _, ok := httpByID[cfg.ID]; ok {
+				continue
+			}
+			createdAt := parseManagedTime(cfg.CreatedAt)
+			updatedAt := parseManagedTime(cfg.UpdatedAt)
+			out = append(out, ManagedAgent{
+				Agent: model.Agent{
+					ID:         cfg.ID,
+					Labels:     model.NormalizeAgentLabels(cfg.ID, model.AgentTransportGRPC, cfg.Labels),
+					Status:     model.AgentOffline,
+					LastSeenAt: updatedAt,
+					CreatedAt:  createdAt,
+				},
+				Type:      "grpc",
+				Transport: "grpc",
+				Config:    cfg,
+			})
 		}
 	}
 	if transport == "" || transport == "http" {
@@ -1098,7 +1192,7 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 			if live, ok := agentByID[node.ID]; ok {
 				agent = live
 			}
-			agent.Labels = model.NormalizeAgentLabels(node.ID, node.Labels)
+			agent.Labels = model.NormalizeAgentLabels(node.ID, model.AgentTransportHTTP, node.Labels)
 			out = append(out, ManagedAgent{
 				Agent:     agent,
 				Type:      "http",
@@ -1252,7 +1346,7 @@ func (s *Server) updateManagedRateLimit(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var payload managedRateLimitPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1293,7 +1387,7 @@ func (s *Server) updateManagedLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload managedLabelsPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1321,7 +1415,7 @@ func (s *Server) updateManagedLabelState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var payload managedLabelsAndAgentsPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1385,7 +1479,7 @@ func (s *Server) createManagedAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload managedAPITokenPayload
-	if err := decodeStrictJSON(r.Body, &payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1411,7 +1505,7 @@ func (s *Server) updateManagedAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload managedAPITokenPatchPayload
-	if err := decodeStrictJSON(r.Body, &payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1503,7 +1597,7 @@ func (s *Server) createManagedRegisterToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var payload managedRegisterTokenPayload
-	if err := decodeStrictJSON(r.Body, &payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1529,7 +1623,7 @@ func (s *Server) updateManagedRegisterToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var payload managedRegisterTokenPayload
-	if err := decodeStrictJSON(r.Body, &payload); err != nil {
+	if err := decodeLimitedJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1791,6 +1885,10 @@ func buildManagedRuntime(settings config.ManagedSettings) (managedRuntime, error
 			},
 			IPv4Prefix: settings.RateLimit.CIDR.IPv4Prefix,
 			IPv6Prefix: settings.RateLimit.CIDR.IPv6Prefix,
+		},
+		GeoIP: abuse.Limit{
+			RequestsPerMinute: settings.RateLimit.GeoIP.RequestsPerMinute,
+			Burst:             settings.RateLimit.GeoIP.Burst,
 		},
 		Tools:       AbuseToolLimits(settings.RateLimit.Tools),
 		ExemptCIDRs: settings.RateLimit.ExemptCIDRs,

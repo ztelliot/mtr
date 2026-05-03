@@ -189,6 +189,30 @@ func TestPublicJobErrorTypeMapsRawErrorsToGenericType(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentLabelsAddsTransportLabelsAndDropsReservedInput(t *testing.T) {
+	got := NormalizeAgentLabels("edge-1", AgentTransportGRPC, []string{"blue", "agent:http", "id:other", "blue"})
+	want := []string{"agent", "agent:grpc", "id:edge-1", "blue"}
+	if len(got) != len(want) {
+		t.Fatalf("grpc labels = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("grpc labels = %#v, want %#v", got, want)
+		}
+	}
+
+	got = NormalizeAgentLabels("edge-2", AgentTransportHTTP, []string{"agent:grpc", "green"})
+	want = []string{"agent", "agent:http", "id:edge-2", "green"}
+	if len(got) != len(want) {
+		t.Fatalf("http labels = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("http labels = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestDNSRecordJSONIncludesOnlyTypeAndValue(t *testing.T) {
 	b, err := json.Marshal(DNSRecord{Type: "A", Value: "93.184.216.34"})
 	if err != nil {

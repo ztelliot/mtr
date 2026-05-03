@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,9 +15,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/grpcwire"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
+	"github.com/ztelliot/mtr/internal/store"
 	"github.com/ztelliot/mtr/internal/tlsutil"
 	"github.com/ztelliot/mtr/internal/version"
 )
@@ -27,6 +30,7 @@ type HTTPAgent struct {
 	Region       string
 	Provider     string
 	ISP          string
+	Labels       []string
 	BaseURL      string
 	Token        string
 	HTTPClient   *http.Client
@@ -45,11 +49,14 @@ type HTTPAgentTLS struct {
 const (
 	defaultHTTPAgentMaxHealthInterval = 300 * time.Second
 	defaultHTTPAgentInvokeAttempts    = 3
+	httpAgentNDJSONLineLimit          = 1 << 20
 )
 
 var httpAgentInvokeRetryDelay = func(attempt int) time.Duration {
 	return time.Duration(attempt) * time.Second
 }
+
+var fallbackHTTPAgentHTTPClient = &http.Client{Transport: httpAgentTransport(nil)}
 
 type httpAgentConnectionError struct {
 	err error
@@ -121,11 +128,16 @@ func NewHTTPAgentHTTPClient(tlsConfig HTTPAgentTLS) (*http.Client, error) {
 		return nil, err
 	}
 	if cfg == nil {
-		return http.DefaultClient, nil
+		return &http.Client{Transport: httpAgentTransport(nil)}, nil
 	}
+	return &http.Client{Transport: httpAgentTransport(cfg)}, nil
+}
+
+func httpAgentTransport(tlsConfig *tls.Config) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = cfg
-	return &http.Client{Transport: transport}, nil
+	transport.Proxy = nil
+	transport.TLSClientConfig = tlsConfig
+	return transport
 }
 
 func (h *Hub) startHTTPAgents(ctx context.Context) {
@@ -187,6 +199,7 @@ func (h *Hub) configuredHTTPAgents(ctx context.Context) ([]HTTPAgent, error) {
 		}
 		agents = append(agents, HTTPAgent{
 			ID:         node.ID,
+			Labels:     model.NormalizeAgentLabels(node.ID, model.AgentTransportHTTP, node.Labels),
 			BaseURL:    node.BaseURL,
 			Token:      node.HTTPToken,
 			HTTPClient: client,
@@ -202,8 +215,13 @@ func (h *Hub) httpAgentLoop(ctx context.Context, agent HTTPAgent) {
 	if recovering {
 		status = model.AgentOffline
 		h.log.Warn("http agent startup health check failed", "agent_id", agent.ID, "base_url", agent.BaseURL, "err", err)
-	} else {
-		agent.applyHealth(health)
+	} else if err := agent.applyHealth(health); err != nil {
+		recovering = true
+		status = model.AgentOffline
+		h.log.Warn("http agent startup health check identity mismatch", "agent_id", agent.ID, "base_url", agent.BaseURL, "err", err)
+		if markErr := h.store.MarkAgentOffline(ctx, agent.ID); markErr != nil && !errors.Is(markErr, store.ErrNotFound) {
+			h.log.Warn("mark http agent offline failed", "agent_id", agent.ID, "err", markErr)
+		}
 	}
 	h.upsertHTTPAgent(ctx, agent, status)
 	h.log.Info("http agent configured", "agent_id", agent.ID, "base_url", agent.BaseURL, "capabilities", agent.Capabilities, "protocols", agent.Protocols, "version", agent.Version, "status", status)
@@ -239,7 +257,11 @@ func (h *Hub) httpAgentLoop(ctx context.Context, agent HTTPAgent) {
 					h.log.Debug("http agent recovery health check failed", "agent_id", agent.ID, "next_check_after", healthInterval.String(), "err", err)
 					continue
 				}
-				agent.applyHealth(health)
+				if err := agent.applyHealth(health); err != nil {
+					_ = h.store.MarkAgentOffline(ctx, agent.ID)
+					h.log.Warn("http agent recovery health check identity mismatch", "agent_id", agent.ID, "err", err)
+					continue
+				}
 				h.upsertHTTPAgent(ctx, agent, model.AgentOnline)
 				recovering = false
 				h.log.Debug("http agent health check recovered", "agent_id", agent.ID)
@@ -248,19 +270,20 @@ func (h *Hub) httpAgentLoop(ctx context.Context, agent HTTPAgent) {
 			}
 			h.touchAgent(agent.ID)
 			_ = h.store.TouchAgent(ctx, agent.ID)
-			maxInflight := h.httpAgentInflightLimitForAgent(agent)
+			maxInflight := h.inflightLimitForHTTPAgent(agent)
 			remaining := maxInflight - h.inflightCount(agent.ID)
 			if remaining <= 0 {
 				h.log.Debug("http agent at inflight limit", "agent_id", agent.ID, "max_inflight", maxInflight, "transport", "http")
 				continue
 			}
-			jobs, err := h.store.ListQueuedJobs(ctx, agent.ID, agent.Capabilities, agent.Protocols, remaining)
+			agentPolicies := h.policiesForHTTPAgent(agent)
+			policyCaps := policyCapabilities(agentPolicies, agent.Capabilities)
+			jobs, err := h.store.ListQueuedJobs(ctx, agent.ID, policyCaps, agent.Protocols, remaining)
 			if err != nil {
 				h.log.Warn("list http agent queued jobs", "agent_id", agent.ID, "err", err)
 				continue
 			}
 			for _, job := range jobs {
-				agentPolicies := h.policiesForHTTPAgent(agent)
 				p, ok := agentPolicies.Get(job.Tool)
 				if !ok {
 					h.log.Debug("skip http agent job with disabled tool", "job_id", job.ID, "tool", job.Tool)
@@ -285,7 +308,13 @@ func (h *Hub) httpAgentLoop(ctx context.Context, agent HTTPAgent) {
 	}
 }
 
-func (a *HTTPAgent) applyHealth(health httpAgentHealth) {
+func (a *HTTPAgent) applyHealth(health httpAgentHealth) error {
+	if health.AgentID == "" {
+		return errors.New("health agent id is required")
+	}
+	if health.AgentID != a.ID {
+		return fmt.Errorf("health agent id %q does not match configured id %q", health.AgentID, a.ID)
+	}
 	if health.Country != "" {
 		a.Country = health.Country
 	}
@@ -307,6 +336,7 @@ func (a *HTTPAgent) applyHealth(health httpAgentHealth) {
 	if health.Protocols != 0 {
 		a.Protocols = health.Protocols
 	}
+	return nil
 }
 
 func (h *Hub) upsertHTTPAgent(ctx context.Context, agent HTTPAgent, status model.AgentStatus) {
@@ -348,20 +378,20 @@ func (h *Hub) httpAgentRuntime() (time.Duration, int) {
 }
 
 func (h *Hub) httpAgentRuntimeForAgent(agent HTTPAgent) (time.Duration, int) {
-	_, runtime, _ := h.settingsForAgent(context.Background(), agent.ID)
+	_, runtime, _ := h.settingsForHTTPAgent(agent)
 	return time.Duration(runtime.HTTPMaxHealthIntervalSec) * time.Second, runtime.HTTPInvokeAttempts
 }
 
-func (h *Hub) httpAgentInflightLimitForAgent(agent HTTPAgent) int {
-	scheduler, _, _ := h.settingsForAgent(context.Background(), agent.ID)
-	if scheduler.HTTPMaxInflightPerAgent <= 0 {
-		return h.httpAgentInflightLimit()
+func (h *Hub) inflightLimitForHTTPAgent(agent HTTPAgent) int {
+	scheduler, _, _ := h.settingsForHTTPAgent(agent)
+	if scheduler.MaxInflightPerAgent <= 0 {
+		return h.inflightLimit()
 	}
-	return scheduler.HTTPMaxInflightPerAgent
+	return scheduler.MaxInflightPerAgent
 }
 
 func (h *Hub) pollIntervalForHTTPAgent(agent HTTPAgent) time.Duration {
-	scheduler, _, _ := h.settingsForAgent(context.Background(), agent.ID)
+	scheduler, _, _ := h.settingsForHTTPAgent(agent)
 	if scheduler.PollIntervalSec <= 0 {
 		return h.currentPollInterval()
 	}
@@ -369,8 +399,27 @@ func (h *Hub) pollIntervalForHTTPAgent(agent HTTPAgent) time.Duration {
 }
 
 func (h *Hub) policiesForHTTPAgent(agent HTTPAgent) policy.Set {
-	_, runtime, toolPolicies := h.settingsForAgent(context.Background(), agent.ID)
+	_, runtime, toolPolicies := h.settingsForHTTPAgent(agent)
 	return h.policiesSnapshot().WithIntersection(toolPolicies, runtime)
+}
+
+func (h *Hub) settingsForHTTPAgent(agent HTTPAgent) (config.Scheduler, config.Runtime, map[string]config.Policy) {
+	basePolicies := h.policiesSnapshot()
+	runtime := basePolicies.Runtime()
+	scheduler := h.schedulerSnapshot()
+	labels := agent.Labels
+	if len(labels) == 0 {
+		labels = model.NormalizeAgentLabels(agent.ID, model.AgentTransportHTTP, nil)
+	}
+	for _, cfg := range h.labelConfigsFor(labels) {
+		if cfg.Runtime != nil {
+			runtime = minRuntime(runtime, *cfg.Runtime)
+		}
+		if cfg.Scheduler != nil {
+			scheduler = minScheduler(scheduler, *cfg.Scheduler)
+		}
+	}
+	return scheduler, runtime, h.toolPoliciesForLabels(labels)
 }
 
 func nextHTTPAgentHealthInterval(current time.Duration, base time.Duration, maxInterval time.Duration) time.Duration {
@@ -406,9 +455,6 @@ func probeHTTPAgentHealth(parent context.Context, agent HTTPAgent) (httpAgentHea
 	if err != nil {
 		return httpAgentHealth{}, err
 	}
-	if agent.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+agent.Token)
-	}
 	resp, err := httpAgentHTTPClient(agent).Do(req)
 	if err != nil {
 		return httpAgentHealth{}, err
@@ -418,11 +464,22 @@ func probeHTTPAgentHealth(parent context.Context, agent HTTPAgent) (httpAgentHea
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpAgentHealth{}, fmt.Errorf("http agent health returned HTTP %d", resp.StatusCode)
 	}
-	return decodeHTTPAgentHealth(body), nil
+	health, err := decodeHTTPAgentHealth(body)
+	if err != nil {
+		return httpAgentHealth{}, err
+	}
+	if health.AgentID == "" {
+		return httpAgentHealth{}, errors.New("http agent health missing agent.id")
+	}
+	if health.AgentID != agent.ID {
+		return httpAgentHealth{}, fmt.Errorf("health agent id %q does not match configured id %q", health.AgentID, agent.ID)
+	}
+	return health, nil
 }
 
-func decodeHTTPAgentHealth(body []byte) httpAgentHealth {
+func decodeHTTPAgentHealth(body []byte) (httpAgentHealth, error) {
 	var raw struct {
+		Status  string          `json:"status"`
 		Version json.RawMessage `json:"version"`
 		Agent   struct {
 			ID           string             `json:"id"`
@@ -435,7 +492,10 @@ func decodeHTTPAgentHealth(body []byte) httpAgentHealth {
 		} `json:"agent"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return httpAgentHealth{}
+		return httpAgentHealth{}, fmt.Errorf("decode http agent health: %w", err)
+	}
+	if strings.TrimSpace(raw.Status) != "ok" {
+		return httpAgentHealth{}, fmt.Errorf("http agent health status %q is not ok", raw.Status)
 	}
 	return httpAgentHealth{
 		AgentID:      raw.Agent.ID,
@@ -446,7 +506,7 @@ func decodeHTTPAgentHealth(body []byte) httpAgentHealth {
 		Version:      httpAgentHealthVersion(raw.Version),
 		Capabilities: raw.Agent.Capabilities,
 		Protocols:    raw.Agent.Protocols,
-	}
+	}, nil
 }
 
 func httpAgentHealthVersion(raw json.RawMessage) string {
@@ -586,7 +646,7 @@ func callHTTPAgentOnce(ctx context.Context, agent HTTPAgent, spec *grpcwire.JobS
 
 	reader := bufio.NewReader(resp.Body)
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := readHTTPAgentNDJSONLine(reader)
 		if len(bytes.TrimSpace(line)) > 0 {
 			ev, decodeErr := decodeHTTPAgentLine(bytes.TrimSpace(line), spec.ID, agent.ID)
 			if decodeErr != nil {
@@ -600,6 +660,21 @@ func callHTTPAgentOnce(ctx context.Context, agent HTTPAgent, spec *grpcwire.JobS
 			}
 			return &httpAgentConnectionError{err: err}
 		}
+	}
+}
+
+func readHTTPAgentNDJSONLine(reader *bufio.Reader) ([]byte, error) {
+	var out []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		out = append(out, part...)
+		if len(out) > httpAgentNDJSONLineLimit {
+			return nil, fmt.Errorf("http agent event line exceeds %d bytes", httpAgentNDJSONLineLimit)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return out, err
 	}
 }
 
@@ -618,7 +693,7 @@ func httpAgentHTTPClient(agent HTTPAgent) *http.Client {
 	if agent.HTTPClient != nil {
 		return agent.HTTPClient
 	}
-	return http.DefaultClient
+	return fallbackHTTPAgentHTTPClient
 }
 
 func decodeHTTPAgentLine(line []byte, jobID string, agentID string) (grpcwire.ResultEvent, error) {

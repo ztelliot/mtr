@@ -46,8 +46,7 @@ export function capableAgents(agents: Agent[] | null | undefined, tool: Tool): A
     .filter(
       (agent) =>
         agent.status === "online" &&
-        Array.isArray(agent.capabilities) &&
-        agent.capabilities.includes(tool)
+        Boolean(agent.tools?.[tool])
     )
     .sort(compareAgents);
 }

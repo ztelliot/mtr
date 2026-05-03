@@ -32,7 +32,6 @@ export interface TokenToolScope {
 
 export interface Permissions {
   tools: Partial<Record<Tool, PermissionTool>>;
-  agents: string[];
   schedule_access: "none" | "read" | "write";
   manage_access?: "none" | "read" | "write";
 }
@@ -51,6 +50,7 @@ export interface RateLimitConfig {
   global: LimitSpec;
   ip: LimitSpec;
   cidr: CIDRSpec;
+  geoip: LimitSpec;
   tools?: Record<string, { global: LimitSpec; cidr: LimitSpec; ip: LimitSpec }>;
   exempt_cidrs?: string[];
 }
@@ -75,8 +75,7 @@ export interface RuntimeSettings {
 
 export interface SchedulerSettings {
   agent_offline_after_sec: number;
-  grpc_max_inflight_per_agent: number;
-  http_max_inflight_per_agent: number;
+  max_inflight_per_agent: number;
   poll_interval_sec: number;
 }
 
@@ -191,12 +190,14 @@ export interface AgentConfig {
   updated_at?: string;
 }
 
-export interface ManagedAgent extends Agent {
+export type ManagedAgent = Omit<Agent, "tools"> & {
+  tools?: Partial<Record<Tool, PermissionTool>>;
+  capabilities?: Tool[];
   type?: "grpc" | "http";
   transport: "grpc" | "http";
   config?: AgentConfig;
   http?: HTTPAgentConfig;
-}
+};
 
 export interface ManagedAgentLabelUpdate {
   id: string;
@@ -297,7 +298,7 @@ export interface Agent {
   isp?: string;
   version?: string;
   labels?: string[];
-  capabilities: Tool[];
+  tools: Partial<Record<Tool, PermissionTool>>;
   protocols: number;
   status: AgentStatus;
   last_seen_at: string;

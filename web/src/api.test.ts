@@ -10,6 +10,23 @@ describe("api client", () => {
     await expect(client.listAgents()).resolves.toEqual([]);
   });
 
+  it("fetches agents with node-level tool permissions", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify([{
+      id: "edge-1",
+      tools: { ping: { requires_agent: false } },
+      protocols: 3,
+      status: "online",
+      last_seen_at: "2026-04-25T00:00:00Z",
+      created_at: "2026-04-25T00:00:00Z"
+    }]), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+
+    const client = new ApiClient({ apiBaseUrl: "", apiToken: "token" });
+    await expect(client.listAgents()).resolves.toMatchObject([
+      { id: "edge-1", tools: { ping: { requires_agent: false } } }
+    ]);
+  });
+
   it("fetches geoip data through the API proxy", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ asn: 13335, org: "Cloudflare, Inc." }), { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
@@ -28,13 +45,12 @@ describe("api client", () => {
   });
 
   it("fetches token permissions", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ tools: { ping: { requires_agent: false } }, agents: ["*"], schedule_access: "read" }), { status: 200 }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ tools: { ping: { requires_agent: false } }, schedule_access: "read" }), { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
 
     const client = new ApiClient({ apiBaseUrl: "/api", apiToken: "token" });
     await expect(client.getPermissions()).resolves.toMatchObject({
       tools: { ping: { requires_agent: false } },
-      agents: ["*"],
       schedule_access: "read"
     });
   });

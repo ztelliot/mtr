@@ -68,6 +68,42 @@ func TestLimiterAppliesToolLimit(t *testing.T) {
 	}
 }
 
+func TestLimiterAppliesGeoIPGlobalOnly(t *testing.T) {
+	limiter := NewConfiguredLimiter(RateLimitConfig{
+		Global: Limit{RequestsPerMinute: 1, Burst: 1},
+		IP:     Limit{RequestsPerMinute: 1, Burst: 1},
+		CIDR:   CIDRLimit{Limit: Limit{RequestsPerMinute: 1, Burst: 1}, IPv4Prefix: 24, IPv6Prefix: 64},
+		GeoIP:  Limit{RequestsPerMinute: 10, Burst: 2},
+	})
+	if !limiter.AllowGeoIP() {
+		t.Fatal("first geoip request should pass")
+	}
+	if !limiter.AllowGeoIP() {
+		t.Fatal("second geoip request should use its own global bucket")
+	}
+	if limiter.AllowGeoIP() {
+		t.Fatal("third geoip request should hit geoip global limit")
+	}
+}
+
+func TestGeoIPLimitDoesNotConsumeRequestLimit(t *testing.T) {
+	limiter := NewConfiguredLimiter(RateLimitConfig{
+		Global: Limit{RequestsPerMinute: 10, Burst: 1},
+		IP:     Limit{RequestsPerMinute: 10, Burst: 1},
+		CIDR:   CIDRLimit{Limit: Limit{RequestsPerMinute: 10, Burst: 1}, IPv4Prefix: 24, IPv6Prefix: 64},
+		GeoIP:  Limit{RequestsPerMinute: 10, Burst: 10},
+	})
+	if !limiter.AllowGeoIP() || !limiter.AllowGeoIP() {
+		t.Fatal("geoip requests should pass independently")
+	}
+	if !limiter.AllowRequest("203.0.113.10") {
+		t.Fatal("first regular request should not be consumed by geoip")
+	}
+	if limiter.AllowRequest("203.0.113.11") {
+		t.Fatal("second regular request should hit regular global limit")
+	}
+}
+
 func TestLimiterAppliesToolIPLimit(t *testing.T) {
 	limiter := NewConfiguredLimiter(RateLimitConfig{
 		Global: Limit{RequestsPerMinute: 100, Burst: 100},

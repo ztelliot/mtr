@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -41,6 +42,10 @@ type geoIPResponse struct {
 }
 
 func (s *Server) getGeoIP(w http.ResponseWriter, r *http.Request) {
+	if !s.limiterSnapshot().AllowGeoIP() {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
 	rawIP, err := geoIPParamIP(chi.URLParam(r, "ip"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid ip")
@@ -69,7 +74,7 @@ func (s *Server) getGeoIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var upstream geoIPUpstreamResponse
-	if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, geoIPUpstreamBodyLimit+geoIPUpstreamBodyLimitPad)).Decode(&upstream); err != nil {
 		writeError(w, http.StatusBadGateway, "invalid geoip response")
 		return
 	}

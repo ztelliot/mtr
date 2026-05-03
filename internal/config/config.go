@@ -13,6 +13,8 @@ import (
 
 const (
 	AgentAllLabel      = "agent"
+	AgentGRPCLabel     = "agent:grpc"
+	AgentHTTPLabel     = "agent:http"
 	AgentIDLabelPrefix = "id:"
 )
 
@@ -74,6 +76,7 @@ type RateLimit struct {
 	Global      LimitSpec                `yaml:"global" json:"global"`
 	IP          LimitSpec                `yaml:"ip" json:"ip"`
 	CIDR        CIDRSpec                 `yaml:"cidr" json:"cidr"`
+	GeoIP       LimitSpec                `yaml:"geoip" json:"geoip"`
 	Tools       map[string]ToolLimitSpec `yaml:"tools" json:"tools,omitempty"`
 	ExemptCIDRs []string                 `yaml:"exempt_cidrs" json:"exempt_cidrs,omitempty"`
 }
@@ -109,10 +112,9 @@ type Runtime struct {
 }
 
 type Scheduler struct {
-	AgentOfflineAfterSec    int `yaml:"agent_offline_after_sec" json:"agent_offline_after_sec"`
-	GRPCMaxInflightPerAgent int `yaml:"grpc_max_inflight_per_agent" json:"grpc_max_inflight_per_agent"`
-	HTTPMaxInflightPerAgent int `yaml:"http_max_inflight_per_agent" json:"http_max_inflight_per_agent"`
-	PollIntervalSec         int `yaml:"poll_interval_sec" json:"poll_interval_sec"`
+	AgentOfflineAfterSec int `yaml:"agent_offline_after_sec" json:"agent_offline_after_sec"`
+	MaxInflightPerAgent  int `yaml:"max_inflight_per_agent" json:"max_inflight_per_agent"`
+	PollIntervalSec      int `yaml:"poll_interval_sec" json:"poll_interval_sec"`
 }
 
 type Policy struct {
@@ -534,11 +536,8 @@ func DefaultScheduler(cfg *Scheduler) {
 	if cfg.AgentOfflineAfterSec == 0 {
 		cfg.AgentOfflineAfterSec = 90
 	}
-	if cfg.GRPCMaxInflightPerAgent == 0 {
-		cfg.GRPCMaxInflightPerAgent = 4
-	}
-	if cfg.HTTPMaxInflightPerAgent == 0 {
-		cfg.HTTPMaxInflightPerAgent = 1
+	if cfg.MaxInflightPerAgent == 0 {
+		cfg.MaxInflightPerAgent = 4
 	}
 	if cfg.PollIntervalSec == 0 {
 		cfg.PollIntervalSec = 2
@@ -569,6 +568,12 @@ func DefaultRateLimit(cfg *RateLimit) {
 	}
 	if cfg.CIDR.IPv6Prefix == 0 {
 		cfg.CIDR.IPv6Prefix = 128
+	}
+	if cfg.GeoIP.RequestsPerMinute == 0 {
+		cfg.GeoIP.RequestsPerMinute = 120
+	}
+	if cfg.GeoIP.Burst == 0 {
+		cfg.GeoIP.Burst = 60
 	}
 }
 

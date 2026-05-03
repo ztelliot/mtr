@@ -90,11 +90,11 @@ Each HTTP Agent exposes `/invoke` when Agent config sets `mode: http` or
 `http_path_prefix` to serve these HTTP endpoints below a prefix such as `/api`
 or `/v1`; then include the same prefix in the managed Agent `base_url`. Server
 probes `/healthz` once at startup to learn version, region, provider,
-capabilities, protocols, and redaction settings, then uses `/healthz` again only
-during recovery after connection failures. HTTP Agent listener TLS is controlled
-by Agent `http_tls`; per-Agent TLS settings live on the managed HTTP Agent
-record. Client-side TLS verification checks the configured CA chain only, so
-in-cluster addresses do not need to match certificate SANs.
+capabilities, and protocols, then uses `/healthz` again only during recovery
+after connection failures. HTTP Agent listener TLS is controlled by Agent
+`http_tls`; per-Agent TLS settings live on the managed HTTP Agent record.
+Client-side TLS verification checks the configured CA chain only, so in-cluster
+addresses do not need to match certificate SANs.
 
 HTTP Agent contract:
 
@@ -258,7 +258,8 @@ URL to send every deployment to one canonical brand address, or set it to
 The Kubernetes examples include `deploy/web.yaml`, which deploys
 `ghcr.io/ztelliot/mtr-web:latest`, exposes it as the `mtr-web` Service, and
 mounts `mtr-web-config` over `/usr/share/caddy/config.json`. For a local
-cluster smoke test:
+cluster smoke test, first create the Secrets described in the Kubernetes
+deployment section, then apply the baseline resources:
 
 ```sh
 kubectl apply -k deploy
@@ -267,9 +268,10 @@ kubectl -n mtr port-forward svc/mtr-web 8081:80
 ```
 
 If you access the workbench at `http://localhost:8081`, set
-`apiBaseUrl` in `mtr-web-config` to `http://localhost:8080`, or put an Ingress
-or gateway in front of both services and route `/v1` to `mtr-server` and `/` to
-`mtr-web`.
+`apiBaseUrl` in `mtr-web-config` to `http://localhost:8080` and set `apiToken`
+to a valid API token. For public deployments, use a restricted frontend token
+rather than the initial admin token. Alternatively, put an Ingress or gateway
+in front of both services and route `/v1` to `mtr-server` and `/` to `mtr-web`.
 
 The `deploy/agent.yaml` DaemonSet can derive per-node Agent metadata from
 Kubernetes Node annotations without teaching the Agent binary about Kubernetes.
@@ -299,8 +301,9 @@ for IPv4, `2` for IPv6, and `3` for both. `capabilities` is a comma-separated
 tool list. If an annotation is missing, the init container writes the fallback
 value into the generated config.
 
-The workbench can create `ping`, `traceroute`, `mtr`, `http`, and `dns` jobs,
-list Agents, and stream structured job events from `/v1/jobs/<job-id>/stream`.
+The workbench can create `ping`, `traceroute`, `mtr`, `http`, `dns`, and
+`port` jobs, list Agents, and stream structured job events from
+`/v1/jobs/<job-id>/stream`.
 Ad-hoc `traceroute` and `mtr` jobs require an explicit Agent selection because
 the server requires `agent_id` for those tools. Scheduled jobs use
 `schedule_targets` labels instead of a single `agent_id`.
@@ -482,7 +485,6 @@ docker run -d --name mtr-agent \
   --pids-limit 256 \
   --cpus 1 \
   --memory 512m \
-  -e MTR_ID=edge-docker-1 \
   -v /etc/mtr/agent.yaml:/etc/mtr/agent.yaml:ro \
   -v /etc/mtr/tls/agent:/var/run/mtr/tls:ro \
   ghcr.io/ztelliot/mtr-agent:latest
@@ -497,10 +499,12 @@ file under that directory:
 ```
 
 The Agent in gRPC mode initiates the long-lived connection to Server and does
-not need an exposed port. Only add `-p 9000:9000` when running `mode: http` or
-`mode: grpc,http` and intentionally exposing `/invoke`, ideally behind a
-controlled gateway. Avoid `--network host` unless you explicitly need the host
-network perspective.
+not need an exposed port. Set the Agent's unique `id`, `server_addr`, and
+`register_token` in `/etc/mtr/agent.yaml`; config file values take precedence
+over `MTR_` environment variables. Only add `-p 9000:9000` when running
+`mode: http` or `mode: grpc,http` and intentionally exposing `/invoke`, ideally
+behind a controlled gateway. Avoid `--network host` unless you explicitly need
+the host network perspective.
 
 ## systemd Hardening
 
@@ -554,21 +558,25 @@ The repository now includes a baseline manifest set under `deploy/`:
 - `agent.yaml`: Agent `DaemonSet`, with each pod using its own pod name as `MTR_ID`
 - `networkpolicy.yaml`: denies inbound traffic to Agent pods
 - `secrets.example.yaml`: Secret templates with placeholders you should replace
-- `kustomization.yaml`: ready for `kubectl apply -k deploy`
+- `kustomization.yaml`: baseline resources for `kubectl apply -k deploy`; it
+  intentionally does not include `secrets.example.yaml`
 
 These manifests assume:
 
 - PostgreSQL is provided externally and injected through the `database-url` secret value.
 - The gRPC control plane uses `mtr-server.mtr.svc.cluster.local:8443`, so the example Server certificate SANs match that service DNS name.
 - All Agents share one client certificate, while each pod keeps a unique logical identity through `MTR_ID=metadata.name`.
+- Agent pods read their registration token from the `mtr-agent-env` Secret, and
+  that value must match an Agent register token stored in Server managed
+  settings.
 - Server stays at `replicas: 1`. The scheduler hub holds in-process connection state, so this baseline does not claim horizontal control-plane scaling.
 - API tokens, Agent register tokens, rate limits, global settings, label-based
   scheduler/runtime settings, label policies, and managed HTTP Agents are
   stored in Server managed settings. They are not read from the Kubernetes
   Server ConfigMap or Secret.
 
-You can either edit the placeholders in `deploy/secrets.example.yaml` or
-create the Secrets directly:
+You can edit the placeholders in `deploy/secrets.example.yaml` and apply that
+file before the baseline resources, or create the Secrets directly:
 
 ```sh
 kubectl apply -f deploy/namespace.yaml
@@ -581,11 +589,19 @@ kubectl -n mtr create secret generic mtr-server-tls \
   --from-file=tls.crt=certs/server.crt \
   --from-file=tls.key=certs/server.key
 
+kubectl -n mtr create secret generic mtr-agent-env \
+  --from-literal=register-token='<managed-register-token>'
+
 kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=ca.crt=certs/ca.crt \
   --from-file=tls.crt=certs/agent-shared.crt \
   --from-file=tls.key=certs/agent-shared.key
 ```
+
+`<managed-register-token>` is the token value returned by the Manage page or
+`/v1/manage/register-tokens`. On a fresh database, Server prints the initial
+admin API token on startup; use that token to create an Agent register token,
+then store the returned value in `mtr-agent-env`.
 
 Then apply the baseline resources:
 

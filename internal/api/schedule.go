@@ -24,7 +24,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req model.CreateScheduledJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -71,7 +71,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req model.CreateScheduledJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -190,7 +190,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 			scheduleVersion = literalVersion
 		}
 	}
-	scheduleTargets, err = s.authorizeScheduleTargets(r.Context(), createReq.Tool, scheduleVersion, scheduleTargets)
+	scheduleTargets, err = s.authorizeScheduleTargets(r.Context(), createReq, scheduleVersion, scheduleTargets)
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return scheduleRequestDetails{}, false
@@ -202,7 +202,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 	return scheduleRequestDetails{createReq: createReq, scheduleVersion: scheduleVersion, enabled: enabled, scheduleTargets: scheduleTargets}, true
 }
 
-func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
+func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJobRequest, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
 	scope := principalFromContext(ctx).scope
 	agents, err := s.agentsWithManagedLabels(ctx)
 	if err != nil {
@@ -211,6 +211,7 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, 
 	out := make([]model.ScheduleTarget, 0, len(targets))
 	for _, target := range targets {
 		matched := false
+		target.AllowedAgentIDs = nil
 		for _, agent := range agents {
 			if !scheduleTargetMatchesAgent(target.Label, agent) {
 				continue
@@ -218,13 +219,20 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, tool model.Tool, 
 			if !scopeAllowsAgentRecord(scope, agent) {
 				continue
 			}
-			if policy.AgentSupports(agent, tool, version) {
-				matched = true
-				target.AllowedAgentIDs = append(target.AllowedAgentIDs, agent.ID)
+			agentPolicies := s.policiesForLabels(agent.Labels)
+			if !policy.AgentSupports(agent, req.Tool, version) {
+				continue
 			}
+			validateReq := req
+			validateReq.AgentID = agent.ID
+			if _, err := agentPolicies.ValidateSchedule(validateReq); err != nil {
+				continue
+			}
+			matched = true
+			target.AllowedAgentIDs = append(target.AllowedAgentIDs, agent.ID)
 		}
 		if !matched {
-			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, tool)
+			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, req.Tool)
 		}
 		sort.Strings(target.AllowedAgentIDs)
 		out = append(out, target)

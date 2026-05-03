@@ -42,17 +42,11 @@ type ToolScope struct {
 
 type PermissionsResponse struct {
 	Tools          map[model.Tool]ToolPermission `json:"tools"`
-	Agents         []string                      `json:"agents"`
 	ScheduleAccess ScheduleAccess                `json:"schedule_access"`
 	ManageAccess   ScheduleAccess                `json:"manage_access"`
 }
 
-type ToolPermission struct {
-	AllowedArgs    map[string]string `json:"allowed_args,omitempty"`
-	ResolveOnAgent *bool             `json:"resolve_on_agent,omitempty"`
-	IPVersions     []model.IPVersion `json:"ip_versions,omitempty"`
-	RequiresAgent  bool              `json:"requires_agent"`
-}
+type ToolPermission = model.AgentToolPermission
 
 type principal struct {
 	token string
@@ -157,8 +151,58 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 
 func (s *Server) permissionsForContext(ctx context.Context) PermissionsResponse {
 	scope := principalFromContext(ctx).scope
+	tools := permissionsForPolicies(s.policiesForLabels([]string{model.AgentAllLabel}), scope)
+	return PermissionsResponse{
+		Tools:          tools,
+		ScheduleAccess: effectiveScheduleAccess(scope),
+		ManageAccess:   effectiveManageAccess(scope),
+	}
+}
+
+func (s *Server) agentToolPermissions(agent model.Agent, scope TokenScope) map[model.Tool]ToolPermission {
+	agentScope := scope
+	if !scope.All {
+		agentScope.Tools = allowedAgentToolsScope(s.policiesForLabels([]string{model.AgentAllLabel}), scope)
+	}
+	tools := permissionsForPolicies(s.policiesForLabels(agent.Labels), agentScope)
+	for tool, permission := range tools {
+		if !agentSupportsToolCapability(agent, tool) {
+			delete(tools, tool)
+			continue
+		}
+		if len(permission.IPVersions) > 0 {
+			filtered := permissionIPVersionsForAgent(permission.IPVersions, agent)
+			if len(filtered) == 0 {
+				delete(tools, tool)
+				continue
+			}
+			permission.IPVersions = filtered
+			tools[tool] = permission
+		}
+	}
+	return tools
+}
+
+func allowedAgentToolsScope(policies policy.Set, scope TokenScope) map[model.Tool]ToolScope {
+	out := make(map[model.Tool]ToolScope, len(scope.Tools))
+	for _, tool := range allTools() {
+		toolScope, ok := scope.Tools[tool]
+		if !ok {
+			continue
+		}
+		if _, ok := policies.Get(tool); !ok {
+			continue
+		}
+		if toolScope.AllowedArgs != nil {
+			toolScope.AllowedArgs = cloneStringMap(toolScope.AllowedArgs)
+		}
+		out[tool] = toolScope
+	}
+	return out
+}
+
+func permissionsForPolicies(policies policy.Set, scope TokenScope) map[model.Tool]ToolPermission {
 	tools := map[model.Tool]ToolPermission{}
-	policies := s.policiesForLabels([]string{model.AgentAllLabel})
 	for _, tool := range allTools() {
 		p, ok := policies.Get(tool)
 		if !ok {
@@ -175,12 +219,31 @@ func (s *Server) permissionsForContext(ctx context.Context) PermissionsResponse 
 			RequiresAgent:  requiresPinnedAgent(tool),
 		}
 	}
-	return PermissionsResponse{
-		Tools:          tools,
-		Agents:         permissionAgents(scope),
-		ScheduleAccess: effectiveScheduleAccess(scope),
-		ManageAccess:   effectiveManageAccess(scope),
+	return tools
+}
+
+func agentSupportsToolCapability(agent model.Agent, tool model.Tool) bool {
+	for _, capability := range agent.Capabilities {
+		if capability == tool {
+			return true
+		}
 	}
+	return false
+}
+
+func permissionIPVersionsForAgent(versions []model.IPVersion, agent model.Agent) []model.IPVersion {
+	protocols := agent.Protocols
+	if protocols == 0 {
+		protocols = model.ProtocolAll
+	}
+	out := make([]model.IPVersion, 0, len(versions))
+	for _, version := range versions {
+		required := policy.RequiredProtocol(version)
+		if required == 0 || protocols&required != 0 {
+			out = append(out, version)
+		}
+	}
+	return out
 }
 
 func (s *Server) scheduleReadAllowed(ctx context.Context) bool {
@@ -262,24 +325,6 @@ func scopeAllowsAllAgents(scope TokenScope) bool {
 		}
 	}
 	return false
-}
-
-func permissionAgents(scope TokenScope) []string {
-	if scopeAllowsAllAgents(scope) && len(scope.DeniedAgents) == 0 && len(scope.DeniedTags) == 0 {
-		return []string{"*"}
-	}
-	out := append([]string(nil), scope.Agents...)
-	for _, tag := range scope.AgentTags {
-		out = append(out, "tag:"+tag)
-	}
-	for _, denied := range scope.DeniedAgents {
-		out = append(out, "!"+denied)
-	}
-	for _, tag := range scope.DeniedTags {
-		out = append(out, "!tag:"+tag)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func stringListContains(values []string, want string) bool {
