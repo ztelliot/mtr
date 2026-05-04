@@ -52,6 +52,28 @@ http_tls:
 	}
 }
 
+func TestLoadAgentUsesEnvWithoutConfigFile(t *testing.T) {
+	t.Setenv("MTR_ID", "env-agent")
+	t.Setenv("MTR_MODE", "http")
+	t.Setenv("MTR_HTTP_ADDR", ":9100")
+	t.Setenv("MTR_HTTP_TOKEN", "env-http-token")
+	t.Setenv("MTR_HTTP_PATH_PREFIX", "env-api/")
+	t.Setenv("MTR_CAPABILITIES", "ping,dns")
+	t.Setenv("MTR_PROTOCOLS", "2")
+	t.Setenv("MTR_SPEEDTEST_MAX_BYTES", "2048")
+
+	cfg, err := LoadAgent(filepath.Join(t.TempDir(), "missing-agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ID != "env-agent" || cfg.Mode != "http" || cfg.HTTPAddr != ":9100" || cfg.HTTPToken != "env-http-token" || cfg.HTTPPathPrefix != "/env-api" {
+		t.Fatalf("env-only agent config not loaded: %#v", cfg)
+	}
+	if !reflect.DeepEqual(cfg.Capabilities, []string{"ping", "dns"}) || cfg.Protocols != 2 || cfg.Speedtest.MaxBytes != 2048 {
+		t.Fatalf("env-only agent config fields not loaded: %#v", cfg)
+	}
+}
+
 func TestLoadAgentNormalizesHTTPPathPrefix(t *testing.T) {
 	cfg, err := LoadAgent(writeConfig(t, `http_path_prefix: "api/v1/"`))
 	if err != nil {
@@ -93,6 +115,30 @@ http_addr: ":file"
 	}
 	if !reflect.DeepEqual(cfg.ClientIPHeaders, []string{"Eo-Connecting-Ip", "X-Client-IP-Secret"}) {
 		t.Fatalf("client ip headers env not loaded: %#v", cfg.ClientIPHeaders)
+	}
+}
+
+func TestLoadServerUsesEnvWithoutConfigFile(t *testing.T) {
+	t.Setenv("MTR_HTTP_ADDR", ":9999")
+	t.Setenv("MTR_GRPC_ADDR", ":9998")
+	t.Setenv("MTR_DATABASE_URL", "sqlite:/tmp/mtr.db")
+	t.Setenv("MTR_TLS_ENABLED", "true")
+	t.Setenv("MTR_TLS_CA_FILES", "/env/ca.pem,/env/cloudflare.pem")
+	t.Setenv("MTR_TRUSTED_PROXIES", "127.0.0.1,10.0.0.0/8")
+	t.Setenv("MTR_CLIENT_IP_HEADERS", "Eo-Connecting-Ip,X-Client-IP-Secret")
+
+	cfg, err := LoadServer(filepath.Join(t.TempDir(), "missing-server.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPAddr != ":9999" || cfg.GRPCAddr != ":9998" || cfg.DatabaseURL != "sqlite:/tmp/mtr.db" {
+		t.Fatalf("env-only server addresses not loaded: %#v", cfg)
+	}
+	if !cfg.TLS.Enabled || !reflect.DeepEqual(cfg.TLS.CAFiles, []string{"/env/ca.pem", "/env/cloudflare.pem"}) {
+		t.Fatalf("env-only server tls not loaded: %#v", cfg.TLS)
+	}
+	if !reflect.DeepEqual(cfg.TrustedProxies, []string{"127.0.0.1", "10.0.0.0/8"}) || !reflect.DeepEqual(cfg.ClientIPHeaders, []string{"Eo-Connecting-Ip", "X-Client-IP-Secret"}) {
+		t.Fatalf("env-only server lists not loaded: %#v", cfg)
 	}
 }
 

@@ -780,6 +780,9 @@ func splitEnvList(raw string) []string {
 func loadYAML(path string, out any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	var root yaml.Node
