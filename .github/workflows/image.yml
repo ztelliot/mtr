@@ -12,7 +12,6 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ghcr.io
   USERNAME: ztelliot
   REPO: mtr
 
@@ -49,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.go == 'true'
+    env:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     strategy:
       matrix:
         component: [agent, server]
@@ -60,18 +61,41 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Set image names
+        id: image-names
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          {
+            echo "images<<EOF"
+            echo "ghcr.io/${USERNAME}/${REPO}-${COMPONENT}"
+
+            if [ -n "$DOCKERHUB_TOKEN" ]; then
+              echo "${USERNAME}/${REPO}-${COMPONENT}"
+            fi
+
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.USERNAME }}/${{ env.REPO }}-${{ matrix.component }}
+          images: ${{ steps.image-names.outputs.images }}
           tags: |
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
@@ -104,6 +128,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.web == 'true'
+    env:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -112,18 +138,41 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Set image names
+        id: image-names
+        env:
+          COMPONENT: web
+        run: |
+          {
+            echo "images<<EOF"
+            echo "ghcr.io/${USERNAME}/${REPO}-${COMPONENT}"
+
+            if [ -n "$DOCKERHUB_TOKEN" ]; then
+              echo "${USERNAME}/${REPO}-${COMPONENT}"
+            fi
+
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.USERNAME }}/${{ env.REPO }}-web
+          images: ${{ steps.image-names.outputs.images }}
           tags: |
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
