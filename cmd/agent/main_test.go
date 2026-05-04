@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -61,7 +62,7 @@ func TestHTTPAgentInvokeStreamsResultEvents(t *testing.T) {
 	if _, ok := lines[0]["target"]; ok {
 		t.Fatalf("stream event should not repeat target: %#v", lines[0])
 	}
-	if lines[0]["type"] != "message" || lines[0]["message"] != "target_blocked" {
+	if lines[0]["type"] != model.JobErrorTargetBlocked || lines[0]["message"] != model.JobErrorTargetBlocked {
 		t.Fatalf("first event = %#v", lines[0])
 	}
 	last := lines[len(lines)-1]
@@ -97,6 +98,32 @@ func TestHTTPAgentInvokeRequiresBearerScheme(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bearer token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHTTPAgentRejectsUnsupportedProtocolBeforeRunning(t *testing.T) {
+	handler := newHTTPAgentHandler(config.Agent{ID: "edge-fc-1", HTTPToken: "secret", Protocols: uint8(model.ProtocolIPv4)}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := `{"id":"job-1","tool":"ping","target":"example.com","resolved_target":"2606:4700:4700::1111","ip_version":6,"args":{"count":"1"},"timeout_seconds":1}`
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	lines := decodeNDJSONLines(t, rec.Body.String())
+	if len(lines) != 2 {
+		t.Fatalf("expected rejection event and summary, got %#v", lines)
+	}
+	if lines[0]["type"] != model.JobErrorUnsupportedProtocol || lines[0]["message"] != model.JobErrorUnsupportedProtocol {
+		t.Fatalf("first event = %#v", lines[0])
+	}
+	metric, ok := lines[1]["metric"].(map[string]any)
+	if !ok || lines[1]["type"] != "summary" || lines[1]["exit_code"].(float64) == 0 || metric["status"] != model.JobErrorUnsupportedProtocol {
+		t.Fatalf("summary = %#v", lines[1])
 	}
 }
 
@@ -307,6 +334,30 @@ func TestAgentTargetVersionsPreferIPv6WhenAvailable(t *testing.T) {
 	}
 }
 
+func TestResolveAgentTargetRejectsResolvedTargetOutsideProtocols(t *testing.T) {
+	_, _, err := resolveAgentTarget(context.Background(), model.ToolPing, "example.com", "2606:4700:4700::1111", model.IPv6, false, 1, model.ProtocolIPv4)
+	if !errors.Is(err, errUnsupportedAgentProtocol) {
+		t.Fatalf("err = %v, want unsupported protocol", err)
+	}
+}
+
+func TestResolveAgentTargetRejectsAgentResolvedLiteralOutsideProtocols(t *testing.T) {
+	_, _, err := resolveAgentTarget(context.Background(), model.ToolPing, "2606:4700:4700::1111", "", model.IPAny, true, 1, model.ProtocolIPv4)
+	if !errors.Is(err, errUnsupportedAgentProtocol) {
+		t.Fatalf("err = %v, want unsupported protocol", err)
+	}
+}
+
+func TestResolveAgentTargetPinsDomainLookupForSingleStackAgent(t *testing.T) {
+	resolvedTarget, version, err := resolveAgentTarget(context.Background(), model.ToolPing, "example.com", "", model.IPAny, false, 1, model.ProtocolIPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedTarget != "" || version != model.IPv4 {
+		t.Fatalf("resolved target = %q version = %d", resolvedTarget, version)
+	}
+}
+
 func TestResolveAgentTargetFallsBackToIPv4WhenAgentIsIPv4Only(t *testing.T) {
 	resolvedTarget, version, err := resolveAgentTarget(context.Background(), model.ToolPing, "1.1.1.1", "", model.IPAny, true, 1, model.ProtocolIPv4)
 	if err != nil {
@@ -337,6 +388,23 @@ func TestSleepContextStopsOnCancel(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Fatal("canceled sleep took too long")
 	}
+}
+
+func decodeNDJSONLines(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("decode line: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return lines
 }
 
 func TestStartHTTPAgentServerRequiresHTTPToken(t *testing.T) {

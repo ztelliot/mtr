@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -343,11 +344,12 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 		resolvedTarget, resolvedVersion, err := resolveAgentTarget(req.Context(), spec.Tool, spec.Target, spec.ResolvedTarget, spec.IPVersion, spec.ResolveOnAgent, spec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
 		job := model.Job{ID: spec.ID, Tool: spec.Tool, Target: spec.Target, ResolvedTarget: resolvedTarget, Args: spec.Args, IPVersion: resolvedVersion, ResolveOnAgent: spec.ResolveOnAgent}
 		if err != nil {
-			_ = sendEvent(model.StreamEvent{Type: "message", Message: "target_blocked"})
-			parsed := &model.ToolResult{Tool: spec.Tool, Target: spec.Target, ExitCode: -1, Summary: map[string]any{"error": err.Error()}}
+			failureType := agentPreflightFailureType(err)
+			_ = sendEvent(model.StreamEvent{Type: failureType, Message: failureType})
+			parsed := agentPreflightFailureResult(job, err)
 			compactParsedResult(parsed)
 			_ = writeLine(parsed.WirePayload())
-			log.Warn("target blocked", "job_id", spec.ID, "err", err)
+			log.Warn("agent rejected job", "job_id", spec.ID, "failure_type", failureType, "err", err)
 			return
 		}
 
@@ -548,15 +550,11 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 				resolvedTarget, resolvedVersion, err := resolveAgentTarget(jobCtx, jobSpec.Tool, jobSpec.Target, jobSpec.ResolvedTarget, jobSpec.IPVersion, jobSpec.ResolveOnAgent, jobSpec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
 				job := model.Job{ID: jobSpec.ID, Tool: jobSpec.Tool, Target: jobSpec.Target, ResolvedTarget: resolvedTarget, Args: jobSpec.Args, IPVersion: resolvedVersion, ResolveOnAgent: jobSpec.ResolveOnAgent}
 				if err != nil {
-					parsed := &model.ToolResult{
-						Tool:     job.Tool,
-						Target:   job.Target,
-						ExitCode: -1,
-						Summary:  map[string]any{"error": err.Error()},
-					}
-					_ = sendStreamEvent(stream, &sendMu, jobSpec.ID, model.StreamEvent{Type: "message", Message: "target_blocked"})
+					failureType := agentPreflightFailureType(err)
+					parsed := agentPreflightFailureResult(job, err)
+					_ = sendStreamEvent(stream, &sendMu, jobSpec.ID, model.StreamEvent{Type: failureType, Message: failureType})
 					sendParsed(stream, &sendMu, jobSpec.ID, parsed)
-					log.Warn("target blocked", "job_id", jobSpec.ID, "err", err)
+					log.Warn("agent rejected job", "job_id", jobSpec.ID, "failure_type", failureType, "err", err)
 					return
 				}
 				log.Debug("job start", "job_id", job.ID, "tool", job.Tool)
@@ -607,15 +605,33 @@ func sleepContext(ctx context.Context, delay time.Duration) bool {
 }
 
 func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, resolvedTarget string, version model.IPVersion, resolveOnAgent bool, resolveTimeoutSeconds int, protocols model.ProtocolMask) (string, model.IPVersion, error) {
+	protocols = normalizeAgentProtocols(protocols)
 	if resolveOnAgent {
+		if literalVersion, literal, err := policy.LiteralIPVersion(tool, target); err != nil {
+			return "", model.IPAny, err
+		} else if literal {
+			if err := policy.ValidateLiteralTarget(ctx, tool, target, version); err != nil {
+				return "", model.IPAny, err
+			}
+			if err := validateAgentProtocol(literalVersion, protocols); err != nil {
+				return "", literalVersion, err
+			}
+		}
 		runtime := config.DefaultRuntime()
 		if resolveTimeoutSeconds > 0 {
 			runtime.ResolveTimeoutSec = resolveTimeoutSeconds
 		}
 		var lastErr error
-		for _, candidate := range agentTargetVersions(version, protocols) {
+		candidates := agentTargetVersions(version, protocols)
+		if len(candidates) == 0 {
+			return "", version, errUnsupportedAgentProtocol
+		}
+		for _, candidate := range candidates {
 			resolvedTarget, resolvedVersion, err := policy.ResolveTargetWithRuntime(ctx, tool, target, candidate, runtime)
 			if err == nil {
+				if err := validateAgentProtocol(resolvedVersion, protocols); err != nil {
+					return "", resolvedVersion, err
+				}
 				return resolvedTarget, resolvedVersion, nil
 			}
 			lastErr = err
@@ -623,7 +639,7 @@ func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, res
 		if lastErr != nil {
 			return "", model.IPAny, lastErr
 		}
-		return "", model.IPAny, fmt.Errorf("agent does not support requested IP version")
+		return "", version, errUnsupportedAgentProtocol
 	}
 	if resolvedTarget != "" {
 		if err := policy.ValidateResolvedIP(resolvedTarget, version); err != nil {
@@ -639,18 +655,33 @@ func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, res
 				}
 			}
 		}
+		if err := validateAgentProtocol(resolvedVersion, protocols); err != nil {
+			return "", resolvedVersion, err
+		}
 		return resolvedTarget, resolvedVersion, nil
+	}
+	literalVersion, literal, err := policy.LiteralIPVersion(tool, target)
+	if err != nil {
+		return "", model.IPAny, err
 	}
 	if err := policy.ValidateLiteralTarget(ctx, tool, target, version); err != nil {
 		return "", model.IPAny, err
+	}
+	if literal {
+		if err := validateAgentProtocol(literalVersion, protocols); err != nil {
+			return "", literalVersion, err
+		}
+		return "", literalVersion, nil
+	}
+	version, err = agentExecutionVersion(version, protocols)
+	if err != nil {
+		return "", version, err
 	}
 	return "", version, nil
 }
 
 func agentTargetVersions(version model.IPVersion, protocols model.ProtocolMask) []model.IPVersion {
-	if protocols == 0 {
-		protocols = model.ProtocolAll
-	}
+	protocols = normalizeAgentProtocols(protocols)
 	switch version {
 	case model.IPv4:
 		if protocols&model.ProtocolIPv4 == 0 {
@@ -671,6 +702,70 @@ func agentTargetVersions(version model.IPVersion, protocols model.ProtocolMask) 
 			out = append(out, model.IPv4)
 		}
 		return out
+	}
+}
+
+var errUnsupportedAgentProtocol = errors.New(model.JobErrorUnsupportedProtocol)
+
+func normalizeAgentProtocols(protocols model.ProtocolMask) model.ProtocolMask {
+	if protocols == 0 {
+		return model.ProtocolAll
+	}
+	return protocols
+}
+
+func validateAgentProtocol(version model.IPVersion, protocols model.ProtocolMask) error {
+	required := policy.RequiredProtocol(version)
+	if required == 0 {
+		return nil
+	}
+	if normalizeAgentProtocols(protocols)&required == 0 {
+		return errUnsupportedAgentProtocol
+	}
+	return nil
+}
+
+func agentExecutionVersion(version model.IPVersion, protocols model.ProtocolMask) (model.IPVersion, error) {
+	if version == model.IPv4 || version == model.IPv6 {
+		if err := validateAgentProtocol(version, protocols); err != nil {
+			return version, err
+		}
+		return version, nil
+	}
+	protocols = normalizeAgentProtocols(protocols)
+	hasIPv4 := protocols&model.ProtocolIPv4 != 0
+	hasIPv6 := protocols&model.ProtocolIPv6 != 0
+	switch {
+	case hasIPv4 && hasIPv6:
+		return version, nil
+	case hasIPv6:
+		return model.IPv6, nil
+	case hasIPv4:
+		return model.IPv4, nil
+	default:
+		return version, errUnsupportedAgentProtocol
+	}
+}
+
+func agentPreflightFailureType(err error) string {
+	if errors.Is(err, errUnsupportedAgentProtocol) || model.PublicJobErrorType(err.Error()) == model.JobErrorUnsupportedProtocol {
+		return model.JobErrorUnsupportedProtocol
+	}
+	return model.JobErrorTargetBlocked
+}
+
+func agentPreflightFailureResult(job model.Job, err error) *model.ToolResult {
+	failureType := agentPreflightFailureType(err)
+	summary := map[string]any{"status": failureType}
+	if err != nil {
+		summary["error"] = err.Error()
+	}
+	return &model.ToolResult{
+		Tool:      job.Tool,
+		Target:    job.Target,
+		IPVersion: job.IPVersion,
+		ExitCode:  -1,
+		Summary:   summary,
 	}
 }
 

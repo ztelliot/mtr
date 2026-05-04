@@ -408,6 +408,45 @@ func TestHandleResultAcceptsAssignedInflightAgent(t *testing.T) {
 	}
 }
 
+func TestHandleResultUsesParsedFailureType(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	now := time.Now().UTC()
+	job := model.Job{
+		ID:        "job-unsupported-protocol",
+		Tool:      model.ToolPing,
+		Target:    "2606:4700:4700::1111",
+		AgentID:   "edge-v4",
+		IPVersion: model.IPv6,
+		Status:    model.JobRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: &now,
+	}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	hub.markInflight("edge-v4", job.ID)
+
+	hub.handleResult(ctx, "edge-v4", grpcwire.ResultEvent{
+		JobID: job.ID,
+		Event: map[string]any{
+			"type":      "summary",
+			"exit_code": -1,
+			"metric":    map[string]any{"status": model.JobErrorUnsupportedProtocol},
+		},
+	})
+
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.JobFailed || got.Error != model.JobErrorUnsupportedProtocol {
+		t.Fatalf("unsupported protocol failure should be preserved: %#v", got)
+	}
+}
+
 func TestFailTimedOutJobsDefersFanoutParentToChildren(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

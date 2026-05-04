@@ -613,7 +613,10 @@ func (h *Hub) handleResult(ctx context.Context, agentID string, ev grpcwire.Resu
 		msg := ""
 		if *jobEvent.ExitCode != 0 {
 			status = model.JobFailed
-			msg = "agent tool failed"
+			msg = model.JobErrorToolFailed
+			if failureType := parsedFailureType(jobEvent.Parsed); failureType != "" {
+				msg = failureType
+			}
 		}
 		if err := h.store.UpdateJobStatus(ctx, ev.JobID, status, msg); err != nil {
 			h.log.Warn("update completed job status failed", "agent_id", agentID, "job_id", ev.JobID, "status", status, "err", err)
@@ -925,6 +928,22 @@ func (h *Hub) summaryEventFromWire(job model.Job, payload map[string]any) (model
 		parsed.Hops = hops
 	}
 	return model.JobEvent{ExitCode: &parsed.ExitCode, Parsed: parsed}, nil
+}
+
+func parsedFailureType(parsed *model.ToolResult) string {
+	if parsed == nil {
+		return ""
+	}
+	value, ok := parsed.Summary["status"].(string)
+	if !ok {
+		return ""
+	}
+	switch value {
+	case model.JobErrorTargetBlocked, model.JobErrorUnsupportedProtocol, model.JobErrorUnsupportedTool:
+		return value
+	default:
+		return ""
+	}
 }
 
 func metricMapFromPayload(v any) (map[string]any, bool) {
