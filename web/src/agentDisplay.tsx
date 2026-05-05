@@ -1,9 +1,11 @@
 import { Badge, Stack, Text } from "@mantine/core";
 import type { Agent } from "./types";
 
-export function ProviderCell({ provider, isp, fallback = "-", protocols }: { provider?: string; isp?: string; fallback?: string; protocols?: number }) {
-  const label = primaryISPLabel(isp, fallback);
-  const note = providerNote(provider, label);
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+export function ProviderCell({ provider, isp, fallback = "-", protocols, t }: { provider?: string; isp?: string; fallback?: string; protocols?: number; t?: Translate }) {
+  const label = primaryISPLabel(isp, fallback, t);
+  const note = providerNote(provider, cleanLabel(isp) || fallback);
   return (
     <Stack className="provider-cell" gap={0}>
       <Text className="mono-label provider-primary">
@@ -19,29 +21,29 @@ export function ProviderCell({ provider, isp, fallback = "-", protocols }: { pro
   );
 }
 
-export function agentSelectLabel(agent: Agent): string {
-  return `${agent.region || agent.status} · ${agentISPLabel(agent)}`;
+export function agentSelectLabel(agent: Agent, t?: Translate): string {
+  return `${agentRegionOrFallback(agent.region, agent.status, t)} · ${agentISPLabel(agent, t)}`;
 }
 
-export function agentLocationProviderLabel(agent: Agent): string {
-  return `${agentLocationLabel(agent.region || agent.id, agent.protocols)} · ${agentISPProviderLabel(agent)}`;
+export function agentLocationProviderLabel(agent: Agent, t?: Translate): string {
+  return `${agentLocationLabel(agentRegionOrFallback(agent.region, agent.id, t), agent.protocols)} · ${agentISPProviderLabel(agent, t)}`;
 }
 
-export function agentISPProviderLabel(agent: Agent): string {
-  return withProviderNote(primaryISPLabel(agent.isp, agent.name || agent.id), agent.provider);
+export function agentISPProviderLabel(agent: Agent, t?: Translate): string {
+  return withProviderNote(primaryISPLabel(agent.isp, agent.name || agent.id, t), agent.provider, cleanLabel(agent.isp) || agent.name || agent.id);
 }
 
-export function ispProviderLabel({ isp, provider, fallback = "-" }: { isp?: string; provider?: string; fallback?: string }): string {
-  return withProviderNote(primaryISPLabel(isp, fallback), provider);
+export function ispProviderLabel({ isp, provider, fallback = "-", t }: { isp?: string; provider?: string; fallback?: string; t?: Translate }): string {
+  return withProviderNote(primaryISPLabel(isp, fallback, t), provider, cleanLabel(isp) || fallback);
 }
 
-export function ispProtocolLabel({ isp, fallback = "-", protocols }: { isp?: string; fallback?: string; protocols?: number }): string {
-  return withProtocolSuffix(primaryISPLabel(isp, fallback), protocols);
+export function ispProtocolLabel({ isp, fallback = "-", protocols, t }: { isp?: string; fallback?: string; protocols?: number; t?: Translate }): string {
+  return withProtocolSuffix(primaryISPLabel(isp, fallback, t), protocols);
 }
 
-export function ispProtocolProviderLabel({ isp, provider, fallback = "-", protocols }: { isp?: string; provider?: string; fallback?: string; protocols?: number }): string {
-  const label = primaryISPLabel(isp, fallback);
-  return withProviderNote(withProtocolSuffix(label, protocols), provider, label);
+export function ispProtocolProviderLabel({ isp, provider, fallback = "-", protocols, t }: { isp?: string; provider?: string; fallback?: string; protocols?: number; t?: Translate }): string {
+  const label = primaryISPLabel(isp, fallback, t);
+  return withProviderNote(withProtocolSuffix(label, protocols), provider, cleanLabel(isp) || fallback);
 }
 
 export function agentLocationLabel(label: string, protocols?: number): string {
@@ -62,8 +64,21 @@ function agentProtocolSuffix(protocols?: number): "v4" | "v6" | null {
   return null;
 }
 
-function agentISPLabel(agent: Agent): string {
-  return withProtocolSuffix(primaryISPLabel(agent.isp, agent.name || agent.id), agent.protocols);
+export function agentRegionLabel(region: string | undefined, t?: Translate): string {
+  return localizedAgentLabel("agentRegions", region, t);
+}
+
+export function agentISPDisplayLabel(isp: string | undefined, t?: Translate): string {
+  return localizedAgentLabel("agentISPs", isp, t);
+}
+
+function agentRegionOrFallback(region: string | undefined, fallback: string, t?: Translate): string {
+  const label = cleanLabel(region);
+  return label ? agentRegionLabel(label, t) : cleanLabel(fallback) || "-";
+}
+
+function agentISPLabel(agent: Agent, t?: Translate): string {
+  return withProtocolSuffix(primaryISPLabel(agent.isp, agent.name || agent.id, t), agent.protocols);
 }
 
 function ProtocolSuffix({ protocols }: { protocols?: number }) {
@@ -71,8 +86,9 @@ function ProtocolSuffix({ protocols }: { protocols?: number }) {
   return suffix ? <span className="agent-protocol-suffix">[{suffix}]</span> : null;
 }
 
-function primaryISPLabel(isp: string | undefined, fallback: string): string {
-  return cleanLabel(isp) || cleanLabel(fallback) || "-";
+function primaryISPLabel(isp: string | undefined, fallback: string, t?: Translate): string {
+  const label = cleanLabel(isp);
+  return label ? agentISPDisplayLabel(label, t) : cleanLabel(fallback) || "-";
 }
 
 function providerNote(provider: string | undefined, label: string): string | null {
@@ -97,7 +113,26 @@ function cleanLabel(value: string | undefined): string {
   return value?.trim() ?? "";
 }
 
-export function RegionCell({ country, region, protocols }: { country?: string; region: string; protocols?: number }) {
+function localizedAgentLabel(namespace: "agentRegions" | "agentISPs", value: string | undefined, t?: Translate): string {
+  const label = cleanLabel(value);
+  if (!label || !t) {
+    return label;
+  }
+  const key = `${namespace}.${agentLabelKey(label)}`;
+  const translated = t(key);
+  return translated === key ? label : translated;
+}
+
+function agentLabelKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function RegionCell({ country, region, protocols, t }: { country?: string; region: string; protocols?: number; t?: Translate }) {
   const flagCountry = flagCountryCode(country);
   return (
     <span className="region-cell">
@@ -116,7 +151,7 @@ export function RegionCell({ country, region, protocols }: { country?: string; r
         />
       )}
       <span>
-        {region}
+        {agentRegionLabel(region, t)}
       </span>
     </span>
   );

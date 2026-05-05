@@ -48,8 +48,8 @@ export function NodeResultTable({
           </Table.Thead>
           <Table.Tbody>{nodeRows(rows, 11, t("results.noPingRows"), (row) => (
             <>
-              <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
+              <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} t={t} /></Table.Td>
+              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} t={t} /></Table.Td>
               <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>
               <Table.Td className="metric-column">{formatPercent(row.lossPct)}</Table.Td>
               <Table.Td className="sent-column">{row.sent ?? "-"}</Table.Td>
@@ -103,8 +103,8 @@ export function NodeResultTable({
         <Table.Tbody>
           {nodeRows(rows, tool === "dns" ? 3 : tool === "port" ? 5 : showHTTPDownloadMetrics ? 11 : 9, t("results.noPingRows"), (row) => (
             <>
-              <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
+              <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} t={t} /></Table.Td>
+              <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} t={t} /></Table.Td>
               {tool === "dns" && <Table.Td className="ip-column"><DNSRecordsCell records={row.records} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>}
               {tool === "port" && <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>}
               {tool === "port" && <Table.Td className="time-column">{formatMS(row.connectMS)}</Table.Td>}
@@ -162,8 +162,8 @@ export function MtrResultTable({
           <div className="mtr-agent-value">
             {agent ? (
               <>
-                <RegionCell country={agent.country} region={agent.region || "-"} protocols={agent.protocols} />
-                <ProviderCell provider={agent.provider} isp={agent.isp} fallback={agent.name || agent.id} protocols={agent.protocols} />
+                <RegionCell country={agent.country} region={agent.region || "-"} protocols={agent.protocols} t={t} />
+                <ProviderCell provider={agent.provider} isp={agent.isp} fallback={agent.name || agent.id} protocols={agent.protocols} t={t} />
               </>
             ) : (
               <span>-</span>

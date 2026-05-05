@@ -549,6 +549,10 @@ th.manage-table-actions {
   text-transform: none;
 }
 
+.manage-tool-badges .mantine-Badge-root {
+  text-transform: none;
+}
+
 .manage-table .mantine-ActionIcon-root {
   --ai-size: 30px;
   height: 30px;

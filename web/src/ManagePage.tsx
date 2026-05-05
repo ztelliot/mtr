@@ -782,7 +782,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
                           <Table.Td><Text className="manage-token-secret" fw={600}>{token.secret || "********"}</Text></Table.Td>
                           <Table.Td><TokenAccessBadges token={token} t={t} /></Table.Td>
                           <Table.Td>{tokenScopeLabel(token)}</Table.Td>
-                          <Table.Td>{token.all ? "*" : Object.keys(token.tools ?? {}).join(", ") || "-"}</Table.Td>
+                          <Table.Td><TokenToolBadges token={token} /></Table.Td>
                           <Table.Td className="manage-table-actions">
                             <Group gap="xs" justify="flex-end">
                               <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editToken(token, index)}><Pencil size={16} /></ActionIcon></Tooltip>
@@ -865,7 +865,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
                       <Table.Td><Text fw={600}>{row.label}</Text></Table.Td>
                       <Table.Td>{row.count}</Table.Td>
                       <Table.Td><ConfigBadges config={row.config} t={t} /></Table.Td>
-                      <Table.Td>{hasPolicies(row.config.tool_policies) ? Object.keys(row.config.tool_policies ?? {}).join(", ") : "-"}</Table.Td>
+                      <Table.Td><ToolPolicyBadges policies={row.config.tool_policies} /></Table.Td>
                       <Table.Td className="manage-table-actions">
                         <Group gap="xs" justify="flex-end">
                           <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => openLabelModal(row.label)}><Pencil size={16} /></ActionIcon></Tooltip>
@@ -1336,6 +1336,48 @@ function ConfigBadges({ config, t }: { config: LabelConfigSettings; t: (key: str
   );
 }
 
+function TokenToolBadges({ token }: { token: APITokenPermission }) {
+  if (token.all) {
+    return (
+      <Group className="manage-tool-badges" gap={6}>
+        <Badge color="green" radius="sm" variant="light">*</Badge>
+      </Group>
+    );
+  }
+  return <ToolBadges selected={selectedTools(token.tools)} />;
+}
+
+function ToolPolicyBadges({ policies }: { policies?: Partial<Record<Tool, PolicySettings>> }) {
+  const selected = selectedTools(policies);
+  if (selected.length === 0) {
+    return <Text c="dimmed">-</Text>;
+  }
+  return (
+    <Group className="manage-tool-badges" gap={6}>
+      {selected.map((tool) => (
+        <Badge key={tool} color={policies?.[tool]?.enabled === false ? "red" : "blue"} radius="sm" variant="light">
+          {tool}
+        </Badge>
+      ))}
+    </Group>
+  );
+}
+
+function ToolBadges({ selected }: { selected: Tool[] }) {
+  if (selected.length === 0) {
+    return <Text c="dimmed">-</Text>;
+  }
+  return (
+    <Group className="manage-tool-badges" gap={6}>
+      {selected.map((tool) => (
+        <Badge key={tool} color="blue" radius="sm" variant="light">
+          {tool}
+        </Badge>
+      ))}
+    </Group>
+  );
+}
+
 function upsertManagedHTTPAgent(httpAgents: ManagedAgent[], node: HTTPAgentConfig): ManagedAgent[] {
   const next = httpAgents.filter((item) => item.id !== node.id);
   next.push(managedHTTPAgentFromConfig(node, httpAgents.find((item) => item.id === node.id)));
@@ -1686,8 +1728,8 @@ function statusValueLabel(value: string, t: (key: string) => string): string {
   return translated === key ? value : translated;
 }
 
-function hasPolicies(policies?: Partial<Record<Tool, PolicySettings>>): boolean {
-  return Boolean(policies && Object.keys(policies).length > 0);
+function selectedTools(record?: Partial<Record<Tool, unknown>>): Tool[] {
+  return tools.filter((tool) => record?.[tool] !== undefined);
 }
 
 function defaultAllowedArgs(tool: Tool): Record<string, string> {

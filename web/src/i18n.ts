@@ -16,7 +16,7 @@ export const resources = {
         http: "HTTP",
         schedules: "Watch",
         manage: "Manage",
-        traceroute: "Trace"
+        traceroute: "Trace",
       },
       form: {
         target: "目标",
@@ -35,7 +35,7 @@ export const resources = {
         targetPlaceholderHost: "主机",
         targetPlaceholderHttp: "http(s)://主机(:端口)(/路径)",
         targetPlaceholderPort: "主机:端口",
-        noAvailableAgents: "无可用节点"
+        noAvailableAgents: "无可用节点",
       },
       status: {
         tokenReady: "Token 已配置",
@@ -43,7 +43,7 @@ export const resources = {
         agentsOnline: "{{online}}/{{total}} 节点在线",
         streamLive: "运行",
         streamClosed: "空闲",
-        idle: "待运行"
+        idle: "待运行",
       },
       statusValues: {
         queued: "排队",
@@ -58,7 +58,7 @@ export const resources = {
         enabled: "启用",
         disabled: "禁用",
         timeout: "超时",
-        error: "错误"
+        error: "错误",
       },
       results: {
         title: "结果",
@@ -106,11 +106,63 @@ export const resources = {
         httpCode: "状态码",
         total: "总耗时",
         chart: "图表",
-        noPingRows: "运行后将按节点显示结果"
+        noPingRows: "运行后将按节点显示结果",
+      },
+      agentRegions: {
+        local: "本地",
+        edge: "边缘",
+        hangzhou: "杭州",
+        ningbo: "宁波",
+        shanghai: "上海",
+        qingdao: "青岛",
+        beijing: "北京",
+        zhangjiakou: "张家口",
+        huhehaote: "呼和浩特",
+        wulanchabu: "乌兰察布",
+        shenzhen: "深圳",
+        chengdu: "成都",
+        guangzhou: "广州",
+        nanjing: "南京",
+        chongqing: "重庆",
+        shiyan: "十堰",
+        yichun: "宜春",
+        zhenjiang: "镇江",
+        "hong-kong": "香港",
+        macau: "澳门",
+        taipei: "台北",
+        changhua: "彰化",
+        singapore: "新加坡",
+        "kuala-lumpur": "吉隆坡",
+        johor: "柔佛",
+        "ho-chi-minh": "胡志明",
+        jakarta: "雅加达",
+        bangkok: "曼谷",
+        tokyo: "东京",
+        osaka: "大阪",
+        seoul: "首尔",
+        frankfurt: "法兰克福",
+        london: "伦敦",
+        norrbotten: "诺尔博滕",
+        virginia: "弗吉尼亚",
+        "silicon-valley": "硅谷",
+        oregon: "俄勒冈",
+        dubai: "迪拜",
+        riyadh: "利雅得",
+        ashburn: "阿什本",
+        saopaulo: "圣保罗",
+        gauteng: "豪登",
+      },
+      agentISPs: {
+        aliyun: "阿里云",
+        ctyun: "天翼云",
+        qcloud: "腾讯云",
+        ct: "电信",
+        cu: "联通",
+        cm: "移动",
       },
       theme: {
         light: "浅色",
-        dark: "夜间"
+        dark: "夜间",
       },
       footer: {
         copyright: "© {{year}} {{brand}}",
@@ -118,14 +170,14 @@ export const resources = {
         frontendVersion: "前端 {{version}}",
         serverVersion: "后端 {{version}}",
         versionUnknown: "未知",
-        versionSettings: "版本信息"
+        versionSettings: "版本信息",
       },
       token: {
         title: "调试",
         apiBaseUrl: "API 地址",
         apiToken: "API Token",
         savedTitle: "Token 已更新",
-        savedMessage: "后续请求将使用新的 API 设置"
+        savedMessage: "后续请求将使用新的 API 设置",
       },
       schedule: {
         name: "名称",
@@ -189,7 +241,7 @@ export const resources = {
         updatedMessage: "修改将在下次运行时生效",
         deletedTitle: "任务已删除",
         deletedMessage: "该任务不会继续运行",
-        deleteConfirm: "删除任务 {{name}}？"
+        deleteConfirm: "删除任务 {{name}}？",
       },
       manage: {
         httpAgents: "HTTP Agent",
@@ -320,12 +372,12 @@ export const resources = {
         yes: "是",
         no: "否",
         requestsPerMinute: "RPM",
-        burst: "突发"
+        burst: "突发",
       },
       actions: {
         add: "添加",
         cancel: "取消",
-        save: "保存"
+        save: "保存",
       },
       errors: {
         requestFailed: "请求失败",
@@ -350,7 +402,7 @@ export const resources = {
         targetAddressNotIPv4: "目标地址 {{address}} 不是 IPv4",
         targetAddressNotIPv6: "目标地址 {{address}} 不是 IPv6",
         agentNotAllowed: "无权限",
-        optionNotAllowed: "无权限"
+        optionNotAllowed: "无权限",
       },
       apiErrors: {
         invalidApiToken: "API Token 无效",
@@ -389,7 +441,7 @@ export const resources = {
         targetAddressNotIPv4: "目标地址 {{address}} 不是 IPv4",
         targetAddressNotIPv6: "目标地址 {{address}} 不是 IPv6",
         geoipUpstreamHTTP: "GeoIP 上游返回 HTTP {{status}}",
-        unexpected: "发生未知错误"
+        unexpected: "发生未知错误",
       },
       jobErrorTypes: {
         target_blocked: "所选节点不支持该目标或 IP 版本",
@@ -399,10 +451,10 @@ export const resources = {
         job_timeout: "任务超时",
         tool_failed: "节点执行任务失败",
         fanout_failed: "部分节点执行任务失败",
-        job_failed: "任务失败"
+        job_failed: "任务失败",
       },
-      language: "语言"
-    }
+      language: "语言",
+    },
   },
   "en-US": {
     translation: {
@@ -415,7 +467,7 @@ export const resources = {
         http: "HTTP",
         schedules: "Watch",
         manage: "Manage",
-        traceroute: "Trace"
+        traceroute: "Trace",
       },
       form: {
         target: "Target",
@@ -434,7 +486,7 @@ export const resources = {
         targetPlaceholderHost: "host",
         targetPlaceholderHttp: "http(s)://host(:port)(/path)",
         targetPlaceholderPort: "host:port",
-        noAvailableAgents: "No available agents"
+        noAvailableAgents: "No available agents",
       },
       status: {
         tokenReady: "Token configured",
@@ -442,7 +494,7 @@ export const resources = {
         agentsOnline: "{{online}}/{{total}} agents online",
         streamLive: "running",
         streamClosed: "idle",
-        idle: "idle"
+        idle: "idle",
       },
       statusValues: {
         queued: "queued",
@@ -457,7 +509,7 @@ export const resources = {
         enabled: "enabled",
         disabled: "disabled",
         timeout: "timeout",
-        error: "error"
+        error: "error",
       },
       results: {
         title: "Results",
@@ -505,11 +557,13 @@ export const resources = {
         httpCode: "Code",
         total: "Total",
         chart: "Chart",
-        noPingRows: "Run to see per-node results"
+        noPingRows: "Run to see per-node results",
       },
+      agentRegions: {},
+      agentISPs: {},
       theme: {
         light: "Light",
-        dark: "Dark"
+        dark: "Dark",
       },
       footer: {
         copyright: "© {{year}} {{brand}}",
@@ -517,14 +571,14 @@ export const resources = {
         frontendVersion: "Web {{version}}",
         serverVersion: "Server {{version}}",
         versionUnknown: "unknown",
-        versionSettings: "Version information"
+        versionSettings: "Version information",
       },
       token: {
         title: "Debug",
         apiBaseUrl: "API URL",
         apiToken: "API Token",
         savedTitle: "API settings updated",
-        savedMessage: "New requests will use the updated API settings"
+        savedMessage: "New requests will use the updated API settings",
       },
       schedule: {
         name: "Name",
@@ -588,7 +642,7 @@ export const resources = {
         updatedMessage: "Changes will apply on the next run",
         deletedTitle: "Schedule deleted",
         deletedMessage: "The schedule will no longer run",
-        deleteConfirm: "Delete schedule {{name}}?"
+        deleteConfirm: "Delete schedule {{name}}?",
       },
       manage: {
         httpAgents: "HTTP agents",
@@ -719,12 +773,12 @@ export const resources = {
         yes: "Yes",
         no: "No",
         requestsPerMinute: "RPM",
-        burst: "Burst"
+        burst: "Burst",
       },
       actions: {
         add: "Add",
         cancel: "Cancel",
-        save: "Save"
+        save: "Save",
       },
       errors: {
         requestFailed: "Request failed",
@@ -740,7 +794,8 @@ export const resources = {
         groupRequired: "Select at least one node group",
         noAvailableNodes: "No available nodes",
         scheduleNotAllowed: "Schedule access is not allowed",
-        targetBlocked: "The selected agent does not support this target or IP version",
+        targetBlocked:
+          "The selected agent does not support this target or IP version",
         jobLinkMismatch: "The task link does not match its job_id",
         jobFailed: "Job failed: {{error}}",
         toolNotAllowed: "Not allowed",
@@ -749,15 +804,17 @@ export const resources = {
         targetAddressNotIPv4: "Target address {{address}} is not IPv4",
         targetAddressNotIPv6: "Target address {{address}} is not IPv6",
         agentNotAllowed: "Not allowed",
-        optionNotAllowed: "Not allowed"
+        optionNotAllowed: "Not allowed",
       },
       apiErrors: {
         invalidApiToken: "Invalid API token",
         rateLimitExceeded: "Too many requests. Try again later",
-        toolRateLimitExceeded: "Too many requests for this tool. Try again later",
+        toolRateLimitExceeded:
+          "Too many requests for this tool. Try again later",
         invalidJson: "Invalid request format",
         noOnlineAgentsSupportJob: "No online agents support this job",
-        targetResolvedToNoAddresses: "The target resolved to no usable addresses",
+        targetResolvedToNoAddresses:
+          "The target resolved to no usable addresses",
         scheduleWriteAccessDenied: "Schedule write access is not allowed",
         scheduleReadAccessDenied: "Schedule read access is not allowed",
         scheduleIntervalRange: "Interval must be between 10 and 86400 seconds",
@@ -776,11 +833,13 @@ export const resources = {
         agentRequired: "{{tool}} requires an agent",
         portRequired: "{{tool}} requires a port",
         argumentNotAllowed: "{{tool}} does not allow argument {{argument}}",
-        argumentInvalidPermissionPattern: "Argument {{argument}} has an invalid permission rule",
+        argumentInvalidPermissionPattern:
+          "Argument {{argument}} has an invalid permission rule",
         argumentInvalid: "Argument {{argument}} is invalid",
         toolNotAllowed: "Not allowed to use tool {{tool}}",
         ipVersionNotAllowed: "{{tool}} does not allow IP version {{version}}",
-        resolveOnAgentNotAllowed: "{{tool}} does not allow resolve_on_agent={{value}}",
+        resolveOnAgentNotAllowed:
+          "{{tool}} does not allow resolve_on_agent={{value}}",
         agentNotAllowed: "Not allowed to use agent {{agent}}",
         invalidResolvedIp: "Invalid resolved IP: {{ip}}",
         resolveTargetFailed: "Failed to resolve target: {{error}}",
@@ -788,21 +847,23 @@ export const resources = {
         targetAddressNotIPv4: "Target address {{address}} is not IPv4",
         targetAddressNotIPv6: "Target address {{address}} is not IPv6",
         geoipUpstreamHTTP: "GeoIP upstream returned HTTP {{status}}",
-        unexpected: "Unexpected error"
+        unexpected: "Unexpected error",
       },
       jobErrorTypes: {
-        target_blocked: "The selected agent does not support this target or IP version",
+        target_blocked:
+          "The selected agent does not support this target or IP version",
         unsupported_tool: "The selected agent does not support this tool",
-        unsupported_protocol: "The selected agent does not support the requested protocol or IP version",
+        unsupported_protocol:
+          "The selected agent does not support the requested protocol or IP version",
         agent_disconnected: "The agent disconnected",
         job_timeout: "The job timed out",
         tool_failed: "The agent failed to run the task",
         fanout_failed: "One or more agents failed to run the task",
-        job_failed: "Job failed"
+        job_failed: "Job failed",
       },
-      language: "Language"
-    }
-  }
+      language: "Language",
+    },
+  },
 } as const;
 
 export function detectLanguage(): SupportedLanguage {
@@ -821,8 +882,8 @@ void i18next.use(initReactI18next).init({
   lng: detectLanguage(),
   fallbackLng: "en-US",
   interpolation: {
-    escapeValue: false
-  }
+    escapeValue: false,
+  },
 });
 
 export function setLanguage(language: SupportedLanguage): void {

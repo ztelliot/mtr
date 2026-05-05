@@ -20,7 +20,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { AlertTriangle, Pencil, Play, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { agentLocationProviderLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
+import { agentLocationProviderLabel, agentRegionLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
 import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
@@ -106,21 +106,21 @@ export function SchedulePage({
   const isEditingSchedule = Boolean(editingSchedule);
   const selectedJob = history.find((job) => job.id === selectedJobId);
   const durationSeries = useMemo(
-    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, "pingDuration"),
-    [agents, history, historyEventsByJobId, selectedSchedule]
+    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, "pingDuration", t),
+    [agents, history, historyEventsByJobId, selectedSchedule, t]
   );
   const lossSeries = useMemo(
-    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, "loss"),
-    [agents, history, historyEventsByJobId, selectedSchedule]
+    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, "loss", t),
+    [agents, history, historyEventsByJobId, selectedSchedule, t]
   );
   const summarySeries = useMemo(
-    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, schedulePrimaryMetricKind(selectedSchedule?.tool)),
-    [agents, history, historyEventsByJobId, selectedSchedule]
+    () => buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, schedulePrimaryMetricKind(selectedSchedule?.tool), t),
+    [agents, history, historyEventsByJobId, selectedSchedule, t]
   );
   const httpMetricCards = useMemo(
     () => httpScheduleMetricCards(t).map((card) => ({
       ...card,
-      series: buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, card.kind)
+      series: buildScheduleMetricSeries(selectedSchedule, history, historyEventsByJobId, agents, card.kind, t)
     })),
     [agents, history, historyEventsByJobId, selectedSchedule, t]
   );
@@ -793,7 +793,7 @@ function ScheduleResultHeader({
   return (
     <Group className="schedule-dashboard-header" justify="space-between" align="flex-end">
       <div>
-        <Text className="schedule-section-title">{scheduleHeaderTitle(schedule, showAgentDetails ? agent : undefined, showAgentDetails)}</Text>
+        <Text className="schedule-section-title">{scheduleHeaderTitle(schedule, t, showAgentDetails ? agent : undefined, showAgentDetails)}</Text>
         <Text c="dimmed" size="sm">
           {`${t("schedule.samples", { count: runCount })} · ${t("schedule.nextRun", { time: formatDateTime(schedule.next_run_at) })}`}
         </Text>
@@ -814,14 +814,14 @@ function ScheduleResultHeader({
   );
 }
 
-function scheduleHeaderTitle(schedule: ScheduledJob, agent?: Agent, showAgentDetails = true): string {
+function scheduleHeaderTitle(schedule: ScheduledJob, t: Translate, agent?: Agent, showAgentDetails = true): string {
   const label = [schedule.name, scheduleTargetLabel(schedule)].map((part) => part?.trim()).filter(Boolean);
   const base = [...new Set(label)].join(" · ") || schedule.tool;
-  const details = scheduleHeaderParameters(schedule, agent, showAgentDetails);
+  const details = scheduleHeaderParameters(schedule, t, agent, showAgentDetails);
   return [base, ...details].filter(Boolean).join(" · ");
 }
 
-function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent, showAgentDetails = true): string[] {
+function scheduleHeaderParameters(schedule: ScheduledJob, t: Translate, agent?: Agent, showAgentDetails = true): string[] {
   const args = schedule.args ?? {};
   const details: string[] = [];
   const protocol = args.protocol?.toUpperCase();
@@ -839,7 +839,7 @@ function scheduleHeaderParameters(schedule: ScheduledJob, agent?: Agent, showAge
   }
   const pinnedAgentID = singleAgentIDFromSchedule(schedule);
   if (showAgentDetails && pinnedAgentID) {
-    details.push(agent ? agentLocationProviderLabel(agent) : pinnedAgentID);
+    details.push(agent ? agentLocationProviderLabel(agent, t) : pinnedAgentID);
   }
   return details.filter(Boolean);
 }
@@ -875,7 +875,7 @@ function scheduleLabelsForAgents(agents: Agent[], t: (key: string, options?: Rec
     options.push({ group: t("schedule.groups"), items: groupItems });
   }
   const nodeItems = agents
-    .map((agent) => ({ value: `id:${agent.id}`, label: agentSelectLabel(agent) }))
+    .map((agent) => ({ value: `id:${agent.id}`, label: agentSelectLabel(agent, t) }))
     .sort((left, right) => left.label.localeCompare(right.label));
   if (nodeItems.length > 0) {
     options.push({ group: t("schedule.nodes"), items: nodeItems });
@@ -983,7 +983,7 @@ function scheduleLabelDisplay(label: string, agents: Agent[], t: (key: string, o
     return label;
   }
   const agent = agents.find((item) => item.id === agentID);
-  return agent ? agentSelectLabel(agent) : agentID;
+  return agent ? agentSelectLabel(agent, t) : agentID;
 }
 
 function buildScheduleTargetDrafts(
@@ -1219,8 +1219,8 @@ function ScheduleDNSHistoryPanel({
             <Table.Tbody>
               {rows.map((row) => (
                 <Table.Tr key={`${row.jobId}-${row.agentId}`}>
-                  <Table.Td><RegionCell country={row.country} region={row.region} protocols={row.protocols} /></Table.Td>
-                  <Table.Td><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} /></Table.Td>
+                  <Table.Td><RegionCell country={row.country} region={row.region} protocols={row.protocols} t={t} /></Table.Td>
+                  <Table.Td><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} t={t} /></Table.Td>
                   <Table.Td><DNSRecordsCell records={row.records} geoIPByIP={geoIPByIP} /></Table.Td>
                   <Table.Td title={row.runAt ? formatDateTime(row.runAt) : undefined}>
                     {formatScheduleRunAt(row.runAt, t)}
@@ -1539,7 +1539,8 @@ function buildScheduleMetricSeries(
   history: Job[],
   eventsByJobId: Record<string, JobEvent[]>,
   agents: Agent[],
-  metric: ScheduleMetricKind
+  metric: ScheduleMetricKind,
+  t: Translate
 ): ScheduleMetricSeries[] {
   if (!schedule) {
     return [];
@@ -1568,12 +1569,13 @@ function buildScheduleMetricSeries(
         continue;
       }
       const agentId = row.agentId || job.agent_id || "default";
+      const region = row.region ? agentRegionLabel(row.region, t) : "";
       const agentName = row.region
-        ? `${row.region} · ${ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols })}`
-        : ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols });
+        ? `${region} · ${ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols, t })}`
+        : ispProtocolLabel({ isp: row.isp, fallback: agentId, protocols: row.protocols, t });
       const agentTooltipLabel = row.region
-        ? `${row.region} · ${ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols })}`
-        : ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols });
+        ? `${region} · ${ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols, t })}`
+        : ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols, t });
       const targetIP = chartTooltipIP(row.ip) || chartTooltipIP(job.resolved_target);
       const point: ScheduleMetricPoint = {
         agentId,
@@ -1860,7 +1862,7 @@ function scheduleHistoryNodeLabel(job: Job, agents: Agent[], t: (key: string, op
     return t("schedule.allNodes");
   }
   const agent = agents.find((item) => item.id === job.agent_id);
-  return agent ? agentSelectLabel(agent) : job.agent_id;
+  return agent ? agentSelectLabel(agent, t) : job.agent_id;
 }
 
 function scheduleFormState(schedule: ScheduledJob): JobFormState {

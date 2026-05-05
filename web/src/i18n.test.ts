@@ -27,7 +27,12 @@ describe("i18n", () => {
   });
 
   it("keeps Chinese and English resource keys aligned", () => {
-    expect(flattenKeys(resources["zh-CN"].translation)).toEqual(flattenKeys(resources["en-US"].translation));
+    expect(sharedTranslationKeys(resources["zh-CN"].translation)).toEqual(sharedTranslationKeys(resources["en-US"].translation));
+  });
+
+  it("keeps English agent region and ISP labels as raw API values", () => {
+    expect(resources["en-US"].translation.agentRegions).toEqual({});
+    expect(resources["en-US"].translation.agentISPs).toEqual({});
   });
 
   it("defines every static translation key used by the source", () => {
@@ -45,6 +50,10 @@ function flattenKeys(value: object, prefix = ""): string[] {
     const nextPrefix = prefix ? `${prefix}.${key}` : key;
     return item && typeof item === "object" ? flattenKeys(item, nextPrefix) : [nextPrefix];
   }).sort();
+}
+
+function sharedTranslationKeys(value: object): string[] {
+  return flattenKeys(value).filter((key) => !key.startsWith("agentRegions.") && !key.startsWith("agentISPs."));
 }
 
 function staticTranslationKeys(): string[] {

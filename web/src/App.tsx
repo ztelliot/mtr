@@ -860,7 +860,7 @@ export function App() {
                         label={t("form.agent")}
                         data={routeAgents.map((agent) => ({
                           value: agent.id,
-                          label: agentSelectLabel(agent)
+                          label: agentSelectLabel(agent, t)
                         }))}
                         value={form.agentId || null}
                         onChange={(value) => updateForm("agentId", value ?? routeAgents[0]?.id ?? "")}
