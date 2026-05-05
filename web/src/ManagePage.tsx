@@ -1354,7 +1354,7 @@ function httpAgentRequiredFieldsMissing(node: HTTPAgentConfig, editingID = "", a
 }
 
 function managedAgentType(agent: ManagedAgent): "grpc" | "http" {
-  return agent.type ?? agent.transport;
+  return agent.transport;
 }
 
 function managedHTTPAgentFromConfig(node: HTTPAgentConfig, previous?: ManagedAgent): ManagedAgent {
@@ -1367,7 +1367,6 @@ function managedHTTPAgentFromConfig(node: HTTPAgentConfig, previous?: ManagedAge
     status: node.enabled ? previous?.status ?? "offline" : "offline",
     last_seen_at: previous?.last_seen_at ?? node.updated_at ?? "",
     created_at: previous?.created_at ?? node.created_at ?? "",
-    type: "http",
     transport: "http",
     config: {
       id: node.id,

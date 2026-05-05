@@ -2766,18 +2766,27 @@ func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
 		t.Fatal(err)
 	}
-	byType := map[string][]ManagedAgent{}
-	for _, agent := range agents {
-		byType[agent.Type] = append(byType[agent.Type], agent)
+	var rawAgents []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawAgents); err != nil {
+		t.Fatal(err)
 	}
-	grpcAgents := byType["grpc"]
+	for _, raw := range rawAgents {
+		if _, ok := raw["type"]; ok {
+			t.Fatalf("managed agent response should not include duplicate type field: %s", rec.Body.String())
+		}
+	}
+	byTransport := map[string][]ManagedAgent{}
+	for _, agent := range agents {
+		byTransport[agent.Transport] = append(byTransport[agent.Transport], agent)
+	}
+	grpcAgents := byTransport["grpc"]
 	if len(grpcAgents) != 1 || grpcAgents[0].ID != "edge-grpc" || grpcAgents[0].Transport != "grpc" {
 		t.Fatalf("grpc agents = %#v", grpcAgents)
 	}
 	if !reflect.DeepEqual(grpcAgents[0].Labels, []string{"agent", "agent:grpc", "id:edge-grpc", "configured-grpc"}) {
 		t.Fatalf("grpc managed labels should come from server config: %#v", grpcAgents[0].Labels)
 	}
-	httpAgents := byType["http"]
+	httpAgents := byTransport["http"]
 	if len(httpAgents) != 1 || httpAgents[0].ID != "edge-http" || httpAgents[0].Transport != "http" {
 		t.Fatalf("http agents = %#v", httpAgents)
 	}

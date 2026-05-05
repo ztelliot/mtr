@@ -193,7 +193,6 @@ export interface AgentConfig {
 export type ManagedAgent = Omit<Agent, "tools"> & {
   tools?: Partial<Record<Tool, PermissionTool>>;
   capabilities?: Tool[];
-  type?: "grpc" | "http";
   transport: "grpc" | "http";
   config?: AgentConfig;
   http?: HTTPAgentConfig;

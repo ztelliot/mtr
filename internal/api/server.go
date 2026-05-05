@@ -742,7 +742,6 @@ func (s *Server) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, er
 
 type ManagedAgent struct {
 	model.Agent
-	Type      string             `json:"type"`
 	Transport string             `json:"transport"`
 	Config    config.AgentConfig `json:"config"`
 	HTTP      *config.HTTPAgent  `json:"http,omitempty"`
@@ -1145,7 +1144,7 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 				continue
 			}
 			seen[agent.ID] = struct{}{}
-			out = append(out, ManagedAgent{Agent: agent, Type: "grpc", Transport: "grpc", Config: byID[agent.ID]})
+			out = append(out, ManagedAgent{Agent: agent, Transport: "grpc", Config: byID[agent.ID]})
 		}
 		for _, cfg := range configs {
 			if _, ok := seen[cfg.ID]; ok {
@@ -1164,7 +1163,6 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 					LastSeenAt: updatedAt,
 					CreatedAt:  createdAt,
 				},
-				Type:      "grpc",
 				Transport: "grpc",
 				Config:    cfg,
 			})
@@ -1195,7 +1193,6 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 			agent.Labels = model.NormalizeAgentLabels(node.ID, model.AgentTransportHTTP, node.Labels)
 			out = append(out, ManagedAgent{
 				Agent:     agent,
-				Type:      "http",
 				Transport: "http",
 				Config: config.AgentConfig{
 					ID:        node.ID,

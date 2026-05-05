@@ -66,7 +66,7 @@ describe("manage token helpers", () => {
       base_url: "https://edge.example.com",
       http_token: "secret",
       labels: []
-    }, { ...managedAgent("edge-http", ["agent", "agent:http", "id:edge-http"]), status: "online", transport: "http", type: "http" }).status).toBe("online");
+    }, { ...managedAgent("edge-http", ["agent", "agent:http", "id:edge-http"]), status: "online", transport: "http" }).status).toBe("online");
   });
 
   it("does not materialize policy defaults when toggling enabled state", () => {
@@ -95,7 +95,7 @@ describe("manage token helpers", () => {
   it("sorts system labels before custom labels and id labels", () => {
     const summaries = __managePageTest.labelSummaries([
       managedAgent("edge-1", ["agent", "agent:grpc", "id:edge-1", "local"]),
-      { ...managedAgent("edge-http-1", ["agent", "agent:http", "id:edge-http-1", "local"]), type: "http", transport: "http" }
+      { ...managedAgent("edge-http-1", ["agent", "agent:http", "id:edge-http-1", "local"]), transport: "http" }
     ], {});
 
     expect(summaries.map((summary) => summary.label)).toEqual([
@@ -118,7 +118,6 @@ function managedAgent(id: string, labels: string[]): ManagedAgent {
     status: "online",
     last_seen_at: "",
     created_at: "",
-    type: "grpc",
     transport: "grpc",
     config: { id, labels }
   };
