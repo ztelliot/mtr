@@ -1,17 +1,21 @@
 # MTR Agent/Server
 
-Distributed network diagnostics service written in Go.
+Distributed network diagnostics for running `ping`, `traceroute`, `mtr`, HTTP,
+DNS, and TCP port probes from managed edge Agents.
 
 Chinese version: [README.zh-CN.md](README.zh-CN.md)
 
 ## Components
 
-- `cmd/server`: cloud-side REST API, gRPC Agent control plane, PostgreSQL storage, policy, and rate limiting.
-- `cmd/agent`: edge-side worker with two modes: `grpc` connects to Server over the long-lived control plane, and `http` exposes an HTTP invoke endpoint for gateway-forwarded or function deployments.
+- `cmd/server`: REST API, gRPC Agent control plane, storage, policy, scheduling,
+  and rate limiting.
+- `cmd/agent`: edge worker. In `grpc` mode it keeps a long-lived control-plane
+  connection to Server; in `http` mode it exposes an invoke endpoint for
+  gateways and FaaS platforms.
 
 ## Quick Start
 
-For local testing without PostgreSQL:
+For a local SQLite-backed test run:
 
 ```sh
 go run ./cmd/server -config configs/server.sqlite.yaml
@@ -20,9 +24,9 @@ go run ./cmd/server -config configs/server.sqlite.yaml
 Server reads `/etc/mtr/server.yaml` by default when present, otherwise
 `configs/server.yaml`. Use `-config` to point at another file.
 
-On first startup, Server will create the SQLite database file automatically,
-and for PostgreSQL it will try to create the target database and required
-tables when the configured account has permission to do so.
+On first startup, Server creates the SQLite database automatically. With
+PostgreSQL, it also tries to create the target database and schema when the
+configured account has permission.
 
 Agents read config from `-config`, matching Server startup:
 
@@ -51,50 +55,48 @@ docker build -f Dockerfile.agent -t mtr-agent:v1.2.3 \
   --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 ```
 
-Agent runtime settings, including `mode`, `http_addr`, identity, register token,
-HTTP token, capabilities, protocols, TLS, and speed-test limits, live in the Agent YAML.
+Agent runtime settings live in the Agent YAML: `mode`, `http_addr`, identity,
+register token, HTTP token, capabilities, protocols, TLS, and speed-test limits.
 `protocols` is a bitmask: `1` means IPv4, `2` means IPv6, and `3` means both.
 Jobs may set `ip_version` to `4` or `6`; tasks are only dispatched to Agents
 whose protocol mask supports the requested protocol.
 
-Server process config and Agent config fields can also be supplied through environment
-variables. Environment variables use the YAML path with a `MTR_` prefix and
-upper-case underscores, for example `tls.ca_files` becomes `MTR_TLS_CA_FILES`,
-`speedtest.max_bytes` becomes `MTR_SPEEDTEST_MAX_BYTES`. Config file values win
-when both sources set the same field. Lists of strings may be comma-separated
-or YAML/JSON arrays.
+Server and Agent config fields can also be supplied through environment
+variables. Use the YAML path with an `MTR_` prefix and uppercase underscores:
+`tls.ca_files` becomes `MTR_TLS_CA_FILES`, and `speedtest.max_bytes` becomes
+`MTR_SPEEDTEST_MAX_BYTES`. Config file values win when both sources set the same
+field. String lists may be comma-separated or YAML/JSON arrays.
 When Server runs behind a reverse proxy, set `trusted_proxies` to the proxy IPs
 or CIDRs allowed to supply standard proxy headers; otherwise `X-Forwarded-For`
 and `X-Real-IP` are ignored for logging and rate limiting. `client_ip_headers`
 is an ordered list of custom single-IP headers trusted unconditionally before
 proxy headers, for example a long private header name or `Eo-Connecting-Ip`.
 
-Server runtime policy is managed in persisted managed settings, not in
-`server.yaml`. That includes API tokens, Agent register tokens, rate limits,
-global tool policies, label-based tool policies, label-based scheduler/runtime
-knobs, probe counts, timeouts, and managed HTTP Agents. Per-node tuning is done
-by assigning labels; every node also has the reserved `agent` and
-`id:<agent-id>` labels, so global, grouped, and single-node rules use the same
-label mechanism. On a fresh database, Server creates one admin API token and
-prints it to the log. Use that token with the Manage page or the
+Server runtime policy is stored in persisted managed settings, not in
+`server.yaml`. This includes API tokens, Agent register tokens, rate limits,
+global and label-based tool policies, label-based scheduler/runtime knobs,
+probe counts, timeouts, and managed HTTP Agents. Per-node tuning is label-based:
+every node has the reserved `agent` and `id:<agent-id>` labels, so global,
+grouped, and single-node rules share one mechanism. On a fresh database, Server
+creates one admin API token and prints it to the log. Use that token with the
+Manage page or the
 `/v1/manage/tokens`, `/v1/manage/register-tokens`, `/v1/manage/rate-limit`,
 `/v1/manage/labels`, and `/v1/manage/agents` endpoints to create the tokens and
 policy you want. Set
 `log_level: debug` in the Server or Agent config for verbose scheduling and
 execution logs.
 
-Server can also actively invoke managed HTTP Agents created through
-`/v1/manage/agents` with `transport`, `id`, `base_url`, and `http_token`.
-Each HTTP Agent exposes `/invoke` when Agent config sets `mode: http` or
-`mode: grpc,http`; `http_token` is required for HTTP mode. Set Agent
-`http_path_prefix` to serve these HTTP endpoints below a prefix such as `/api`
-or `/v1`; then include the same prefix in the managed Agent `base_url`. Server
-probes `/healthz` once at startup to learn version, region, provider,
-capabilities, and protocols, then uses `/healthz` again only during recovery
-after connection failures. HTTP Agent listener TLS is controlled by Agent
-`http_tls`; per-Agent TLS settings live on the managed HTTP Agent record.
-Client-side TLS verification checks the configured CA chain only, so in-cluster
-addresses do not need to match certificate SANs.
+Server can actively invoke managed HTTP Agents created through
+`/v1/manage/agents` with `transport`, `id`, `base_url`, and `http_token`. An
+Agent exposes `/invoke` when its mode includes `http`; `http_token` is required
+for that mode. Use `http_path_prefix` to serve HTTP endpoints below a prefix
+such as `/api` or `/v1`, and include that same prefix in the managed Agent
+`base_url`. Server probes `/healthz` at startup to learn version, location,
+provider, capabilities, and protocols, then probes it again only while
+recovering from connection failures. Listener TLS is controlled by Agent
+`http_tls`; client-side TLS settings live on the managed HTTP Agent record.
+Client verification checks the configured CA chain only, so in-cluster addresses
+do not need to match certificate SANs.
 
 HTTP Agent contract:
 
@@ -123,7 +125,15 @@ curl -N -X POST http://localhost:9000/invoke \
   -d '{"id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4}'
 ```
 
-The response is compact newline-delimited JSON (`application/x-ndjson`): each line is a structured progress/hop/metric event or the final summary event. Server outbound mode restores only the browser-facing envelope needed for routing and replay, such as `job_id` and `agent_id`; it does not re-add repeated task-level fields like `tool`, `target`, or protocol to incremental or summary events. gRPC mode uses the same compact idea on the Agent-to-Server path. For Alibaba Cloud FC, Tencent Cloud SCF, or Huawei FunctionGraph, deploy `Dockerfile.agent` as a custom container or HTTP function and route trigger traffic to `/invoke` on port `9000`; the image still runs the unified `mtr-agent` binary.
+The response is compact newline-delimited JSON (`application/x-ndjson`): each
+line is a structured progress, hop, metric, or final summary event. Server
+outbound mode restores only the browser-facing envelope needed for routing and
+replay, such as `job_id` and `agent_id`; it does not repeat task-level fields
+like `tool`, `target`, or protocol in incremental events. gRPC mode uses the
+same compact event shape on the Agent-to-Server path. For Alibaba Cloud FC,
+Tencent Cloud SCF, or Huawei FunctionGraph, deploy `Dockerfile.agent` as a
+custom container or HTTP function and route trigger traffic to `/invoke` on port
+`9000`; the image still runs the unified `mtr-agent` binary.
 
 Agent speed test endpoint:
 
@@ -146,7 +156,12 @@ curl -X POST http://localhost:8080/v1/jobs \
   -d '{"tool":"ping","target":"1.1.1.1"}'
 ```
 
-`ping`, `traceroute`, and `mtr` accept `args.protocol` as `icmp` or `tcp`; `count` and `max_hops` are owned by Server runtime config and are not user-controlled. `dns` replaces the old `nslookup` tool name. `port` performs a native TCP connect probe and requires `args.port`. By default Server resolves target hostnames before queuing jobs; set `resolve_on_agent: true` to defer DNS resolution and resolved-IP policy checks to the Agent.
+`ping`, `traceroute`, and `mtr` accept `args.protocol` as `icmp` or `tcp`.
+`count` and `max_hops` are controlled by Server runtime policy, not by user
+requests. `dns` replaces the old `nslookup` tool name. `port` performs a native
+TCP connect probe and requires `args.port`. By default, Server resolves target
+hostnames before queuing jobs; set `resolve_on_agent: true` to defer DNS
+resolution and resolved-IP policy checks to the Agent.
 
 Create a scheduled detection task:
 
@@ -255,14 +270,14 @@ Omit `brandUrl` to keep the header brand as an in-app home link, set it to a
 URL to send every deployment to one canonical brand address, or set it to
 `null`/`""` to render the brand without a link.
 
-The Kubernetes examples include `deploy/web.yaml`, which deploys
+The Kubernetes examples include `deploy/k8s/web.yaml`, which deploys
 `ghcr.io/ztelliot/mtr-web:latest`, exposes it as the `mtr-web` Service, and
 mounts `mtr-web-config` over `/usr/share/caddy/config.json`. For a local
 cluster smoke test, first create the Secrets described in the Kubernetes
 deployment section, then apply the baseline resources:
 
 ```sh
-kubectl apply -k deploy
+kubectl apply -k deploy/k8s
 kubectl -n mtr port-forward svc/mtr-server 8080:8080
 kubectl -n mtr port-forward svc/mtr-web 8081:80
 ```
@@ -273,7 +288,7 @@ to a valid API token. For public deployments, use a restricted frontend token
 rather than the initial admin token. Alternatively, put an Ingress or gateway
 in front of both services and route `/v1` to `mtr-server` and `/` to `mtr-web`.
 
-The `deploy/agent.yaml` DaemonSet can derive per-node Agent metadata from
+The `deploy/k8s/agent.yaml` DaemonSet can derive per-node Agent metadata from
 Kubernetes Node annotations without teaching the Agent binary about Kubernetes.
 An init container reads the current Node annotations, renders a normal
 `agent.yaml` into an `emptyDir`, and the Agent container starts with that
@@ -552,13 +567,13 @@ systemd-analyze security mtr-agent.service
 
 ## Kubernetes Deployment
 
-The repository now includes a baseline manifest set under `deploy/`:
+The repository now includes a baseline manifest set under `deploy/k8s/`:
 
 - `server.yaml`: single-replica Server `Deployment` plus `Service`
 - `agent.yaml`: Agent `DaemonSet`, with each pod using its own pod name as `MTR_ID`
 - `networkpolicy.yaml`: denies inbound traffic to Agent pods
 - `secrets.example.yaml`: Secret templates with placeholders you should replace
-- `kustomization.yaml`: baseline resources for `kubectl apply -k deploy`; it
+- `kustomization.yaml`: baseline resources for `kubectl apply -k deploy/k8s`; it
   intentionally does not include `secrets.example.yaml`
 
 These manifests assume:
@@ -575,11 +590,11 @@ These manifests assume:
   stored in Server managed settings. They are not read from the Kubernetes
   Server ConfigMap or Secret.
 
-You can edit the placeholders in `deploy/secrets.example.yaml` and apply that
+You can edit the placeholders in `deploy/k8s/secrets.example.yaml` and apply that
 file before the baseline resources, or create the Secrets directly:
 
 ```sh
-kubectl apply -f deploy/namespace.yaml
+kubectl apply -f deploy/k8s/namespace.yaml
 
 kubectl -n mtr create secret generic mtr-server-env \
   --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable'
@@ -606,7 +621,7 @@ then store the returned value in `mtr-agent-env`.
 Then apply the baseline resources:
 
 ```sh
-kubectl apply -k deploy
+kubectl apply -k deploy/k8s
 ```
 
 The Agent manifest is intentionally tight on privileges:
@@ -636,6 +651,374 @@ The baseline does not include a default-deny egress `NetworkPolicy`. The Agent
 is supposed to probe arbitrary external targets, and standard Kubernetes
 `NetworkPolicy` support for ICMP is limited; if your CNI offers richer ICMP or
 egress controls, it is worth tightening that layer further.
+
+## FaaS Deployment
+
+FaaS deployment assets live in `deploy/fc/`. The checked-in `targets.json`
+describes public target metadata and placeholder runtime settings; `generate.mjs`
+turns that file into provider-specific deployment templates.
+
+Supported targets:
+
+- `aliyun`: Alibaba Cloud Function Compute, using the Serverless Devs `fc3`
+  component.
+- `ctyun`: CTYun Function Service, using the Serverless Devs `faas-cf`
+  component.
+- `qcloud`: Tencent Cloud SCF, using Serverless Cloud Framework.
+- `gcloud`: Google Cloud Run, using `gcloud alpha run deploy`.
+
+Keep real deployment values out of `targets.json`. For production, copy it to a
+local file such as `.targets.json`, fill in values like `MTR_HTTP_TOKEN`,
+`MTR_HTTP_PATH_PREFIX`, Alibaba Cloud log project IDs, and private image
+locations, then generate templates from that local file:
+
+```bash
+cd deploy/fc
+node generate.mjs --config .targets.json
+```
+
+You can also select the config with `FC_TARGETS_FILE`. When the generator reads
+the default `targets.json`, it rejects values that look like real tokens, path
+prefixes, or Alibaba Cloud log project IDs. This keeps the public template safe
+even if someone edits it by accident.
+
+Set `binary.path` to point at a built local Agent binary, or configure
+`binary.fromImage` to extract the binary from a Docker image. Generated output
+is written under `deploy/fc/output/`:
+
+```bash
+output/binary/agent
+output/s.aliyun.yaml
+output/s.ctyun.yaml
+output/qcloud/code/scf_bootstrap
+output/qcloud/<target-key>/serverless.yml
+output/qcloud/deploy.sh
+output/gcloud/deploy.sh
+```
+
+The FaaS Agent does not read `config.yaml`. It is configured entirely through
+environment variables. Every generated target receives `MTR_COUNTRY`, `MTR_ID`,
+`MTR_ISP`, `TZ`, and `MTR_REGION`; runtime settings come from top-level `env`
+and may be overridden by provider-level or target-level `env` objects.
+
+To extract the Agent binary from the published container image:
+
+```json
+{
+  "binary": {
+    "fromImage": {
+      "image": "ghcr.io/ztelliot/mtr-agent:dev",
+      "path": "/usr/local/bin/mtr-agent",
+      "platform": "linux/amd64",
+      "pull": true
+    }
+  }
+}
+```
+
+When `binary.fromImage` is set, `generate.mjs` runs `docker pull`, creates a
+temporary container, copies the binary out, and writes it to
+`output/binary/agent` by default. Use `binary.path` when you already have a
+local binary:
+
+```json
+{
+  "binary": {
+    "path": ".cache/mtr-agent",
+    "fromImage": {
+      "image": "ghcr.io/ztelliot/mtr-agent:dev"
+    }
+  }
+}
+```
+
+Set `binary.fromImage.pull` to `false` when the image is already present
+locally.
+
+Deploy Alibaba Cloud and CTYun templates with Serverless Devs:
+
+```bash
+cd output
+s deploy -t s.aliyun.yaml
+s deploy -t s.ctyun.yaml
+```
+
+Tencent Cloud SCF is generated as one directory per target because Serverless
+Cloud Framework expects each function to own its `serverless.yml`. Shared code
+lives in `output/qcloud/code`; the Agent binary is copied to `scf_bootstrap`,
+the entry filename expected by SCF:
+
+```text
+output/qcloud/code/scf_bootstrap
+output/qcloud/example/serverless.yml
+```
+
+Deploy Tencent Cloud targets through the generated script, which enters each
+target directory and runs `scf deploy`:
+
+```bash
+cd output
+qcloud/deploy.sh
+```
+
+Google Cloud Run also uses a generated script:
+
+```bash
+cd output
+gcloud/deploy.sh
+```
+
+Alibaba Cloud logging is opt-in per target. Set `log: true` and provide
+`providers.aliyun.logProjectId` in the local config:
+
+```json
+{
+  "env": {
+    "MTR_MODE": "http",
+    "MTR_LOG_LEVEL": "info",
+    "MTR_HTTP_TOKEN": "<http-token>",
+    "MTR_HTTP_ADDR": ":9000",
+    "MTR_HTTP_PATH_PREFIX": "/<path-prefix>",
+    "MTR_PROTOCOLS": 1,
+    "MTR_HIDE_FIRST_HOPS": 0,
+    "MTR_CAPABILITIES": "ping,traceroute,mtr,http,dns,port",
+    "MTR_SPEEDTEST_MAX_BYTES": 0,
+    "MTR_HTTP_TLS_ENABLED": false
+  },
+  "providers": {
+    "aliyun": {
+      "name": "mtr-agent-aliyun",
+      "output": "s.aliyun.yaml",
+      "src": "./binary",
+      "access": "Aliyun",
+      "logProjectId": "<log-project-id>",
+      "targets": [
+        {
+          "key": "example",
+          "region": "<aliyun-region>",
+          "functionName": "mob-example",
+          "country": "CN",
+          "id": "ali.example.fc",
+          "label": "Example",
+          "log": true
+        }
+      ]
+    }
+  }
+}
+```
+
+If `log` is omitted or false, no `logConfig` is generated. When enabled, the SLS
+project name is `serverless-{region}-{providers.aliyun.logProjectId}`. Set
+`logStore` on a target to override the default `default-logs` logstore.
+
+Alibaba Cloud targets use the Go official layer by default:
+
+```text
+acs:fc:{region}:official:layers/Go1/versions/1
+```
+
+Set `layer` to `python-flask` in regions where the Go layer is unavailable:
+
+```json
+{
+  "key": "example",
+  "region": "<aliyun-region>",
+  "functionName": "mob-example",
+  "country": "XX",
+  "id": "ali.example.fc",
+  "label": "Example",
+  "layer": "python-flask"
+}
+```
+
+The runtime remains `custom.debian10`; only the generated layer ARN changes:
+
+```text
+acs:fc:{region}:official:layers/Python3-Flask2x/versions/2
+```
+
+Set `layer` to `null`, `false`, or an empty string to omit the `layers` field:
+
+```json
+{
+  "key": "example",
+  "region": "<aliyun-region>",
+  "functionName": "mob-example",
+  "country": "XX",
+  "id": "ali.example.fc",
+  "label": "Example",
+  "layer": null
+}
+```
+
+Minimal CTYun and Tencent Cloud targets look like this:
+
+```json
+{
+  "key": "example",
+  "region": "<ctyun-resource-pool-id>",
+  "functionName": "mob-example",
+  "country": "CN",
+  "id": "cty.example.fc",
+  "label": "Example"
+}
+```
+
+```json
+{
+  "key": "example",
+  "region": "<qcloud-region>",
+  "functionName": "mob-example",
+  "country": "CN",
+  "id": "txc.example.fc",
+  "label": "Example"
+}
+```
+
+Google Cloud Run is image-based. A minimal provider block is:
+
+```json
+{
+  "providers": {
+    "gcloud": {
+      "name": "mtr-agent-gcloud",
+      "output": "gcloud",
+      "image": {
+        "imageUrl": "asia-docker.pkg.dev/<project>/<repo>/mtr-agent:dev"
+      },
+      "env": {
+        "MTR_PROTOCOLS": 3
+      },
+      "targets": [
+        {
+          "key": "hongkong",
+          "region": "asia-east1",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "gcp.ap-east-1.fc",
+          "label": "Hong Kong"
+        }
+      ]
+    }
+  }
+}
+```
+
+The generator expands that config into a `gcloud alpha run deploy` command with
+the image, region, function name, runtime settings, and Agent env vars:
+
+```bash
+gcloud alpha run deploy mob-hongkong \
+  --image=asia-docker.pkg.dev/<project>/<repo>/mtr-agent:dev \
+  --allow-unauthenticated \
+  --public \
+  --port=9000 \
+  --concurrency=1 \
+  --timeout=60 \
+  --cpu=0.08 \
+  --memory=128Mi \
+  --min-instances=0 \
+  --max-instances=4 \
+  --set-env-vars=MTR_COUNTRY=HK \
+  --set-env-vars=MTR_ID=gcp.ap-east-1.fc \
+  --set-env-vars=MTR_ISP=GCP \
+  --set-env-vars='MTR_REGION=Hong Kong' \
+  --set-env-vars=MTR_MODE=http \
+  --set-env-vars=MTR_LOG_LEVEL=info \
+  --set-env-vars=MTR_HTTP_ADDR=:9000 \
+  --set-env-vars=MTR_HTTP_TOKEN=<http-token> \
+  --set-env-vars=MTR_HTTP_PATH_PREFIX=/<path-prefix> \
+  --set-env-vars='^#^MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port' \
+  --set-env-vars=MTR_PROTOCOLS=3 \
+  --set-env-vars=MTR_HIDE_FIRST_HOPS=0 \
+  --set-env-vars=MTR_HTTP_TLS_ENABLED=false \
+  --set-env-vars=MTR_SPEEDTEST_MAX_BYTES=0 \
+  --no-cpu-boost \
+  --region=asia-east1
+```
+
+Cloud Run defaults are port `9000`, concurrency `1`, timeout `60`, CPU `0.08`,
+memory `128Mi`, min instances `0`, max instances `4`, `--allow-unauthenticated`,
+`--public`, and `--no-cpu-boost`. Override them with `providers.gcloud.run` or
+`target.run`.
+
+Tencent Cloud SCF can deploy from a container image instead of the copied binary.
+Set `providers.qcloud.image` to enable image mode for all Tencent Cloud targets:
+
+```json
+{
+  "providers": {
+    "qcloud": {
+      "name": "mtr-agent-qcloud",
+      "output": "qcloud",
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+        "imageType": "personal",
+        "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
+        "containerImageAccelerate": true
+      },
+      "targets": [
+        {
+          "key": "guangzhou",
+          "region": "ap-guangzhou",
+          "functionName": "mob-guangzhou",
+          "country": "CN",
+          "id": "txc.cn-south-1.fc",
+          "label": "Guangzhou"
+        }
+      ]
+    }
+  }
+}
+```
+
+`imageUrl` supports `{registry}`, `{key}`, `{region}`, and `{functionName}`.
+`sourceImage` supports `{key}`, `{region}`, and `{functionName}`. A target may
+override the provider image object, or set `"image": false` to fall back to the
+code package.
+
+`{registry}` is selected from the Tencent Cloud region. Mainland China defaults
+to `ccr.ccs.tencentyun.com`; overseas regions use local registry hosts such as
+`hkccr.ccs.tencentyun.com` for `ap-hongkong` and
+`sgccr.ccs.tencentyun.com` for `ap-singapore`. Use `image.registry` for one
+image object, or `image.registries` for selected regions:
+
+```json
+{
+  "image": {
+    "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+    "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
+    "registries": {
+      "ap-hongkong": "hkccr.ccs.tencentyun.com",
+      "ap-singapore": "sgccr.ccs.tencentyun.com"
+    }
+  }
+}
+```
+
+In image mode, generated Tencent Cloud `serverless.yml` files contain:
+
+```yaml
+image:
+  imageType: personal
+  imageUrl: ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
+  containerImageAccelerate: true
+```
+
+`output/qcloud/deploy.sh` mirrors the source image into the selected Tencent
+Cloud registry before deployment:
+
+```bash
+docker pull ghcr.io/ztelliot/mtr-agent:latest
+docker tag ghcr.io/ztelliot/mtr-agent:latest ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
+docker push ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
+```
+
+Each target image is mirrored once per generated target tag. With the example
+above, mainland targets share `ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`;
+an overseas target such as `ap-singapore` uses
+`sgccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`.
 
 ## Acknowledgements
 

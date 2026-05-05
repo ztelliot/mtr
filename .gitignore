@@ -1,6 +1,6 @@
-.codex
-.env
+.*
 certs/
+deploy/fc/output/
 mtr.db*
 node_modules/
 web/node_modules/

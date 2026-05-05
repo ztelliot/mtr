@@ -1,0 +1,453 @@
+{
+  "env": {
+    "MTR_MODE": "http",
+    "MTR_LOG_LEVEL": "info",
+    "MTR_HTTP_TOKEN": "<http-token>",
+    "MTR_HTTP_ADDR": ":9000",
+    "MTR_HTTP_PATH_PREFIX": "/<path-prefix>",
+    "MTR_PROTOCOLS": "1",
+    "MTR_HIDE_FIRST_HOPS": "0",
+    "MTR_CAPABILITIES": "ping,traceroute,mtr,http,dns,port",
+    "MTR_SPEEDTEST_MAX_BYTES": "0",
+    "MTR_HTTP_TLS_ENABLED": "false"
+  },
+  "binary": {
+    "fromImage": {
+      "image": "ghcr.io/ztelliot/mtr-agent:dev",
+      "path": "/usr/local/bin/mtr-agent",
+      "platform": "linux/amd64",
+      "pull": true
+    }
+  },
+  "providers": {
+    "aliyun": {
+      "name": "mtr-agent-aliyun",
+      "output": "s.aliyun.yaml",
+      "src": "./binary",
+      "access": "Aliyun",
+      "targets": [
+        {
+          "key": "hangzhou",
+          "region": "cn-hangzhou",
+          "functionName": "mob-hangzhou",
+          "country": "CN",
+          "id": "ali.cn-east-1.fc",
+          "label": "Hangzhou"
+        },
+        {
+          "key": "shanghai",
+          "region": "cn-shanghai",
+          "functionName": "mob-shanghai",
+          "country": "CN",
+          "id": "ali.cn-east-2.fc",
+          "label": "Shanghai"
+        },
+        {
+          "key": "qingdao",
+          "region": "cn-qingdao",
+          "functionName": "mob-qingdao",
+          "country": "CN",
+          "id": "ali.cn-north-1.fc",
+          "label": "Qingdao"
+        },
+        {
+          "key": "beijing",
+          "region": "cn-beijing",
+          "functionName": "mob-beijing",
+          "country": "CN",
+          "id": "ali.cn-north-2.fc",
+          "label": "Beijing"
+        },
+        {
+          "key": "zhangjiakou",
+          "region": "cn-zhangjiakou",
+          "functionName": "mob-zhangjiakou",
+          "country": "CN",
+          "id": "ali.cn-north-3.fc",
+          "label": "Zhangjiakou"
+        },
+        {
+          "key": "huhehaote",
+          "region": "cn-huhehaote",
+          "functionName": "mob-huhehaote",
+          "country": "CN",
+          "id": "ali.cn-north-5.fc",
+          "label": "Huhehaote"
+        },
+        {
+          "key": "wulanchabu",
+          "region": "cn-wulanchabu",
+          "functionName": "mob-wulanchabu",
+          "country": "CN",
+          "id": "ali.cn-north-6.fc",
+          "label": "Wulanchabu"
+        },
+        {
+          "key": "shenzhen",
+          "region": "cn-shenzhen",
+          "functionName": "mob-shenzhen",
+          "country": "CN",
+          "id": "ali.cn-south-1.fc",
+          "label": "Shenzhen"
+        },
+        {
+          "key": "chengdu",
+          "region": "cn-chengdu",
+          "functionName": "mob-chengdu",
+          "country": "CN",
+          "id": "ali.cn-southwest-1.fc",
+          "label": "Chengdu"
+        },
+        {
+          "key": "hongkong",
+          "region": "cn-hongkong",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "ali.ap-east-1.fc",
+          "label": "Hong Kong"
+        },
+        {
+          "key": "singapore",
+          "region": "ap-southeast-1",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "ali.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "kualalumpur",
+          "region": "ap-southeast-3",
+          "functionName": "mob-kualalumpur",
+          "country": "MY",
+          "id": "ali.ap-southeast-3.fc",
+          "label": "Kuala Lumpur",
+          "layer": "python-flask"
+        },
+        {
+          "key": "jakarta",
+          "region": "ap-southeast-5",
+          "functionName": "mob-jakarta",
+          "country": "ID",
+          "id": "ali.ap-southeast-5.fc",
+          "label": "Jakarta"
+        },
+        {
+          "key": "bangkok",
+          "region": "ap-southeast-7",
+          "functionName": "mob-bangkok",
+          "country": "TH",
+          "id": "ali.ap-southeast-7.fc",
+          "label": "Bangkok",
+          "layer": "python-flask"
+        },
+        {
+          "key": "tokyo",
+          "region": "ap-northeast-1",
+          "functionName": "mob-tokyo",
+          "country": "JP",
+          "id": "ali.ap-northeast-1.fc",
+          "label": "Tokyo"
+        },
+        {
+          "key": "seoul",
+          "region": "ap-northeast-2",
+          "functionName": "mob-seoul",
+          "country": "KR",
+          "id": "ali.ap-northeast-2.fc",
+          "label": "Seoul"
+        },
+        {
+          "key": "frankfurt",
+          "region": "eu-central-1",
+          "functionName": "mob-frankfurt",
+          "country": "DE",
+          "id": "ali.eu-central-1.fc",
+          "label": "Frankfurt",
+          "layer": "python-flask"
+        },
+        {
+          "key": "london",
+          "region": "eu-west-1",
+          "functionName": "mob-london",
+          "country": "GB",
+          "id": "ali.eu-west-1.fc",
+          "label": "London",
+          "layer": "python-flask"
+        },
+        {
+          "key": "virginia",
+          "region": "us-east-1",
+          "functionName": "mob-virginia",
+          "country": "US",
+          "id": "ali.us-east-1.fc",
+          "label": "Virginia"
+        },
+        {
+          "key": "siliconvalley",
+          "region": "us-west-1",
+          "functionName": "mob-siliconvalley",
+          "country": "US",
+          "id": "ali.us-west-1.fc",
+          "label": "Silicon Valley"
+        },
+        {
+          "key": "dubai",
+          "region": "me-east-1",
+          "functionName": "mob-dubai",
+          "country": "AE",
+          "id": "ali.me-east-1.fc",
+          "label": "Dubai",
+          "layer": false
+        },
+        {
+          "key": "riyadh",
+          "region": "me-central-1",
+          "functionName": "mob-riyadh",
+          "country": "SA",
+          "id": "ali.me-central-1.fc",
+          "label": "Riyadh",
+          "layer": "python-flask"
+        }
+      ]
+    },
+    "ctyun": {
+      "name": "mtr-agent-ctyun",
+      "output": "s.ctyun.yaml",
+      "src": "./binary",
+      "access": "CTYun",
+      "targets": [
+        {
+          "key": "guangzhou",
+          "region": "200000002530",
+          "functionName": "mob-guangzhou",
+          "country": "CN",
+          "id": "cty.cn-south-1.fc",
+          "label": "Guangzhou"
+        },
+        {
+          "key": "nanjing",
+          "region": "bb9fdb42056f11eda1610242ac110002",
+          "functionName": "mob-nanjing",
+          "country": "CN",
+          "id": "cty.cn-east-1.fc",
+          "label": "Nanjing"
+        },
+        {
+          "key": "chongqing",
+          "region": "200000002368",
+          "functionName": "mob-chongqing",
+          "country": "CN",
+          "id": "cty.cn-southwest-1.fc",
+          "label": "Chongqing"
+        }
+      ]
+    },
+    "qcloud": {
+      "name": "mtr-agent-qcloud",
+      "output": "qcloud",
+      "src": "./binary",
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:dev",
+        "imageType": "personal",
+        "imageUrl": "{registry}/ztelliot/mtr-agent:dev",
+        "containerImageAccelerate": true,
+        "containerImageAccelerates": {
+          "ap-bangkok": false,
+          "ap-seoul": false,
+          "na-ashburn": false,
+          "sa-saopaulo": false
+        }
+      },
+      "targets": [
+        {
+          "key": "guangzhou",
+          "region": "ap-guangzhou",
+          "functionName": "mob-guangzhou",
+          "country": "CN",
+          "id": "txc.cn-south-1.fc",
+          "label": "Guangzhou"
+        },
+        {
+          "key": "beijing",
+          "region": "ap-beijing",
+          "functionName": "mob-beijing",
+          "country": "CN",
+          "id": "txc.cn-north-1.fc",
+          "label": "Beijing"
+        },
+        {
+          "key": "shanghai",
+          "region": "ap-shanghai",
+          "functionName": "mob-shanghai",
+          "country": "CN",
+          "id": "txc.cn-east-1.fc",
+          "label": "Shanghai"
+        },
+        {
+          "key": "nanjing",
+          "region": "ap-nanjing",
+          "functionName": "mob-nanjing",
+          "country": "CN",
+          "id": "txc.cn-east-2.fc",
+          "label": "Nanjing"
+        },
+        {
+          "key": "chengdu",
+          "region": "ap-chengdu",
+          "functionName": "mob-chengdu",
+          "country": "CN",
+          "id": "txc.cn-southwest-1.fc",
+          "label": "Chengdu"
+        },
+        {
+          "key": "hongkong",
+          "region": "ap-hongkong",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "txc.ap-east-1.fc",
+          "label": "Hong Kong"
+        },
+        {
+          "key": "singapore",
+          "region": "ap-singapore",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "txc.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "bangkok",
+          "region": "ap-bangkok",
+          "functionName": "mob-bangkok",
+          "country": "TH",
+          "id": "txc.ap-southeast-2.fc",
+          "label": "Bangkok"
+        },
+        {
+          "key": "jakarta",
+          "region": "ap-jakarta",
+          "functionName": "mob-jakarta",
+          "country": "ID",
+          "id": "txc.ap-southeast-3.fc",
+          "label": "Jakarta"
+        },
+        {
+          "key": "tokyo",
+          "region": "ap-tokyo",
+          "functionName": "mob-tokyo",
+          "country": "JP",
+          "id": "txc.ap-northeast-1.fc",
+          "label": "Tokyo"
+        },
+        {
+          "key": "seoul",
+          "region": "ap-seoul",
+          "functionName": "mob-seoul",
+          "country": "KR",
+          "id": "txc.ap-northeast-2.fc",
+          "label": "Seoul"
+        },
+        {
+          "key": "frankfurt",
+          "region": "eu-frankfurt",
+          "functionName": "mob-frankfurt",
+          "country": "DE",
+          "id": "txc.eu-central-1.fc",
+          "label": "Frankfurt"
+        },
+        {
+          "key": "ashburn",
+          "region": "na-ashburn",
+          "functionName": "mob-ashburn",
+          "country": "US",
+          "id": "txc.us-east-1.fc",
+          "label": "Ashburn"
+        },
+        {
+          "key": "siliconvalley",
+          "region": "na-siliconvalley",
+          "functionName": "mob-siliconvalley",
+          "country": "US",
+          "id": "txc.us-west-1.fc",
+          "label": "Silicon Valley"
+        },
+        {
+          "key": "saopaulo",
+          "region": "sa-saopaulo",
+          "functionName": "mob-saopaulo",
+          "country": "BR",
+          "id": "txc.sa-east-1.fc",
+          "label": "Sao Paulo"
+        }
+      ]
+    },
+    "gcloud": {
+      "name": "mtr-agent-gcloud",
+      "output": "gcloud",
+      "image": {
+        "imageUrl": "asia-docker.pkg.dev/<project>/<repo>/mtr-agent:dev"
+      },
+      "env": {
+        "MTR_PROTOCOLS": 3
+      },
+      "targets": [
+        {
+          "key": "chuanghua",
+          "region": "asia-east1",
+          "functionName": "mob-chuanghua",
+          "country": "TW",
+          "id": "gcp.ap-east-1.fc",
+          "label": "Changhua"
+        },
+        {
+          "key": "hongkong",
+          "region": "asia-east2",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "gcp.ap-east-2.fc",
+          "label": "Hong Kong"
+        },
+        {
+          "key": "tokyo",
+          "region": "asia-northeast1",
+          "functionName": "mob-tokyo",
+          "country": "JP",
+          "id": "gcp.ap-northeast-1.fc",
+          "label": "Tokyo"
+        },
+        {
+          "key": "osaka",
+          "region": "asia-northeast2",
+          "functionName": "mob-osaka",
+          "country": "JP",
+          "id": "gcp.ap-northeast-2.fc",
+          "label": "Osaka"
+        },
+        {
+          "key": "seoul",
+          "region": "asia-northeast3",
+          "functionName": "mob-seoul",
+          "country": "KR",
+          "id": "gcp.ap-northeast-3.fc",
+          "label": "Seoul"
+        },
+        {
+          "key": "singapore",
+          "region": "asia-southeast1",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "gcp.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "jakarta",
+          "region": "asia-southeast2",
+          "functionName": "mob-jakarta",
+          "country": "ID",
+          "id": "gcp.ap-southeast-2.fc",
+          "label": "Jakarta"
+        }
+      ]
+    }
+  }
+}
