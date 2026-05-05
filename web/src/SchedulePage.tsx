@@ -27,7 +27,7 @@ import { errorMessage } from "./errors";
 import { formatBytes, formatDateTime, formatHistoryDateTime, formatInterval, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
 import { fetchGeoIPQueued, ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
 import { buildCreateJobRequest, defaultFormState, navTools, normalizeTargetForTool, parseHostPort } from "./jobForm";
-import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed } from "./permissions";
+import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed, toolAllowedForAgent } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, DNSRecordsCell, MtrResultTable, type GeoIPLookup } from "./resultTables";
 import { targetResolvedIP } from "./streamEvents";
@@ -98,7 +98,7 @@ export function SchedulePage({
   const eventsRequestRef = useRef(0);
   const allowedTools = useMemo(() => navTools.filter((tool) => toolAllowed(permissions, tool)), [permissions]);
   const scheduleWriteAllowed = canWriteSchedules(permissions);
-  const routeAgents = useMemo(() => capableAgents(agents, form.tool), [agents, form.tool]);
+  const routeAgents = useMemo(() => capableAgents(agents, form.tool).filter((agent) => toolAllowedForAgent(permissions, form.tool, agent)), [agents, form.tool, permissions]);
   const scheduleLabelOptions = useMemo(() => scheduleLabelsForAgents(routeAgents, t), [routeAgents, t]);
   const scheduleIPOptions = useMemo(() => scheduleIPVersionOptions(permissions, form, routeAgents, scheduleLabels, t), [form, permissions, routeAgents, scheduleLabels, t]);
   const selectedSchedule = schedules.find((schedule) => schedule.id === selectedScheduleId);

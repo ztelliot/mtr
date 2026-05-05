@@ -1,15 +1,24 @@
 import { parseHostPort, requiresAgent } from "./jobForm";
-import type { Agent, IPVersion, JobFormState, Permissions, Tool } from "./types";
+import type { Agent, IPVersion, JobFormState, PermissionTool, Permissions, Tool } from "./types";
 
 const hostnamePattern = /^[a-zA-Z0-9.-]{1,253}$/;
 const ipv4Pattern = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 const forbiddenTargetChars = /[ \t\r\n;&|`$<>]/;
 
+const toolRequiredArg: Partial<Record<Tool, string>> = {
+  dns: "type",
+  http: "method",
+  mtr: "protocol",
+  ping: "protocol",
+  port: "port",
+  traceroute: "protocol"
+};
+
 export function effectivePermissions(permissions: Permissions | null, agent?: Agent | null): Permissions | null {
   if (!permissions || !agent) {
     return permissions;
   }
-  return { ...permissions, tools: agent.tools ?? {} };
+  return { ...permissions, tools: intersectToolPermissions(permissions.tools, agent.tools ?? {}) };
 }
 
 export function toolAllowed(permissions: Permissions | null, tool: Tool): boolean {
@@ -44,7 +53,102 @@ export function filterAgentsByPermissions(agents: Agent[], permissions: Permissi
   if (!permissions) {
     return [];
   }
-  return agents.filter((agent) => Object.keys(agent.tools ?? {}).length > 0);
+  return agents.filter((agent) => Object.keys(effectivePermissions(permissions, agent)?.tools ?? {}).length > 0);
+}
+
+function intersectToolPermissions(tokenTools: Permissions["tools"], agentTools: Permissions["tools"]): Permissions["tools"] {
+  const out: Permissions["tools"] = {};
+  for (const tool of Object.keys(tokenTools) as Tool[]) {
+    const tokenTool = tokenTools[tool];
+    const agentTool = agentTools[tool];
+    const merged = tokenTool && agentTool ? intersectPermissionTool(tool, tokenTool, agentTool) : undefined;
+    if (merged) {
+      out[tool] = merged;
+    }
+  }
+  return out;
+}
+
+function intersectPermissionTool(tool: Tool, tokenTool: PermissionTool, agentTool: PermissionTool): PermissionTool | null {
+  if (agentTool.allowed_args === undefined) {
+    return null;
+  }
+  const resolveOnAgent = intersectResolveOnAgent(tokenTool.resolve_on_agent, agentTool.resolve_on_agent);
+  if (resolveOnAgent === "conflict") {
+    return null;
+  }
+  const allowedArgs = intersectAllowedArgs(tokenTool.allowed_args, agentTool.allowed_args);
+  const ipVersions = intersectIPVersions(tokenTool.ip_versions, agentTool.ip_versions);
+  const merged: PermissionTool = {
+    requires_agent: tokenTool.requires_agent || agentTool.requires_agent,
+    ...(allowedArgs !== undefined ? { allowed_args: allowedArgs } : {}),
+    ...(resolveOnAgent !== undefined ? { resolve_on_agent: resolveOnAgent } : {}),
+    ...(ipVersions !== undefined ? { ip_versions: ipVersions } : {})
+  };
+  return toolPermissionUsable(tool, merged) ? merged : null;
+}
+
+function intersectResolveOnAgent(left: boolean | undefined, right: boolean | undefined): boolean | undefined | "conflict" {
+  if (left === undefined) {
+    return right;
+  }
+  if (right === undefined || left === right) {
+    return left;
+  }
+  return "conflict";
+}
+
+function intersectIPVersions(left: IPVersion[] | undefined, right: IPVersion[] | undefined): IPVersion[] | undefined {
+  if (left === undefined) {
+    return right ? [...right] : undefined;
+  }
+  if (right === undefined) {
+    return [...left];
+  }
+  return left.filter((version) => right.includes(version));
+}
+
+function intersectAllowedArgs(left: Record<string, string> | undefined, right: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (left === undefined) {
+    return right ? { ...right } : undefined;
+  }
+  if (right === undefined) {
+    return { ...left };
+  }
+  const out: Record<string, string> = {};
+  for (const [arg, leftRule] of Object.entries(left)) {
+    const rightRule = right[arg];
+    if (rightRule === undefined) {
+      continue;
+    }
+    if (arg === "port") {
+      const rule = intersectPortRules(leftRule, rightRule);
+      if (rule) {
+        out[arg] = rule;
+      }
+      continue;
+    }
+    const values = intersectCSVValues(leftRule, rightRule);
+    if (values.length > 0) {
+      out[arg] = values.join(",");
+    }
+  }
+  return out;
+}
+
+function toolPermissionUsable(tool: Tool, permission: PermissionTool): boolean {
+  if (permission.ip_versions?.length === 0) {
+    return false;
+  }
+  const requiredArg = toolRequiredArg[tool];
+  if (!requiredArg || permission.allowed_args === undefined) {
+    return true;
+  }
+  const rule = permission.allowed_args[requiredArg];
+  if (rule === undefined) {
+    return false;
+  }
+  return requiredArg === "port" ? parsePortRanges(rule).length > 0 : rule.trim() === "" || csvValues(rule).length > 0;
 }
 
 export function permissionFormError(
@@ -443,10 +547,21 @@ function permissionAllowsArg(permissions: Permissions | null, tool: Tool, arg: s
 }
 
 function csvValueAllowed(rule: string | undefined, value: string): boolean {
-  if (rule === undefined || rule.trim() === "") {
+  if (rule === undefined) {
     return true;
   }
-  return rule.split(",").map((item) => item.trim()).includes(value);
+  const values = csvValues(rule);
+  return values.length === 0 || values.includes(value);
+}
+
+function csvValues(rule: string | undefined): string[] {
+  return (rule ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function intersectCSVValues(leftRule: string | undefined, rightRule: string | undefined): string[] {
+  const left = csvValues(leftRule);
+  const right = new Set(csvValues(rightRule));
+  return left.filter((value) => right.has(value));
 }
 
 function portAllowed(rule: string | undefined, value: string): boolean {
@@ -459,6 +574,20 @@ function portAllowed(rule: string | undefined, value: string): boolean {
     return false;
   }
   return parsePortRanges(rule).some(([start, end]) => port >= start && port <= end);
+}
+
+function intersectPortRules(leftRule: string | undefined, rightRule: string | undefined): string {
+  const out: string[] = [];
+  for (const [leftStart, leftEnd] of parsePortRanges(leftRule)) {
+    for (const [rightStart, rightEnd] of parsePortRanges(rightRule)) {
+      const start = Math.max(leftStart, rightStart);
+      const end = Math.min(leftEnd, rightEnd);
+      if (start <= end) {
+        out.push(start === end ? String(start) : `${start}-${end}`);
+      }
+    }
+  }
+  return out.join(",");
 }
 
 function parsePortRanges(rule: string | undefined): Array<[number, number]> {

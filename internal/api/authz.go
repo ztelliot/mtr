@@ -166,7 +166,7 @@ func (s *Server) agentToolPermissions(agent model.Agent, scope TokenScope) map[m
 	}
 	tools := permissionsForPolicies(s.policiesForLabels(agent.Labels), agentScope)
 	for tool, permission := range tools {
-		if !agentSupportsToolCapability(agent, tool) {
+		if !agentSupportsToolCapability(agent, tool) || permission.AllowedArgs == nil || len(permission.AllowedArgs) == 0 || len(permission.IPVersions) == 0 {
 			delete(tools, tool)
 			continue
 		}

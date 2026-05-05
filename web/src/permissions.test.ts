@@ -102,6 +102,28 @@ describe("permission helpers", () => {
     expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", agentId: "edge-1", method: "HEAD" }, fullPermissions, scopedAgents, testTranslate)).toBeNull();
   });
 
+  it("requires token and agent tool argument permissions to overlap", () => {
+    const tokenAllowsICMPOnly = {
+      ...fullPermissions,
+      tools: {
+        mtr: { allowed_args: { protocol: "icmp" }, ip_versions: [0, 4, 6], requires_agent: true }
+      }
+    } satisfies Permissions;
+    const tcpOnlyAgent = testAgent("edge-tcp", ["blue"], {
+      mtr: { allowed_args: { protocol: "tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
+    });
+    const mixedAgent = testAgent("edge-mixed", ["blue"], {
+      mtr: { allowed_args: { protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
+    });
+
+    expect(toolAllowedForAgent(tokenAllowsICMPOnly, "mtr", tcpOnlyAgent)).toBe(false);
+    expect(protocolOptions(tokenAllowsICMPOnly, "mtr", tcpOnlyAgent)).toEqual([]);
+    expect(filterAgentsByPermissions([tcpOnlyAgent], tokenAllowsICMPOnly)).toEqual([]);
+    expect(protocolOptions(tokenAllowsICMPOnly, "mtr", mixedAgent).map((option) => option.value)).toEqual(["icmp"]);
+    expect(permissionFormError({ ...defaultFormState, tool: "mtr", target: "1.1.1.1", agentId: "edge-tcp", protocol: "icmp" }, tokenAllowsICMPOnly, [tcpOnlyAgent], testTranslate)).toBe("errors.toolNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "mtr", target: "1.1.1.1", agentId: "edge-tcp", protocol: "tcp" }, tokenAllowsICMPOnly, [tcpOnlyAgent], testTranslate)).toBe("errors.toolNotAllowed");
+  });
+
   it("treats empty IP version permissions as no allowed versions", () => {
     const scoped = {
       ...fullPermissions,
