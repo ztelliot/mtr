@@ -664,7 +664,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
 
       {section === "settings" && (
         <Stack gap="md">
-          <Paper withBorder p="md">
+          <Paper className="manage-agent-box" withBorder p="md">
             <Stack gap="lg">
               <SectionHeader title={t("manage.rateLimitTab")} />
               <RateLimitEditor value={settings.rate_limit} disabled={!writable} t={t} onChange={(rateLimit) => setSettings({ ...settings, rate_limit: rateLimit })} />
@@ -718,15 +718,15 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
           <Paper className="manage-agent-box" withBorder p="md">
             <Stack gap="md">
               <SectionHeader title={t("manage.httpAgents")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewHTTPAgentModal}><ResponsiveActionLabel full={t("manage.addHTTPAgent")} compact={t("actions.add")} /></GuardedButton>} />
-              <Table.ScrollContainer minWidth={780}>
+              <Table.ScrollContainer minWidth={920}>
                 <Table className="manage-table" verticalSpacing="xs">
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>{t("manage.id")}</Table.Th>
                       <Table.Th>{t("manage.url")}</Table.Th>
                       <Table.Th>{t("manage.labels")}</Table.Th>
-                      <Table.Th>{t("manage.status")}</Table.Th>
-                      <Table.Th>{t("manage.updated")}</Table.Th>
+                      <Table.Th className="manage-http-status-column">{t("manage.status")}</Table.Th>
+                      <Table.Th className="manage-date-column">{t("manage.updated")}</Table.Th>
                       <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
@@ -738,8 +738,8 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
                           <Table.Td><Text fw={600}>{agent.id}</Text></Table.Td>
                           <Table.Td>{node.base_url}</Table.Td>
                           <Table.Td><LabelBadges labels={agent.labels ?? node.labels} /></Table.Td>
-                          <Table.Td><HTTPAgentBadges agent={agent} node={node} t={t} /></Table.Td>
-                          <Table.Td>{formatDateTime(node.updated_at || agent.last_seen_at)}</Table.Td>
+                          <Table.Td className="manage-http-status-column"><HTTPAgentBadges agent={agent} node={node} t={t} /></Table.Td>
+                          <Table.Td className="manage-date-column">{formatDateTime(node.updated_at || agent.last_seen_at)}</Table.Td>
                           <Table.Td className="manage-table-actions">
                             <Group gap="xs" justify="flex-end">
                               <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editHTTPAgent(node)}><Pencil size={16} /></ActionIcon></Tooltip>
@@ -760,7 +760,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
 
       {writable && section === "tokens" && (
         <Stack gap="lg">
-            <Paper withBorder p="md">
+            <Paper className="manage-agent-box" withBorder p="md">
               <Stack gap="md">
                 <SectionHeader title={t("manage.tokens")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewTokenModal}><ResponsiveActionLabel full={t("manage.addToken")} compact={t("actions.add")} /></GuardedButton>} />
                 <Table.ScrollContainer minWidth={760}>
@@ -799,7 +799,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
               </Stack>
             </Paper>
 
-            <Paper withBorder p="md">
+            <Paper className="manage-agent-box" withBorder p="md">
               <Stack gap="md">
                 <SectionHeader title={t("manage.registerTokenList")} action={<GuardedButton leftSection={<Plus size={16} />} loading={savingSettings} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={createRegisterToken}><ResponsiveActionLabel full={t("manage.addRegisterToken")} compact={t("actions.add")} /></GuardedButton>} />
                 <Table.ScrollContainer minWidth={680}>
@@ -842,7 +842,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
       )}
 
       {section === "labels" && (
-        <Paper withBorder p="md">
+        <Paper className="manage-agent-box" withBorder p="md">
           <Stack gap="md">
             <SectionHeader
               title={t("manage.labelManagement")}

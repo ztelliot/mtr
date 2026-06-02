@@ -88,7 +88,7 @@ describe("stream events", () => {
       {
         label: "#1",
         value: "59.43.67.5",
-        meta: "7.0 ms avg · 1 probes",
+        meta: "7.0ms avg · 1 probes",
         status: "0.0% loss"
       }
     ]);
@@ -357,7 +357,7 @@ describe("stream events", () => {
     expect(resultRows(undefined, extractHops(events))[0]).toMatchObject({
       label: "#4",
       value: "59.43.67.5",
-      meta: "7.1 ms avg · 1 probes",
+      meta: "7.1ms avg · 1 probes",
       status: "0.0% loss"
     });
   });

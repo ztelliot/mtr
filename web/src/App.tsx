@@ -47,7 +47,28 @@ import { appVersionLabel } from "./version";
 
 const streamErrorStatusFallbackMS = 4000;
 const streamNames = ["message", "progress", "target_resolved", "target_blocked", "unsupported_tool", "unsupported_protocol", "job_timeout", "hop", "hop_summary", "metric", "summary", "completed", "succeeded", "failed", "canceled", "stderr", "stdout"];
+const debugThemeStorageKey = "mtr.debug-theme";
+const legacyDebugPixelThemeStorageKey = "mtr.debug-pixel-theme";
+const debugThemes = ["pixel", "classic"] as const;
+type DebugTheme = (typeof debugThemes)[number];
 type AppPage = "diagnostics" | "schedules" | "manage";
+
+const debugThemeBodyClasses: Record<DebugTheme, string[]> = {
+  pixel: ["debug-pixel-theme"],
+  classic: []
+};
+
+function isDebugTheme(value: string | null): value is DebugTheme {
+  return value === "pixel" || value === "classic";
+}
+
+function storedDebugTheme(): DebugTheme {
+  if (typeof window === "undefined") {
+    return "pixel";
+  }
+  const stored = window.localStorage.getItem(debugThemeStorageKey);
+  return isDebugTheme(stored) ? stored : "pixel";
+}
 
 export function App() {
   const { t, i18n } = useTranslation();
@@ -74,6 +95,7 @@ export function App() {
   const [geoIPByIP, setGeoIPByIP] = useState<Record<string, GeoIPInfo | null>>({});
   const [serverVersion, setServerVersion] = useState<VersionInfo | null>(null);
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
+  const [debugTheme, setDebugTheme] = useState<DebugTheme>(storedDebugTheme);
   const [apiBaseUrlDraft, setApiBaseUrlDraft] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState("");
   const sourcesRef = useRef<EventSource[]>([]);
@@ -161,6 +183,18 @@ export function App() {
     void refreshServerVersion(client);
     void refreshPermissionsAndAgents(client);
   }, [client]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    const themeClasses = Object.values(debugThemeBodyClasses).flat();
+    themeClasses.forEach((className) => document.body.classList.remove(className));
+    debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.add(className));
+    window.localStorage.setItem(debugThemeStorageKey, debugTheme);
+    window.localStorage.removeItem(legacyDebugPixelThemeStorageKey);
+    return () => themeClasses.forEach((className) => document.body.classList.remove(className));
+  }, [debugTheme]);
 
   useEffect(() => {
     if (!client || !routeJobID || page !== "diagnostics") {
@@ -953,12 +987,23 @@ export function App() {
           </div>
         </footer>
       </Container>
-      <Modal centered opened={tokenDialogOpen} title={t("token.title")} onClose={() => setTokenDialogOpen(false)}>
-        <form onSubmit={(event) => {
+      <Modal centered classNames={{ body: "debug-modal-body" }} opened={tokenDialogOpen} title={t("token.title")} onClose={() => setTokenDialogOpen(false)}>
+        <form className="debug-modal-form" onSubmit={(event) => {
           event.preventDefault();
           saveApiTokenOverride();
         }}>
           <Stack gap="md">
+            <Select
+              checkIconPosition="left"
+              className="token-field"
+              data={debugThemes.map((theme) => ({
+                value: theme,
+                label: t(`token.themeOptions.${theme}`)
+              }))}
+              label={t("token.theme")}
+              value={debugTheme}
+              onChange={(value) => setDebugTheme(isDebugTheme(value) ? value : "pixel")}
+            />
             <TextInput
               autoFocus
               className="token-field"
@@ -974,7 +1019,7 @@ export function App() {
               value={apiTokenDraft}
               onChange={(event) => setApiTokenDraft(event.currentTarget.value)}
             />
-            <Group justify="flex-end" gap="sm">
+            <Group className="debug-modal-actions" justify="flex-end" gap="sm">
               <Button variant="default" type="button" onClick={() => setTokenDialogOpen(false)}>
                 {t("actions.cancel")}
               </Button>

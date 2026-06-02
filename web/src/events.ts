@@ -154,7 +154,7 @@ export function resultRows(result: ToolResult | undefined, hops: HopResult[] = [
       value: hop.host || hop.ip || "*",
       meta: [
         hop.ip && hop.host ? hop.ip : undefined,
-        hop.avg_ms !== undefined ? `${hop.avg_ms.toFixed(1)} ms avg` : undefined,
+        hop.avg_ms !== undefined ? `${hop.avg_ms.toFixed(1)}ms avg` : undefined,
         hop.probes?.length ? `${hop.probes.length} probes` : undefined
       ]
         .filter(Boolean)
@@ -180,7 +180,7 @@ export function resultRows(result: ToolResult | undefined, hops: HopResult[] = [
       ]
         .filter(Boolean)
         .join(" · "),
-      status: hop.avg_ms !== undefined ? `${hop.avg_ms.toFixed(1)} ms` : undefined
+      status: hop.avg_ms !== undefined ? `${hop.avg_ms.toFixed(1)}ms` : undefined
     }));
   }
 
@@ -225,7 +225,7 @@ function formatValue(value: unknown): string {
 function hopLabel(hop: HopResult): string {
   const normalized = normalizeHop(hop);
   const target = normalized.host || normalized.ip || "*";
-  const timing = normalized.avg_ms !== undefined ? `${normalized.avg_ms.toFixed(1)} ms avg` : "pending";
+  const timing = normalized.avg_ms !== undefined ? `${normalized.avg_ms.toFixed(1)}ms avg` : "pending";
   return `hop ${normalized.index}: ${target}, ${timing}`;
 }
 

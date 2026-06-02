@@ -9,7 +9,7 @@ export function formatServerVersion(info: VersionInfo | null, t: (key: string) =
 }
 
 export function formatMS(value?: number): string {
-  return value === undefined ? "-" : `${value.toFixed(2)} ms`;
+  return value === undefined ? "-" : `${value.toFixed(2)}ms`;
 }
 
 export function routeRTT(row: { lastMS?: number; avgMS?: number; bestMS?: number; worstMS?: number }): number | undefined {

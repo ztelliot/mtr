@@ -262,6 +262,7 @@ function nodeRows(
 function PingRTTChart({ samples, lossPct }: { samples?: Array<number | null>; lossPct?: number }) {
   const width = 76;
   const height = 34;
+  const timeoutDotY = 6;
   const isPlaceholder = !samples?.length;
   const visibleSamples = (isPlaceholder ? [null] : samples).slice(-18);
   const values = visibleSamples.flatMap((sample) => (typeof sample === "number" ? [sample] : []));
@@ -269,7 +270,8 @@ function PingRTTChart({ samples, lossPct }: { samples?: Array<number | null>; lo
   if (!hasValues && isPlaceholder) {
     return (
       <svg className="ping-rtt-chart ping-rtt-chart-empty" role="img" viewBox={`0 0 ${width} ${height}`}>
-        <rect x="26" y="3" width="28" height="27" rx="2" />
+        <rect className="ping-rtt-bar" x="26" y="3" width="28" height="27" rx="2" />
+        {pingRTTMarker(40, timeoutDotY, "ping-rtt-timeout-dot")}
       </svg>
     );
   }
@@ -279,19 +281,61 @@ function PingRTTChart({ samples, lossPct }: { samples?: Array<number | null>; lo
   const chartWidth = visibleSamples.length * barWidth + (visibleSamples.length - 1) * gap;
   const startX = Math.max(0, Math.floor((width - chartWidth) / 2));
   const failed = lossPct !== undefined && lossPct >= 100;
+  const chartSamples = visibleSamples.map((sample, index) => {
+    const x = startX + index * (barWidth + gap);
+    if (typeof sample !== "number") {
+      return { barHeight: 27, dotX: Math.round(x + barWidth / 2), dotY: timeoutDotY, sample, x };
+    }
+    const normalized = sample / max;
+    const barHeight = Math.max(7, Math.round(9 + normalized * 18));
+    return { barHeight, dotX: Math.round(x + barWidth / 2), dotY: Math.round(28 - normalized * 22), sample, x };
+  });
   return (
     <svg className={`ping-rtt-chart ${failed ? "ping-rtt-chart-failed" : ""}`} role="img" viewBox={`0 0 ${width} ${height}`}>
-      {visibleSamples.map((sample, index) => {
-        const x = startX + index * (barWidth + gap);
+      {pingRTTLineSegments(chartSamples)}
+      {chartSamples.map(({ barHeight, dotX, dotY, sample, x }, index) => {
         if (typeof sample !== "number") {
-          return <rect className="ping-rtt-timeout" key={index} x={x} y="3" width={barWidth} height="27" rx="1" />;
+          return (
+            <g key={index}>
+              <rect className="ping-rtt-bar ping-rtt-timeout" x={x} y="3" width={barWidth} height="27" rx="1" />
+              {pingRTTMarker(dotX, dotY, "ping-rtt-timeout-dot")}
+            </g>
+          );
         }
-        const normalized = sample / max;
-        const barHeight = Math.max(7, Math.round(9 + normalized * 18));
-        return <rect key={index} x={x} y={height - barHeight - 4} width={barWidth} height={barHeight} rx="1" />;
+        return (
+          <g key={index}>
+            <rect className="ping-rtt-bar" x={x} y={height - barHeight - 4} width={barWidth} height={barHeight} rx="1" />
+            {pingRTTMarker(dotX, dotY)}
+          </g>
+        );
       })}
     </svg>
   );
+}
+
+function pingRTTLineSegments(samples: Array<{ dotX: number; dotY: number; sample: number | null }>) {
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> = [];
+  samples.forEach(({ dotX, dotY, sample }) => {
+    if (typeof sample !== "number") {
+      if (current.length > 1) {
+        segments.push(current);
+      }
+      current = [];
+      return;
+    }
+    current.push({ x: dotX, y: dotY });
+  });
+  if (current.length > 1) {
+    segments.push(current);
+  }
+  return segments.map((segment, index) => (
+    <polyline className="ping-rtt-sparkline" key={index} points={segment.map(({ x, y }) => `${x},${y}`).join(" ")} />
+  ));
+}
+
+function pingRTTMarker(x: number, y: number, className = "") {
+  return <rect className={className ? `ping-rtt-dot ${className}` : "ping-rtt-dot"} height="3" width="3" x={x - 1.5} y={y - 1.5} />;
 }
 
 export function DNSRecordsCell({
