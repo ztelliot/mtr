@@ -51,10 +51,21 @@ export function formatLocation(info: GeoIPInfo | null | undefined): string | und
   if (!info) {
     return undefined;
   }
-  return [info.city, info.region, info.country]
+  const seen = new Set<string>();
+  const location = [info.city, info.region, info.country]
     .map((part) => part?.trim())
-    .filter(Boolean)
-    .join(", ") || undefined;
+    .filter((part): part is string => Boolean(part))
+    .filter((part) => {
+      const key = part.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .join(", ");
+
+  return location || undefined;
 }
 
 export async function fetchGeoIPQueued<T>(

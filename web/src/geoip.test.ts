@@ -39,6 +39,7 @@ describe("geoip helpers", () => {
     };
     expect(formatASN(info)).toBe("AS13335 Cloudflare, Inc.");
     expect(formatLocation(info)).toBe("Brisbane, Queensland, Australia");
+    expect(formatLocation({ city: "Singapore", region: "Singapore", country: "Singapore" })).toBe("Singapore");
   });
 
   it("queues GeoIP lookups with a concurrency limit", async () => {
