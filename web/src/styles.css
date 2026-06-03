@@ -2093,6 +2093,16 @@ th.manage-table-actions {
   width: 18px;
 }
 
+.debug-modal-actions {
+  gap: 12px !important;
+  margin-top: 6px;
+}
+
+.debug-modal-actions .mantine-Button-root {
+  min-width: 68px;
+  padding-inline: 18px !important;
+}
+
 body.debug-pixel-theme {
   --mtr-bg: light-dark(#f8fafb, #101318);
   --mtr-dot: light-dark(rgb(66 126 120 / 0.14), rgb(126 189 180 / 0.11));
@@ -2148,6 +2158,7 @@ body.debug-pixel-theme .page {
 .debug-pixel-theme .mantine-Title-root,
 .debug-pixel-theme .mantine-Tabs-tab,
 .debug-pixel-theme .mantine-Table-table,
+.debug-pixel-theme .mantine-Alert-root,
 .debug-pixel-theme .mantine-Badge-root,
 .debug-pixel-theme .mantine-Notification-root,
 .debug-pixel-theme .schedule-chart-label,
@@ -2222,6 +2233,87 @@ body.debug-pixel-theme .page {
   border-radius: 2px !important;
   box-shadow: 2px 2px 0 var(--mtr-shadow) !important;
   color: var(--mtr-text);
+}
+
+.debug-pixel-theme .mantine-Alert-root,
+.debug-pixel-theme .mantine-Notification-root {
+  --mtr-prompt-accent: var(--alert-color, var(--notification-color, var(--mtr-accent)));
+  --mtr-prompt-bg: light-dark(
+    color-mix(in srgb, var(--mtr-prompt-accent) 9%, var(--mtr-surface) 91%),
+    color-mix(in srgb, var(--mtr-prompt-accent) 24%, var(--mtr-surface) 76%)
+  );
+  --mtr-prompt-border: light-dark(
+    color-mix(in srgb, var(--mtr-prompt-accent) 18%, var(--mtr-surface) 82%),
+    color-mix(in srgb, var(--mtr-prompt-accent) 34%, var(--mtr-surface) 66%)
+  );
+  --mtr-prompt-hover: light-dark(
+    color-mix(in srgb, var(--mtr-prompt-accent) 16%, transparent),
+    color-mix(in srgb, var(--mtr-prompt-accent) 28%, transparent)
+  );
+  background: var(--mtr-prompt-bg) !important;
+  border: 1px solid var(--mtr-prompt-border) !important;
+  border-left: 4px solid var(--mtr-prompt-border) !important;
+  border-radius: 0 !important;
+  box-shadow: 2px 2px 0 var(--mtr-shadow) !important;
+  color: var(--mtr-text) !important;
+  line-height: 1.45;
+  padding: 12px 14px !important;
+}
+
+.debug-pixel-theme .mantine-Notification-root::before {
+  display: none !important;
+}
+
+.debug-pixel-theme .mantine-Alert-icon,
+.debug-pixel-theme .mantine-Notification-icon {
+  background: transparent !important;
+  border-radius: 0 !important;
+  color: var(--mtr-prompt-accent) !important;
+  height: 22px;
+  margin-inline-end: 12px !important;
+  width: 22px;
+}
+
+.debug-pixel-theme .mantine-Alert-icon svg,
+.debug-pixel-theme .mantine-Notification-icon svg {
+  color: currentColor !important;
+  stroke: currentColor;
+}
+
+.debug-pixel-theme .mantine-Alert-title,
+.debug-pixel-theme .mantine-Notification-title {
+  color: var(--mtr-text) !important;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.debug-pixel-theme .mantine-Alert-message {
+  color: var(--mtr-text) !important;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.debug-pixel-theme .mantine-Notification-description {
+  color: var(--mtr-muted) !important;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.debug-pixel-theme .mantine-Alert-closeButton,
+.debug-pixel-theme .mantine-Notification-closeButton {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: 0 !important;
+  color: var(--mtr-muted) !important;
+  box-shadow: none !important;
+}
+
+.debug-pixel-theme .mantine-Alert-closeButton:hover,
+.debug-pixel-theme .mantine-Notification-closeButton:hover {
+  background: var(--mtr-prompt-hover) !important;
+  border-color: var(--mtr-prompt-border) !important;
+  color: var(--mtr-text) !important;
 }
 
 .debug-pixel-theme .mantine-Modal-content,
