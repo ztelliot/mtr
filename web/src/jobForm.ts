@@ -81,8 +81,9 @@ export function locationHasExplicitTarget(location: Pick<Location, "pathname" | 
 
 export function formStatePath(state: JobFormState): string {
   const params = new URLSearchParams();
-  if (state.target.trim()) {
-    params.set("target", state.target.trim());
+  const target = normalizeTargetForTool(state.target, state.tool);
+  if (target.trim()) {
+    params.set("target", target.trim());
   }
   if (state.ipVersion !== 0 && state.tool !== "dns") {
     params.set("ip_version", String(state.ipVersion));
@@ -134,6 +135,7 @@ export function formStateFromJob(job: Job, base: JobFormState = defaultFormState
 
 export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
   const args: Record<string, string> = {};
+  const target = normalizeTargetForTool(state.target, state.tool);
   if (state.tool === "ping" || state.tool === "traceroute" || state.tool === "mtr") {
     setIfPresent(args, "protocol", state.protocol);
   }
@@ -144,7 +146,7 @@ export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
     setIfPresent(args, "type", state.dnsType);
   }
   if (state.tool === "port") {
-    const parsed = parseHostPort(state.target);
+    const parsed = parseHostPort(target);
     if (parsed) {
       setIfPresent(args, "port", parsed.port);
     }
@@ -152,7 +154,7 @@ export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
 
   return {
     tool: state.tool,
-    target: state.tool === "port" ? parseHostPort(state.target)?.host ?? state.target.trim() : state.target.trim(),
+    target: state.tool === "port" ? parseHostPort(target)?.host ?? target.trim() : target.trim(),
     ...(Object.keys(args).length > 0 ? { args } : {}),
     ...(state.ipVersion === 0 || state.tool === "dns" ? {} : { ip_version: state.ipVersion }),
     ...(state.agentId ? { agent_id: state.agentId } : {}),
@@ -161,32 +163,37 @@ export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
 }
 
 export function validateForm(state: JobFormState): string | null {
-  if (!state.target.trim()) {
+  const target = normalizeTargetForTool(state.target, state.tool);
+  if (!target.trim()) {
     return "Target is required.";
   }
   if (requiresAgent(state.tool) && !state.agentId) {
     return `${state.tool} requires an agent.`;
   }
-  if (state.tool === "port" && !parseHostPort(state.target)) {
+  if (state.tool === "port" && !parseHostPort(target)) {
     return "port requires host:port.";
   }
   return null;
 }
 
+export function normalizeFormTarget(state: JobFormState): JobFormState {
+  const target = normalizeTargetForTool(state.target, state.tool);
+  return target === state.target ? state : { ...state, target };
+}
+
 export function normalizeTargetForTool(value: string, tool: Tool): string {
-  if (!value.trim()) {
+  const candidate = targetInputCandidate(value);
+  if (!candidate) {
     return "";
   }
-  const target = targetParts(value);
+  const target = targetParts(candidate);
   if (tool === "http") {
-    return /^https?:\/\//i.test(value.trim())
-      ? value.trim()
-      : `https://${formatHostForUrl(target.host || "example.com")}${target.port ? `:${target.port}` : ""}`;
+    return normalizeHTTPURL(candidate, target);
   }
   if (tool === "port") {
-    return `${formatHostForPort(target.host || "1.1.1.1")}:${target.port || "443"}`;
+    return `${formatHostForPort(target.host || "1.1.1.1")}:${target.port || defaultPortForScheme(target.scheme) || "443"}`;
   }
-  return formatHostForPlain(target.host) || value.trim();
+  return formatHostForPlain(target.host) || candidate.trim();
 }
 
 export function parseHostPort(value: string): { host: string; port: string } | null {
@@ -207,13 +214,14 @@ export function parseHostPort(value: string): { host: string; port: string } | n
   return { host, port };
 }
 
-function targetParts(value: string): { host: string; port?: string } {
+function targetParts(value: string): { host: string; port?: string; scheme?: "http" | "https" } {
   const trimmed = value.trim();
-  const url = parseHTTPURL(trimmed);
+  const url = parseTargetURL(trimmed);
   if (url) {
     return {
       host: formatHostForPlain(url.hostname),
-      port: url.port || undefined
+      port: url.port || undefined,
+      scheme: url.protocol === "http:" ? "http" : url.protocol === "https:" ? "https" : undefined
     };
   }
 
@@ -225,12 +233,86 @@ function targetParts(value: string): { host: string; port?: string } {
   return { host: withoutPath };
 }
 
+function targetInputCandidate(value: string): string {
+  const trimmed = stripTargetWrappers(value.trim());
+  if (!trimmed) {
+    return "";
+  }
+
+  const urlMatch = trimmed.match(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s"'<>]+/i);
+  if (urlMatch) {
+    return stripTrailingTargetPunctuation(urlMatch[0]);
+  }
+
+  if (/\s/.test(trimmed)) {
+    const ignored = new Set(["curl", "dig", "host", "http", "https", "mtr", "nslookup", "ping", "tracepath", "traceroute", "wget"]);
+    const token = trimmed
+      .split(/\s+/)
+      .map((part) => stripTrailingTargetPunctuation(stripTargetWrappers(part)))
+      .find((part) => part && !part.startsWith("-") && !part.startsWith("@") && !ignored.has(part.toLowerCase()) && looksLikeTargetToken(part));
+    if (token) {
+      return token;
+    }
+  }
+
+  return stripTrailingTargetPunctuation(trimmed);
+}
+
+function stripTargetWrappers(value: string): string {
+  let current = value.trim();
+  for (;;) {
+    const next = current.replace(/^["'`<({]+/, "").replace(/[>"'`)}]+$/, "").trim();
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+}
+
+function stripTrailingTargetPunctuation(value: string): string {
+  return value.replace(/[),.;]+$/, "");
+}
+
+function looksLikeTargetToken(value: string): boolean {
+  return value.includes(".") || value.includes(":") || value.startsWith("[") || (/^[a-zA-Z0-9-]+$/.test(value) && /[a-zA-Z-]/.test(value));
+}
+
+function normalizeHTTPURL(value: string, fallback: { host: string; port?: string }): string {
+  const rawURL = parseHTTPURL(value);
+  const targetURL = rawURL ?? parseTargetURL(value);
+  const url = rawURL ?? (targetURL ? forceHTTPSURL(targetURL) : parseHTTPURL(`https://${value}`));
+  if (url) {
+    const protocol = url.protocol === "http:" ? "http:" : "https:";
+    const host = formatHostForUrl(formatHostForPlain(url.hostname));
+    const port = url.port ? `:${url.port}` : "";
+    const pathname = url.pathname === "/" ? "" : url.pathname;
+    return `${protocol}//${host}${port}${pathname}${url.search}`;
+  }
+  return `https://${formatHostForUrl(fallback.host || "example.com")}${fallback.port ? `:${fallback.port}` : ""}`;
+}
+
+function forceHTTPSURL(url: URL): URL {
+  const next = new URL(url.toString());
+  next.protocol = "https:";
+  return next;
+}
+
 function parseHTTPURL(value: string): URL | null {
-  if (!/^https?:\/\//i.test(value)) {
+  const url = parseTargetURL(value);
+  return url && (url.protocol === "http:" || url.protocol === "https:") ? url : null;
+}
+
+function parseTargetURL(value: string): URL | null {
+  const candidate = value.startsWith("//") ? `https:${value}` : value;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
     return null;
   }
   try {
-    return new URL(value);
+    const url = new URL(candidate);
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    return url;
   } catch {
     return null;
   }
@@ -254,6 +336,10 @@ function formatHostForUrl(value: string): string {
 
 function formatHostForPort(value: string): string {
   return formatHostForUrl(formatHostForPlain(value));
+}
+
+function defaultPortForScheme(scheme: "http" | "https" | undefined): string | undefined {
+  return scheme === "http" ? "80" : scheme === "https" ? "443" : undefined;
 }
 
 function setIfPresent(args: Record<string, string>, key: string, value: string): void {

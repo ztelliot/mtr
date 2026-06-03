@@ -157,10 +157,13 @@ describe("permission helpers", () => {
   });
 
   it("aligns target validation with backend policy rules", () => {
+    expect(localizedFormError({ ...defaultFormState, tool: "http", target: "https://example.com" }, fullPermissions, testTranslate)).toBeNull();
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "example.com" }, fullPermissions, testTranslate)).toBeNull();
+    expect(localizedFormError({ ...defaultFormState, tool: "port", target: "example.com:443" }, fullPermissions, testTranslate)).toBeNull();
     expect(localizedFormError({ ...defaultFormState, tool: "http", target: "example.com" }, fullPermissions, testTranslate)).toBe("errors.httpTargetRequired");
     expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "example.com;id" }, fullPermissions, testTranslate)).toBe("errors.targetForbiddenChars");
     expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "example..com" }, fullPermissions, testTranslate)).toBe("errors.targetHostRequired");
-    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "[2606:4700:4700::1111]" }, fullPermissions, testTranslate)).toBe("errors.targetHostRequired");
+    expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "2606:4700:4700::1111" }, fullPermissions, testTranslate)).toBeNull();
     expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "127.0.0.1" }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotAllowed");
     expect(localizedFormError({ ...defaultFormState, tool: "ping", target: "2606:4700:4700::1111", ipVersion: 4 }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotIPv4");
     expect(localizedFormError({ ...defaultFormState, tool: "http", target: "https://[::ffff:127.0.0.1]" }, fullPermissions, testTranslate)).toBe("errors.targetAddressNotAllowed");

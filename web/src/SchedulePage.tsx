@@ -26,7 +26,7 @@ import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
 import { formatBytes, formatDateTime, formatHistoryDateTime, formatInterval, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
 import { fetchGeoIPQueued, ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
-import { buildCreateJobRequest, defaultFormState, navTools, normalizeTargetForTool, parseHostPort } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, navTools, normalizeFormTarget, normalizeTargetForTool, parseHostPort } from "./jobForm";
 import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed, toolAllowedForAgent } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, DNSRecordsCell, MtrResultTable, type GeoIPLookup } from "./resultTables";
@@ -354,6 +354,10 @@ export function SchedulePage({
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function cleanTargetInput() {
+    setForm((current) => normalizeFormTarget(current));
+  }
+
   function changeScheduleTool(tool: Tool) {
     setAttemptedSubmit(false);
     setForm((current) => ({
@@ -527,6 +531,7 @@ export function SchedulePage({
                 label={t("form.target")}
                 value={form.target}
                 onChange={(event) => updateForm("target", event.currentTarget.value)}
+                onBlur={cleanTargetInput}
                 placeholder={targetPlaceholder(form.tool, t)}
               />
               <NumberInput

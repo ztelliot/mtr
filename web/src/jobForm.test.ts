@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool, validateForm } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, validateForm } from "./jobForm";
 
 describe("job form", () => {
   it("builds ping payload with optional network args", () => {
@@ -80,21 +80,53 @@ describe("job form", () => {
     });
   });
 
-  it("requires port for port checks", () => {
-    expect(validateForm({ ...defaultFormState, tool: "port", target: "example.com" })).toBe(
-      "port requires host:port."
-    );
+  it("defaults the port for port checks", () => {
+    expect(validateForm({ ...defaultFormState, tool: "port", target: "example.com" })).toBeNull();
+    expect(buildCreateJobRequest({ ...defaultFormState, tool: "port", target: "https://example.com" })).toEqual({
+      tool: "port",
+      target: "example.com",
+      args: { port: "443" },
+      resolve_on_agent: true
+    });
+    expect(buildCreateJobRequest({ ...defaultFormState, tool: "port", target: "http://example.com" })).toEqual({
+      tool: "port",
+      target: "example.com",
+      args: { port: "80" },
+      resolve_on_agent: true
+    });
   });
 
   it("normalizes target input when switching tools", () => {
     expect(normalizeTargetForTool("", "http")).toBe("");
     expect(normalizeTargetForTool("example.com", "http")).toBe("https://example.com");
+    expect(normalizeTargetForTool("example.com/status?q=1", "http")).toBe("https://example.com/status?q=1");
     expect(normalizeTargetForTool("example.com", "port")).toBe("example.com:443");
     expect(normalizeTargetForTool("example.com:8443", "ping")).toBe("example.com");
+    expect(normalizeTargetForTool("https://example.com:8443/path?q=1", "ping")).toBe("example.com");
+    expect(normalizeTargetForTool("example.com:8080", "mtr")).toBe("example.com");
     expect(normalizeTargetForTool("https://example.com/path?q=1", "dns")).toBe("example.com");
+    expect(normalizeTargetForTool("//example.com/path", "dns")).toBe("example.com");
+    expect(normalizeTargetForTool("ping -c 4 example.com", "ping")).toBe("example.com");
+    expect(normalizeTargetForTool("curl -I https://example.com/status", "http")).toBe("https://example.com/status");
     expect(normalizeTargetForTool("http://example.com:8080/path", "port")).toBe("example.com:8080");
+    expect(normalizeTargetForTool("http://example.com", "port")).toBe("example.com:80");
     expect(normalizeTargetForTool("https://example.com", "port")).toBe("example.com:443");
     expect(normalizeTargetForTool("2001:db8::1", "port")).toBe("[2001:db8::1]:443");
+    expect(normalizeTargetForTool("[2001:db8::1]:8443", "ping")).toBe("2001:db8::1");
+    expect(normalizeTargetForTool("[2001:db8::1]", "port")).toBe("[2001:db8::1]:443");
+  });
+
+  it("normalizes form target for target input blur", () => {
+    expect(normalizeFormTarget({ ...defaultFormState, tool: "ping", target: "https://example.com:8443/path?q=1" }).target).toBe("example.com");
+    expect(normalizeFormTarget({ ...defaultFormState, tool: "port", target: "example.com" }).target).toBe("example.com:443");
+    expect(normalizeFormTarget({ ...defaultFormState, tool: "http", target: "example.com/status?q=1" }).target).toBe("https://example.com/status?q=1");
+  });
+
+  it("submits cleaned target values if a raw target reaches the request builder", () => {
+    expect(buildCreateJobRequest({ ...defaultFormState, tool: "ping", target: "https://example.com:8443/path?q=1" })).toMatchObject({
+      tool: "ping",
+      target: "example.com"
+    });
   });
 
   it("builds form state from path and query parameters", () => {

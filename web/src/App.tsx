@@ -33,7 +33,7 @@ import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
 import { fetchGeoIPQueued, normalizeIPAddress } from "./geoip";
 import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailures";
-import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeTargetForTool } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
 import { ManagePage } from "./ManagePage";
@@ -628,6 +628,10 @@ export function App() {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function cleanTargetInput() {
+    setForm((current) => normalizeFormTarget(current));
+  }
+
   function changeTool(tool: Tool) {
     if (controlsLocked) {
       return;
@@ -874,6 +878,7 @@ export function App() {
                       label={t("form.target")}
                       value={form.target}
                       onChange={(event) => updateForm("target", event.currentTarget.value)}
+                      onBlur={cleanTargetInput}
                       placeholder={targetPlaceholder(form.tool, t)}
                     />
                     {form.tool !== "dns" && (
