@@ -2113,6 +2113,8 @@ body.debug-pixel-theme {
   --mtr-muted: light-dark(#5d6b73, #9fb4b2);
   --mtr-border: light-dark(#58656c, #526d6b);
   --mtr-border-soft: light-dark(#d4dde1, #2c3b3d);
+  --mtr-control-border: light-dark(#ccd7d8, #2f4042);
+  --mtr-control-border-active: light-dark(#8fa5a3, #465e5d);
   --mtr-shadow: light-dark(rgb(23 32 38 / 0.18), rgb(0 0 0 / 0.36));
   --mtr-accent: light-dark(#427e78, #7ebdb4);
   --mtr-accent-strong: light-dark(#285f5a, #a4d8d1);
@@ -2243,21 +2245,56 @@ body.debug-pixel-theme .page {
     color-mix(in srgb, var(--mtr-prompt-accent) 24%, var(--mtr-surface) 76%)
   );
   --mtr-prompt-border: light-dark(
-    color-mix(in srgb, var(--mtr-prompt-accent) 18%, var(--mtr-surface) 82%),
-    color-mix(in srgb, var(--mtr-prompt-accent) 34%, var(--mtr-surface) 66%)
+    color-mix(in srgb, var(--mtr-prompt-accent) 12%, var(--mtr-surface) 88%),
+    color-mix(in srgb, var(--mtr-prompt-accent) 22%, var(--mtr-surface) 78%)
   );
+  --mtr-prompt-left-border: var(--mtr-prompt-border);
   --mtr-prompt-hover: light-dark(
-    color-mix(in srgb, var(--mtr-prompt-accent) 16%, transparent),
-    color-mix(in srgb, var(--mtr-prompt-accent) 28%, transparent)
+    color-mix(in srgb, var(--mtr-prompt-accent) 10%, transparent),
+    color-mix(in srgb, var(--mtr-prompt-accent) 18%, transparent)
   );
   background: var(--mtr-prompt-bg) !important;
   border: 1px solid var(--mtr-prompt-border) !important;
-  border-left: 4px solid var(--mtr-prompt-border) !important;
+  border-left: 4px solid var(--mtr-prompt-left-border) !important;
   border-radius: 0 !important;
   box-shadow: 2px 2px 0 var(--mtr-shadow) !important;
   color: var(--mtr-text) !important;
   line-height: 1.45;
   padding: 12px 14px !important;
+}
+
+.debug-pixel-theme .mantine-Alert-root[style*="yellow"],
+.debug-pixel-theme .mantine-Notification-root[style*="yellow"] {
+  --mtr-prompt-accent: var(--mtr-warning);
+  --mtr-prompt-bg: light-dark(
+    color-mix(in srgb, var(--mtr-warning) 16%, var(--mtr-surface) 84%),
+    color-mix(in srgb, var(--mtr-warning) 30%, var(--mtr-surface) 70%)
+  );
+  --mtr-prompt-border: light-dark(
+    color-mix(in srgb, var(--mtr-warning) 22%, var(--mtr-surface) 78%),
+    color-mix(in srgb, var(--mtr-warning) 38%, var(--mtr-surface) 62%)
+  );
+  --mtr-prompt-left-border: light-dark(
+    color-mix(in srgb, var(--mtr-warning) 46%, var(--mtr-surface) 54%),
+    color-mix(in srgb, var(--mtr-warning) 62%, var(--mtr-surface) 38%)
+  );
+}
+
+.debug-pixel-theme .mantine-Alert-root[style*="red"],
+.debug-pixel-theme .mantine-Notification-root[style*="red"] {
+  --mtr-prompt-accent: var(--mtr-danger);
+  --mtr-prompt-bg: light-dark(
+    color-mix(in srgb, var(--mtr-danger) 14%, var(--mtr-surface) 86%),
+    color-mix(in srgb, var(--mtr-danger) 28%, var(--mtr-surface) 72%)
+  );
+  --mtr-prompt-border: light-dark(
+    color-mix(in srgb, var(--mtr-danger) 20%, var(--mtr-surface) 80%),
+    color-mix(in srgb, var(--mtr-danger) 36%, var(--mtr-surface) 64%)
+  );
+  --mtr-prompt-left-border: light-dark(
+    color-mix(in srgb, var(--mtr-danger) 46%, var(--mtr-surface) 54%),
+    color-mix(in srgb, var(--mtr-danger) 62%, var(--mtr-surface) 38%)
+  );
 }
 
 .debug-pixel-theme .mantine-Notification-root::before {
@@ -2330,13 +2367,9 @@ body.debug-pixel-theme .page {
 }
 
 .debug-pixel-theme .debug-modal-actions {
-  --group-gap: 14px;
-  gap: 14px !important;
+  --group-gap: 12px;
+  gap: 12px !important;
   margin-top: 10px;
-}
-
-.debug-pixel-theme .debug-modal-actions .mantine-Button-inner {
-  padding-inline: 6px !important;
 }
 
 .debug-pixel-theme .query-panel,
@@ -2374,13 +2407,13 @@ body.debug-pixel-theme .page {
 .debug-pixel-theme .mantine-Combobox-option[data-combobox-active],
 .debug-pixel-theme .mantine-Popover-dropdown [data-combobox-option][data-combobox-active] {
   background: var(--mtr-surface-muted) !important;
-  color: var(--mtr-accent-strong) !important;
+  color: var(--mtr-text) !important;
 }
 
 .debug-pixel-theme .mantine-Select-option[data-combobox-selected],
 .debug-pixel-theme .mantine-Combobox-option[data-combobox-selected],
 .debug-pixel-theme .mantine-Popover-dropdown [data-combobox-option][data-combobox-selected] {
-  box-shadow: inset 3px 0 0 var(--mtr-accent) !important;
+  box-shadow: inset 3px 0 0 var(--mtr-control-border-active) !important;
   color: var(--mtr-accent-strong) !important;
 }
 
@@ -2414,7 +2447,7 @@ body.debug-pixel-theme .page {
 .debug-pixel-theme .mantine-PasswordInput-input,
 .debug-pixel-theme .mantine-NumberInput-input {
   background: var(--mtr-surface-raised) !important;
-  border: 1px solid var(--mtr-border-soft) !important;
+  border: 1px solid var(--mtr-control-border) !important;
   border-radius: 2px !important;
   box-shadow: none;
   color: var(--mtr-text) !important;
@@ -2427,8 +2460,8 @@ body.debug-pixel-theme .page {
 .debug-pixel-theme .mantine-TagsInput-input:focus,
 .debug-pixel-theme .mantine-PasswordInput-input:focus,
 .debug-pixel-theme .mantine-NumberInput-input:focus {
-  border-color: var(--mtr-accent) !important;
-  box-shadow: 0 0 0 2px light-dark(rgb(66 126 120 / 0.12), rgb(126 189 180 / 0.18)) !important;
+  border-color: var(--mtr-control-border-active) !important;
+  box-shadow: 0 0 0 1px light-dark(rgb(66 126 120 / 0.08), rgb(126 189 180 / 0.1)) !important;
 }
 
 .debug-pixel-theme .mantine-Input-input::placeholder {
@@ -2451,7 +2484,7 @@ body.debug-pixel-theme .page {
 .debug-pixel-theme .schedule-cancel,
 .debug-pixel-theme .schedule-delete {
   background: var(--mtr-surface-muted) !important;
-  border: 1px solid var(--mtr-border) !important;
+  border: 1px solid var(--mtr-control-border-active) !important;
   border-radius: 2px !important;
   box-shadow: 2px 2px 0 var(--mtr-shadow) !important;
   color: var(--mtr-text) !important;
@@ -2530,7 +2563,9 @@ body.debug-pixel-theme .page {
 }
 
 .debug-pixel-theme .mantine-Switch-track {
-  border: 1px solid var(--mtr-border-soft) !important;
+  --switch-bg: var(--mtr-surface-muted);
+  background: var(--mtr-surface-muted) !important;
+  border: 1px solid var(--mtr-control-border) !important;
 }
 
 .debug-pixel-theme .mantine-Switch-thumb {
@@ -2538,7 +2573,12 @@ body.debug-pixel-theme .page {
 }
 
 .debug-pixel-theme .mantine-Switch-input:checked + .mantine-Switch-track {
-  border-color: var(--mtr-accent) !important;
+  --switch-bg: light-dark(
+    color-mix(in srgb, var(--mtr-accent) 10%, var(--mtr-surface-muted)),
+    color-mix(in srgb, var(--mtr-accent) 16%, var(--mtr-surface-muted))
+  );
+  background: var(--switch-bg) !important;
+  border-color: var(--mtr-control-border-active) !important;
 }
 
 .debug-pixel-theme .result-table,

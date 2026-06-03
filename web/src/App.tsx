@@ -59,7 +59,7 @@ const debugThemeBodyClasses: Record<DebugTheme, string[]> = {
 };
 
 function isDebugTheme(value: string | null): value is DebugTheme {
-  return value === "pixel" || value === "classic";
+  return debugThemes.includes(value as DebugTheme);
 }
 
 function storedDebugTheme(): DebugTheme {
@@ -188,12 +188,14 @@ export function App() {
     if (typeof document === "undefined") {
       return;
     }
-    const themeClasses = Object.values(debugThemeBodyClasses).flat();
+    const themeClasses = Array.from(document.body.classList).filter((className) =>
+      className.startsWith("debug-") && className.endsWith("-theme")
+    );
     themeClasses.forEach((className) => document.body.classList.remove(className));
     debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.add(className));
     window.localStorage.setItem(debugThemeStorageKey, debugTheme);
     window.localStorage.removeItem(legacyDebugPixelThemeStorageKey);
-    return () => themeClasses.forEach((className) => document.body.classList.remove(className));
+    return () => debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.remove(className));
   }, [debugTheme]);
 
   useEffect(() => {
