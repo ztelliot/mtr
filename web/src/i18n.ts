@@ -156,6 +156,7 @@ export const resources = {
       agentISPs: {
         aliyun: "阿里云",
         ctyun: "天翼云",
+        cmecloud: "移动云",
         qcloud: "腾讯云",
         hwcloud: "华为云",
         aws: "亚马逊云",
@@ -173,7 +174,7 @@ export const resources = {
         hkbn: "香港宽频",
         pccw: "电讯盈科",
         hinet: "中华电信",
-        sony: "索尼",
+        sony: "索尼通信",
       },
       theme: {
         light: "浅色",
