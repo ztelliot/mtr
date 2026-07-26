@@ -139,7 +139,11 @@ curl -X POST http://localhost:8080/v1/jobs \
 `count` 和 `max_hops` 由 Server 运行时配置控制，用户不可直接指定。`dns` 替代旧的
 `nslookup` 工具名。`port` 执行原生 TCP 连接探测，并要求提供 `args.port`。默认情况下，
 Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent: true` 可将 DNS 解析和解析后 IP
-策略检查延后到 Agent 执行。
+策略检查延后到 Agent 执行。Fan-out 模式的 `ping`、`dns`、`port` 和 `http` 任务可通过
+`agent_tags` 只选择匹配任一服务端托管标签的 Agent；不传时仍使用全部符合条件的 Agent。
+标签过滤会与 API token 的节点范围，以及在线状态、工具能力和逐 Agent 策略校验取交集。
+公开提交的 `agent_tags` 不得为 `agent`，也不得包含 `:` 或 `-`；这些形式保留给服务端
+管理标签，API 会直接拒绝。
 
 创建计划检测任务：
 
@@ -287,7 +291,9 @@ initContainer 会把 fallback 值写入生成后的配置文件。
 
 工作台可以创建 `ping`、`traceroute`、`mtr`、`http`、`dns` 和 `port` 任务，
 列出 Agent，并从 `/v1/jobs/<job-id>/stream` 流式接收结构化任务事件。临时 `traceroute` 和
-`mtr` 任务需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`；计划任务则使用
+`mtr` 任务需要显式选择 Agent，因为服务端要求这些工具提供 `agent_id`。Fan-out 工具可按
+服务端托管的 Agent 标签选择节点集；不选择表示全部可用节点，选择多个标签时按 OR 语义合并。
+计划任务则使用
 `schedule_targets` 标签选择节点，而不是单个 `agent_id`。
 
 ## Agent/Server mTLS 证书

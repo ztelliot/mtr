@@ -49,12 +49,14 @@
   transform: translateY(-50%) !important;
 }
 
-.mantine-Select-dropdown {
+.mantine-Select-dropdown,
+.mantine-MultiSelect-dropdown {
   padding-block: var(--mantine-spacing-sm) !important;
   padding-inline: 0 !important;
 }
 
-.mantine-Select-dropdown .mantine-ScrollArea-viewport {
+.mantine-Select-dropdown .mantine-ScrollArea-viewport,
+.mantine-MultiSelect-dropdown .mantine-ScrollArea-viewport {
   padding-inline-start: 4px !important;
 }
 
@@ -910,7 +912,8 @@ th.manage-table-actions {
   grid-column: 2;
 }
 
-.agent-field {
+.agent-field,
+.agent-tags-field {
   grid-column: 4;
 }
 
@@ -932,6 +935,45 @@ th.manage-table-actions {
   font-weight: 500;
   letter-spacing: 0;
   margin-bottom: 8px;
+}
+
+.agent-tags-field .mantine-MultiSelect-input {
+  height: 56px;
+  min-height: 56px;
+  overflow: hidden;
+}
+
+.agent-tags-summary {
+  align-items: center;
+  color: var(--input-placeholder-color);
+  display: flex;
+  font: inherit;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.agent-tags-field .mantine-PillGroup-group {
+  align-items: center;
+  flex-wrap: nowrap;
+  height: 100%;
+  overflow: hidden;
+}
+
+.agent-tags-field .mantine-Pill-root {
+  display: none;
+}
+
+.agent-tags-field .mantine-MultiSelect-inputField {
+  height: 1px;
+  line-height: 1px;
+  min-height: 1px;
+  padding: 0;
+  width: 1px;
 }
 
 .run-button {
@@ -2824,7 +2866,8 @@ body.debug-pixel-theme .page {
   .target-input,
   .ip-version-field,
   .dynamic-field,
-  .agent-field {
+  .agent-field,
+  .agent-tags-field {
     grid-column: auto;
   }
 
@@ -2841,7 +2884,9 @@ body.debug-pixel-theme .page {
   }
 
   .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field,
-  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button {
+  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button,
+  .query-grid:has(.agent-tags-field):has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-tags-field):has(.remote-dns-field) .run-button {
     grid-row: 3;
   }
 
@@ -3013,6 +3058,7 @@ body.debug-pixel-theme .page {
   .target-input input,
   .query-grid input,
   .query-grid .mantine-Select-input,
+  .agent-tags-field .mantine-MultiSelect-input,
   .schedule-form-grid input,
   .schedule-form-grid .mantine-Select-input,
   .run-button,
@@ -3024,12 +3070,14 @@ body.debug-pixel-theme .page {
   .target-input input,
   .query-grid input,
   .query-grid .mantine-Select-input,
+  .agent-tags-field .mantine-MultiSelect-input,
   .schedule-form-grid input,
   .schedule-form-grid .mantine-Select-input,
   .schedule-label-field .mantine-MultiSelect-input {
     min-height: 46px;
   }
 
+  .agent-tags-field .mantine-MultiSelect-input,
   .schedule-label-field .mantine-MultiSelect-input {
     height: 46px;
   }
@@ -3061,7 +3109,8 @@ body.debug-pixel-theme .page {
     width: clamp(132px, 42vw, 160px);
   }
 
-  .agent-field {
+  .agent-field,
+  .agent-tags-field {
     grid-column: auto;
   }
 
@@ -3069,7 +3118,9 @@ body.debug-pixel-theme .page {
   .query-grid:has(.remote-dns-field) .run-button,
   .query-grid.tool-dns .run-button,
   .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field,
-  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button {
+  .query-grid:has(.agent-field):has(.remote-dns-field) .run-button,
+  .query-grid:has(.agent-tags-field):has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-tags-field):has(.remote-dns-field) .run-button {
     grid-column: auto;
     grid-row: auto;
     justify-self: stretch;
@@ -3077,7 +3128,8 @@ body.debug-pixel-theme .page {
   }
 
   .query-grid:has(.remote-dns-field) .remote-dns-field,
-  .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field {
+  .query-grid:has(.agent-field):has(.remote-dns-field) .remote-dns-field,
+  .query-grid:has(.agent-tags-field):has(.remote-dns-field) .remote-dns-field {
     align-items: center;
     column-gap: 12px;
     display: grid;

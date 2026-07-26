@@ -1,4 +1,5 @@
 import type { CreateJobRequest, Job, JobFormState, Tool } from "./types";
+import { normalizeSelectableAgentTags } from "./agentTags";
 
 export const tools: Tool[] = ["ping", "traceroute", "mtr", "http", "dns", "port"];
 export const navTools: Tool[] = ["ping", "dns", "port", "http", "traceroute", "mtr"];
@@ -8,6 +9,7 @@ export const defaultFormState: JobFormState = {
   target: "",
   ipVersion: 0,
   agentId: "",
+  agentTags: [],
   count: "4",
   protocol: "icmp",
   port: "443",
@@ -47,6 +49,7 @@ export function formStateFromLocation(
     target: normalizeTargetForTool(target, tool),
     ipVersion: parseIPVersion(params.get("ip_version") ?? params.get("ipVersion")) ?? base.ipVersion,
     agentId: params.get("agent_id") ?? params.get("agentId") ?? base.agentId,
+    agentTags: supportsAgentTags(tool) ? normalizeSelectableAgentTags(params.getAll("agent_tag")) : [],
     protocol: parseProtocol(params.get("protocol")) ?? base.protocol,
     dnsType: parseDNSType(params.get("type") ?? params.get("dns_type") ?? params.get("dnsType")) ?? base.dnsType,
     method: parseHTTPMethod(params.get("method")) ?? base.method,
@@ -91,6 +94,9 @@ export function formStatePath(state: JobFormState): string {
   if (state.agentId) {
     params.set("agent_id", state.agentId);
   }
+  if (supportsAgentTags(state.tool)) {
+    normalizeSelectableAgentTags(state.agentTags).forEach((tag) => params.append("agent_tag", tag));
+  }
   if (state.tool === "dns") {
     params.set("type", state.dnsType);
   }
@@ -126,6 +132,7 @@ export function formStateFromJob(job: Job, base: JobFormState = defaultFormState
     target: normalizeTargetForTool(target, job.tool),
     ipVersion: job.ip_version ?? base.ipVersion,
     agentId: job.agent_id ?? "",
+    agentTags: supportsAgentTags(job.tool) && !job.agent_id ? normalizeSelectableAgentTags(base.agentTags) : [],
     protocol: parseProtocol(args.protocol) ?? base.protocol,
     dnsType: parseDNSType(args.type) ?? base.dnsType,
     method: parseHTTPMethod(args.method) ?? base.method,
@@ -136,6 +143,7 @@ export function formStateFromJob(job: Job, base: JobFormState = defaultFormState
 export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
   const args: Record<string, string> = {};
   const target = normalizeTargetForTool(state.target, state.tool);
+  const agentTags = !state.agentId && supportsAgentTags(state.tool) ? normalizeSelectableAgentTags(state.agentTags) : [];
   if (state.tool === "ping" || state.tool === "traceroute" || state.tool === "mtr") {
     setIfPresent(args, "protocol", state.protocol);
   }
@@ -158,8 +166,13 @@ export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
     ...(Object.keys(args).length > 0 ? { args } : {}),
     ...(state.ipVersion === 0 || state.tool === "dns" ? {} : { ip_version: state.ipVersion }),
     ...(state.agentId ? { agent_id: state.agentId } : {}),
+    ...(agentTags.length > 0 ? { agent_tags: agentTags } : {}),
     resolve_on_agent: state.resolveOnAgent
   };
+}
+
+export function supportsAgentTags(tool: Tool): boolean {
+  return tool === "ping" || tool === "dns" || tool === "port" || tool === "http";
 }
 
 export function validateForm(state: JobFormState): string | null {

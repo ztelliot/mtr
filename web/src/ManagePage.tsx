@@ -112,6 +112,7 @@ export const __managePageTest = {
   changedLabelAgents,
   customLabels,
   displayTokenToolScope,
+  effectiveAgentStatus,
   httpAgentRequiredFieldsMissing,
   labelSummaries,
   managedHTTPAgentFromConfig,
@@ -1288,8 +1289,7 @@ function TokenToolPolicySections({ value, disabled, onChange, t }: { value: Part
 function AgentBadges({ agent, t }: { agent: ManagedAgent; t: (key: string) => string }) {
   return (
     <Group gap="xs">
-      <Badge color={agent.status === "online" ? "green" : "gray"}>{statusValueLabel(agent.status, t)}</Badge>
-      {agent.config?.disabled && <Badge color="red">{t("manage.disabled")}</Badge>}
+      <AgentStatusBadge status={agent.status} disabled={Boolean(agent.config?.disabled)} t={t} />
     </Group>
   );
 }
@@ -1297,11 +1297,20 @@ function AgentBadges({ agent, t }: { agent: ManagedAgent; t: (key: string) => st
 function HTTPAgentBadges({ agent, node, t }: { agent: ManagedAgent; node: HTTPAgentConfig; t: (key: string) => string }) {
   return (
     <Group gap="xs">
-      <Badge color={agent.status === "online" ? "green" : "gray"}>{statusValueLabel(agent.status, t)}</Badge>
-      {!node.enabled && <Badge color="red">{t("manage.disabled")}</Badge>}
+      <AgentStatusBadge status={agent.status} disabled={!node.enabled} t={t} />
       {node.tls?.enabled && <Badge variant="light">{t("manage.mtls")}</Badge>}
     </Group>
   );
+}
+
+function AgentStatusBadge({ status, disabled, t }: { status: ManagedAgent["status"]; disabled: boolean; t: (key: string) => string }) {
+  const effectiveStatus = effectiveAgentStatus(status, disabled);
+  const color = effectiveStatus === "disabled" ? "red" : effectiveStatus === "online" ? "green" : "gray";
+  return <Badge color={color}>{statusValueLabel(effectiveStatus, t)}</Badge>;
+}
+
+function effectiveAgentStatus(status: ManagedAgent["status"], disabled: boolean): ManagedAgent["status"] | "disabled" {
+  return disabled ? "disabled" : status;
 }
 
 function LabelBadges({ labels }: { labels?: string[] }) {

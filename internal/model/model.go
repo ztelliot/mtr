@@ -425,6 +425,7 @@ type CreateJobRequest struct {
 	Args           map[string]string `json:"args,omitempty"`
 	IPVersion      IPVersion         `json:"ip_version,omitempty"`
 	AgentID        string            `json:"agent_id,omitempty"`
+	AgentTags      []string          `json:"agent_tags,omitempty"`
 	ResolveOnAgent bool              `json:"resolve_on_agent,omitempty"`
 }
 

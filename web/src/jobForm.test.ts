@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, validateForm } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, supportsAgentTags, validateForm } from "./jobForm";
 
 describe("job form", () => {
   it("builds ping payload with optional network args", () => {
@@ -21,6 +21,38 @@ describe("job form", () => {
         protocol: "tcp"
       }
     });
+  });
+
+  it("builds fanout payloads with normalized agent tags", () => {
+    expect(buildCreateJobRequest({
+      ...defaultFormState,
+      target: "1.1.1.1",
+      agentTags: [" blue ", "green", "blue"]
+    })).toMatchObject({
+      tool: "ping",
+      target: "1.1.1.1",
+      agent_tags: ["blue", "green"]
+    });
+    expect(buildCreateJobRequest({
+      ...defaultFormState,
+      tool: "mtr",
+      target: "1.1.1.1",
+      agentId: "edge-1",
+      agentTags: ["blue"]
+    })).not.toHaveProperty("agent_tags");
+    expect(supportsAgentTags("http")).toBe(true);
+    expect(supportsAgentTags("traceroute")).toBe(false);
+  });
+
+  it("does not expose internal transport tags through the workbench request", () => {
+    const form = {
+      ...defaultFormState,
+      target: "1.1.1.1",
+      agentTags: ["blue", "agent:grpc", "africa-grpc", "asia-http"]
+    };
+    expect(buildCreateJobRequest(form).agent_tags).toEqual(["blue"]);
+    expect(formStatePath(form)).not.toContain("grpc");
+    expect(formStateFromLocation(new URL("https://mtr.test/ping?agent_tag=blue&agent_tag=agent%3Agrpc&agent_tag=asia-http")).agentTags).toEqual(["blue"]);
   });
 
   it("requires a pinned agent for route tools", () => {
@@ -140,6 +172,16 @@ describe("job form", () => {
       protocol: "tcp",
       resolveOnAgent: false
     });
+  });
+
+  it("round-trips fanout agent tags through shareable URLs", () => {
+    const path = formStatePath({
+      ...defaultFormState,
+      target: "1.1.1.1",
+      agentTags: ["blue", "green"]
+    });
+    expect(path).toBe("/ping?target=1.1.1.1&agent_tag=blue&agent_tag=green&protocol=icmp&resolve_on_agent=1");
+    expect(formStateFromLocation(new URL(`https://mtr.test${path}`)).agentTags).toEqual(["blue", "green"]);
   });
 
   it("detects explicit tool URLs for readonly shared views", () => {

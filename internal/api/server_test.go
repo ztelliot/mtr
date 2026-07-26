@@ -1348,6 +1348,69 @@ func TestCreateJobWithEmptyAgentIDFansOutToMatchingAgents(t *testing.T) {
 	}
 }
 
+func TestCreateJobFiltersFanoutByAgentTags(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	upsertTestAgent(t, ctx, st, "edge-blue", []string{"blue", "shared"})
+	upsertTestAgent(t, ctx, st, "edge-green", []string{"green", "shared"})
+	upsertTestAgent(t, ctx, st, "edge-red", []string{"red"})
+	policies := policy.DefaultPolicies()
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), hub, "", slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","agent_tags":[" blue ","green","blue"],"resolve_on_agent":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var parent model.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &parent); err != nil {
+		t.Fatal(err)
+	}
+	children, err := st.ListChildJobs(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, child := range children {
+		got[child.AgentID] = true
+	}
+	if len(children) != 2 || !got["edge-blue"] || !got["edge-green"] || got["edge-red"] {
+		t.Fatalf("tag-filtered fanout agents = %#v", children)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","agent_id":"edge-blue","agent_tags":["blue"],"resolve_on_agent":true}`))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "agent_tags cannot be used with agent_id") {
+		t.Fatalf("pinned tag request status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	for _, invalidTag := range []string{"agent", "Agent", "id:edge-blue", "agent:grpc", "africa-grpc"} {
+		t.Run("rejects reserved tag "+invalidTag, func(t *testing.T) {
+			body, err := json.Marshal(model.CreateJobRequest{
+				Tool:           model.ToolPing,
+				Target:         "1.1.1.1",
+				AgentTags:      []string{invalidTag},
+				ResolveOnAgent: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "agent_tags contains reserved tag") {
+				t.Fatalf("reserved tag %q status = %d, body = %s", invalidTag, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreateJobWithAgentResolveAutoDomainDoesNotFilterProtocols(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

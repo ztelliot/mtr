@@ -223,6 +223,7 @@ export interface CreateJobRequest {
   args?: Record<string, string>;
   ip_version?: IPVersion;
   agent_id?: string;
+  agent_tags?: string[];
   resolve_on_agent?: boolean;
 }
 
@@ -372,6 +373,7 @@ export interface JobFormState {
   target: string;
   ipVersion: IPVersion;
   agentId: string;
+  agentTags: string[];
   count: string;
   protocol: "icmp" | "tcp";
   port: string;

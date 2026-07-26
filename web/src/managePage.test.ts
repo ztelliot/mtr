@@ -69,6 +69,13 @@ describe("manage token helpers", () => {
     }, { ...managedAgent("edge-http", ["agent", "agent:http", "id:edge-http"]), status: "online", transport: "http" }).status).toBe("online");
   });
 
+  it("lets manual disablement override the node connectivity status", () => {
+    expect(__managePageTest.effectiveAgentStatus("offline", true)).toBe("disabled");
+    expect(__managePageTest.effectiveAgentStatus("online", true)).toBe("disabled");
+    expect(__managePageTest.effectiveAgentStatus("offline", false)).toBe("offline");
+    expect(__managePageTest.effectiveAgentStatus("online", false)).toBe("online");
+  });
+
   it("does not materialize policy defaults when toggling enabled state", () => {
     expect(__managePageTest.setPolicyEnabled(undefined, false)).toEqual({ enabled: false });
     expect(__managePageTest.setPolicyEnabled({ enabled: true }, false)).toEqual({ enabled: false });

@@ -8,6 +8,7 @@ import {
   Group,
   Loader,
   Modal,
+  MultiSelect,
   Paper,
   PasswordInput,
   Select,
@@ -26,6 +27,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { useTranslation } from "react-i18next";
 import { agentSelectLabel } from "./agentDisplay";
+import { agentTagCounts, agentTagLabel, filterAgentsByTags, normalizeSelectableAgentTags } from "./agentTags";
 import { ApiClient } from "./api";
 import { brandUrlTargetsCurrentApp, loadConfig, normalizeBaseUrl, saveStoredApiBaseUrl, saveStoredApiToken } from "./config";
 import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFields";
@@ -33,7 +35,7 @@ import { errorMessage } from "./errors";
 import { formatDateTime, formatServerVersion } from "./formatters";
 import { fetchGeoIPQueued, normalizeIPAddress } from "./geoip";
 import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailures";
-import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, supportsAgentTags } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
 import { ManagePage } from "./ManagePage";
@@ -128,6 +130,22 @@ export function App() {
     () => capableAgents(visibleAgents, form.tool).filter(agentSupportsCurrentForm),
     [permissions, visibleAgents, safeAgents, form, t]
   );
+  const selectedAgentTags = useMemo(() => normalizeSelectableAgentTags(form.agentTags), [form.agentTags]);
+  const selectedFanoutAgents = useMemo(
+    () => filterAgentsByTags(availableFanoutAgents, selectedAgentTags),
+    [availableFanoutAgents, selectedAgentTags]
+  );
+  const agentTagOptions = useMemo(() => {
+    const counts = new Map(agentTagCounts(availableFanoutAgents).map(({ tag, count }) => [tag, count]));
+    selectedAgentTags.forEach((tag) => {
+      if (!counts.has(tag)) {
+        counts.set(tag, 0);
+      }
+    });
+    return [...counts]
+      .map(([tag, count]) => ({ value: tag, label: t("form.agentTagOption", { tag: agentTagLabel(tag, t), count }) }))
+      .sort((left, right) => left.value.localeCompare(right.value));
+  }, [availableFanoutAgents, selectedAgentTags, t]);
   const routeAgents = useMemo(
     () => capableAgents(visibleAgents, form.tool).filter(agentSupportsCurrentForm),
     [permissions, visibleAgents, safeAgents, form, t]
@@ -151,6 +169,7 @@ export function App() {
     () => buildNodeRows(resultTool, visibleAgents, activeJobs.filter((job) => job.tool === resultTool), eventsByJobId),
     [activeJobs, eventsByJobId, resultTool, visibleAgents]
   );
+  const resultNodeCount = useMemo(() => new Set(nodeRows.map((row) => row.agentId)).size, [nodeRows]);
   const showHTTPDownloadMetrics = resultTool === "http" && resultHTTPMethod(currentJob, form) === "GET";
   const isFanout = isFanoutTool(resultTool);
   const submissionIsFanout = isFanoutTool(form.tool);
@@ -160,7 +179,7 @@ export function App() {
   );
   const formError = localizedFormError(form, permissions, t) || permissionFormError(form, permissions, visibleAgents, t);
   const onlineAgents = visibleAgents.filter((agent) => agent.status === "online").length;
-  const noFanoutAgents = submissionIsFanout && availableFanoutAgents.length === 0;
+  const noFanoutAgents = submissionIsFanout && selectedFanoutAgents.length === 0;
   const canSubmitCurrentTool = toolAllowed(permissions, form.tool);
   const showReadonlyResultHeader = !canSubmitCurrentTool && Boolean(currentJob);
   const showFormError = attemptedSubmit && Boolean(formError) && !error && !permissionsLoadFailed;
@@ -226,6 +245,7 @@ export function App() {
         ...current,
         tool: nextTool,
         agentId: requiresAgentForTool(permissions, nextTool) ? capableAgents(visibleAgents, nextTool)[0]?.id ?? "" : "",
+        agentTags: supportsAgentTags(nextTool) ? current.agentTags : [],
         target: normalizeTargetForTool(current.target, nextTool)
       }));
     }
@@ -651,6 +671,7 @@ export function App() {
       ...form,
       tool,
       agentId: requiresAgentForTool(permissions, tool) ? capableAgents(visibleAgents, tool)[0]?.id ?? "" : "",
+      agentTags: supportsAgentTags(tool) ? form.agentTags : [],
       target: normalizeTargetForTool(form.target, tool)
     };
     setForm(next);
@@ -730,6 +751,7 @@ export function App() {
       tool: "mtr",
       target,
       agentId: selectedAgentId,
+      agentTags: [],
       ipVersion: target.includes(":") ? 6 : 4
     };
     closeStreams();
@@ -908,6 +930,29 @@ export function App() {
                         error={!form.agentId ? t("errors.agentRequired", { tool: form.tool }) : null}
                       />
                     )}
+                    {supportsAgentTags(form.tool) && (
+                      <MultiSelect
+                        className="agent-tags-field"
+                        checkIconPosition="left"
+                        clearable
+                        disabled={controlsLocked}
+                        label={t("form.agentTags")}
+                        data={agentTagOptions}
+                        leftSection={(
+                          <span className="agent-tags-summary">
+                            {selectedAgentTags.length > 0
+                              ? t("form.selectedAgents", { count: selectedFanoutAgents.length })
+                              : t("form.allAvailableAgents", { count: availableFanoutAgents.length })}
+                          </span>
+                        )}
+                        leftSectionPointerEvents="none"
+                        leftSectionWidth="calc(100% - 50px)"
+                        nothingFoundMessage={t("form.noAvailableTags")}
+                        value={selectedAgentTags}
+                        withAlignedLabels={false}
+                        onChange={(value) => updateForm("agentTags", value)}
+                      />
+                    )}
                     {form.tool !== "dns" && (
                       <RemoteDNSSwitch
                         className="remote-dns-field"
@@ -944,6 +989,11 @@ export function App() {
                 <Badge variant="light" color={jobRunning ? "green" : "gray"}>
                   {jobRunning ? t("status.streamLive") : t("status.streamClosed")}
                 </Badge>
+                {isFanout && currentJob && (
+                  <Badge variant="light" color="gray">
+                    {t("status.resultNodes", { count: resultNodeCount })}
+                  </Badge>
+                )}
               </Group>
               <Switch className="compact-switch" checked={compact} label={t("results.compact")} onChange={(event) => setCompact(event.currentTarget.checked)} />
             </Group>

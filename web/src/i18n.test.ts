@@ -24,6 +24,11 @@ describe("i18n", () => {
     expect(resources["en-US"].translation.actions.add).toBe("Add");
     expect(resources["zh-CN"].translation.manage.resolveOnAgent).toBe("节点侧解析");
     expect(resources["en-US"].translation.manage.resolveOnAgent).toBe("Resolve on agent");
+    expect(resources["zh-CN"].translation.agentTags.asia).toBe("亚洲");
+    expect(resources["en-US"].translation.agentTags.me).toBe("Middle East");
+    expect(resources["en-US"].translation.form.allAvailableAgents).toBe("All {{count}} nodes");
+    expect(resources["zh-CN"].translation.status.resultNodes).toBe("{{count}} 个拨测结果");
+    expect(resources["en-US"].translation.status.resultNodes).toBe("Results from {{count}} nodes");
   });
 
   it("keeps Chinese and English resource keys aligned", () => {

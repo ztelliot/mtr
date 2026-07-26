@@ -161,7 +161,13 @@ curl -X POST http://localhost:8080/v1/jobs \
 requests. `dns` replaces the old `nslookup` tool name. `port` performs a native
 TCP connect probe and requires `args.port`. By default, Server resolves target
 hostnames before queuing jobs; set `resolve_on_agent: true` to defer DNS
-resolution and resolved-IP policy checks to the Agent.
+resolution and resolved-IP policy checks to the Agent. Fan-out `ping`, `dns`,
+`port`, and `http` jobs may set `agent_tags` to run only on Agents matching any
+selected managed label; omitting it keeps the existing all-eligible-Agent
+behavior. Tag filtering is intersected with the API token scope and the normal
+online, capability, and per-Agent policy checks. Public `agent_tags` values
+must not be `agent` or contain `:` or `-`; those forms are reserved for
+server-managed labels and are rejected by the API.
 
 Create a scheduled detection task:
 
@@ -319,6 +325,8 @@ value into the generated config.
 The workbench can create `ping`, `traceroute`, `mtr`, `http`, `dns`, and
 `port` jobs, list Agents, and stream structured job events from
 `/v1/jobs/<job-id>/stream`.
+Fan-out tools expose a node-set selector backed by managed Agent tags; an empty
+selection means every eligible node, while multiple tags use OR semantics.
 Ad-hoc `traceroute` and `mtr` jobs require an explicit Agent selection because
 the server requires `agent_id` for those tools. Scheduled jobs use
 `schedule_targets` labels instead of a single `agent_id`.

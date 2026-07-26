@@ -308,6 +308,15 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AgentID = strings.TrimSpace(req.AgentID)
+	req.AgentTags = normalizeAgentTags(req.AgentTags)
+	if err := validateAgentTags(req.AgentTags); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.AgentID != "" && len(req.AgentTags) > 0 {
+		writeError(w, http.StatusBadRequest, "agent_tags cannot be used with agent_id")
+		return
+	}
 	policies := s.policiesForJob(r.Context(), req)
 	req.Args = policies.ServerArgs(req.Tool, req.Args)
 	_, err := policies.Validate(req)
@@ -428,6 +437,9 @@ func (s *Server) fanoutDispatchTargets(ctx context.Context, req model.CreateJobR
 	}
 	targets := make([]dispatchTarget, 0, len(agents))
 	for _, agent := range agents {
+		if len(req.AgentTags) > 0 && !agentHasAnyLabel(agent, req.AgentTags) {
+			continue
+		}
 		if !scopeAllowsAgentRecord(scope, agent) {
 			continue
 		}
@@ -449,6 +461,32 @@ func (s *Server) fanoutDispatchTargets(ctx context.Context, req model.CreateJobR
 func withAgentID(req model.CreateJobRequest, agentID string) model.CreateJobRequest {
 	req.AgentID = agentID
 	return req
+}
+
+func normalizeAgentTags(tags []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
+}
+
+func validateAgentTags(tags []string) error {
+	for _, tag := range tags {
+		if strings.EqualFold(tag, model.AgentAllLabel) || strings.ContainsAny(tag, ":-") {
+			return fmt.Errorf("agent_tags contains reserved tag %q: tags must not be %q or contain ':' or '-'", tag, model.AgentAllLabel)
+		}
+	}
+	return nil
 }
 
 func (s *Server) pinnedDispatchTarget(ctx context.Context, agentID string, tool model.Tool, options []dispatchTarget) (dispatchTarget, string, error) {
