@@ -172,7 +172,7 @@ var postgresSchemaStatements = []string{
   args jsonb not null default '{}',
   ip_version integer not null default 0,
   resolve_on_agent boolean not null default false,
-  interval_seconds integer not null,
+  cron_expression text not null,
   next_run_at timestamptz not null,
   last_run_at timestamptz null,
   schedule_targets jsonb not null default '[]',
@@ -459,23 +459,23 @@ func (p *Postgres) CreateScheduledJob(ctx context.Context, sched model.Scheduled
 		return err
 	}
 	_, err = p.pool.Exec(ctx, `
-		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at)
+		insert into scheduled_jobs (id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, cron_expression, next_run_at, last_run_at, schedule_targets, created_at, updated_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.CreatedAt, sched.UpdatedAt)
+		sched.ResolveOnAgent, sched.CronExpression, sched.NextRunAt, sched.LastRunAt, targets, sched.CreatedAt, sched.UpdatedAt)
 	return err
 }
 
 func (p *Postgres) GetScheduledJob(ctx context.Context, id string) (model.ScheduledJob, error) {
 	row := p.pool.QueryRow(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, cron_expression, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs where id=$1`, id)
 	return scanSchedule(row)
 }
 
 func (p *Postgres) ListScheduledJobs(ctx context.Context) ([]model.ScheduledJob, error) {
 	rows, err := p.pool.Query(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, cron_expression, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs order by created_at asc`)
 	if err != nil {
 		return nil, err
@@ -497,7 +497,7 @@ func (p *Postgres) ListDueScheduledJobs(ctx context.Context, now time.Time, limi
 		limit = 50
 	}
 	rows, err := p.pool.Query(ctx, `
-		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, interval_seconds, next_run_at, last_run_at, schedule_targets, created_at, updated_at
+		select id, revision, name, enabled, tool, target, args, ip_version, resolve_on_agent, cron_expression, next_run_at, last_run_at, schedule_targets, created_at, updated_at
 		from scheduled_jobs
 		where enabled=true and next_run_at <= $1
 		order by next_run_at asc
@@ -536,14 +536,14 @@ func (p *Postgres) UpdateScheduledJob(ctx context.Context, sched model.Scheduled
 		    args=$7,
 		    ip_version=$8,
 		    resolve_on_agent=$9,
-		    interval_seconds=$10,
+		    cron_expression=$10,
 		    next_run_at=$11,
 		    last_run_at=$12,
 		    schedule_targets=$13,
 		    updated_at=$14
 		where id=$1`,
 		sched.ID, sched.Revision, sched.Name, sched.Enabled, sched.Tool, sched.Target, args, sched.IPVersion,
-		sched.ResolveOnAgent, sched.IntervalSeconds, sched.NextRunAt, sched.LastRunAt, targets, sched.UpdatedAt)
+		sched.ResolveOnAgent, sched.CronExpression, sched.NextRunAt, sched.LastRunAt, targets, sched.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -565,13 +565,9 @@ func (p *Postgres) DeleteScheduledJob(ctx context.Context, id string) error {
 }
 
 func (p *Postgres) UpdateScheduledJobRun(ctx context.Context, sched model.ScheduledJob) error {
-	targets, err := marshalJSONBytes(sched.ScheduleTargets)
-	if err != nil {
-		return err
-	}
-	_, err = p.pool.Exec(ctx, `
-		update scheduled_jobs set last_run_at=$2, next_run_at=$3, schedule_targets=$4, updated_at=$5 where id=$1`,
-		sched.ID, sched.LastRunAt, sched.NextRunAt, targets, time.Now().UTC())
+	_, err := p.pool.Exec(ctx, `
+		update scheduled_jobs set last_run_at=$2, next_run_at=$3, updated_at=$4 where id=$1`,
+		sched.ID, sched.LastRunAt, sched.NextRunAt, time.Now().UTC())
 	return err
 }
 
@@ -628,21 +624,82 @@ func (p *Postgres) ListScheduledJobHistory(ctx context.Context, scheduleID strin
 	return jobs, rows.Err()
 }
 
+func (p *Postgres) RegisterAgent(ctx context.Context, a model.Agent, suppliedToken string) (model.Agent, bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return model.Agent{}, false, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	settings := config.DefaultManagedSettings()
+	var raw []byte
+	var updated time.Time
+	if err := tx.QueryRow(ctx, `select value, revision, updated_at from managed_settings where id='default' for update`).Scan(&raw, &settings.Revision, &updated); err != nil {
+		return model.Agent{}, false, err
+	}
+	if err := unmarshalJSONBytes(raw, &settings); err != nil {
+		return model.Agent{}, false, err
+	}
+	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
+	if err := config.NormalizeManagedSettings(&settings); err != nil {
+		return model.Agent{}, false, err
+	}
+
+	var current *model.Agent
+	stored, err := scanPostgresStoredAgent(tx.QueryRow(ctx, `
+		select id, country, region, provider, isp, coalesce(version,''), token_hash, capabilities, protocols, status, last_seen_at, created_at
+		from agents where id=$1`, a.ID))
+	if err == nil {
+		current = &stored
+	} else if !errors.Is(err, ErrNotFound) {
+		return model.Agent{}, false, err
+	}
+	registered, created, err := prepareAgentRegistration(&settings, current, a, suppliedToken)
+	if err != nil {
+		return model.Agent{}, false, err
+	}
+	if created {
+		settings.Revision++
+		now := time.Now().UTC()
+		settings.UpdatedAt = now.Format(time.RFC3339Nano)
+		raw, err := marshalJSONBytes(settings)
+		if err != nil {
+			return model.Agent{}, false, err
+		}
+		if _, err := tx.Exec(ctx, `update managed_settings set value=$1, revision=revision+1, updated_at=$2 where id='default'`, raw, now); err != nil {
+			return model.Agent{}, false, err
+		}
+	}
+	if err := upsertPostgresAgent(ctx, tx, registered); err != nil {
+		return model.Agent{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.Agent{}, false, err
+	}
+	return registered, created, nil
+}
+
 func (p *Postgres) UpsertAgent(ctx context.Context, a model.Agent) error {
+	return upsertPostgresAgent(ctx, p.pool, a)
+}
+
+func upsertPostgresAgent(ctx context.Context, execer postgresJobInserter, a model.Agent) error {
 	caps, err := marshalJSONBytes(a.Capabilities)
 	if err != nil {
 		return err
 	}
-	_, err = p.pool.Exec(ctx, `
+	_, err = execer.Exec(ctx, `
 			insert into agents (id, country, region, provider, isp, version, token_hash, capabilities, protocols, status, last_seen_at, created_at)
 			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			on conflict (id) do update set
-				country=excluded.country,
-				region=excluded.region,
-				provider=excluded.provider,
-				isp=excluded.isp,
+				country=case when agents.country='' then excluded.country else agents.country end,
+				region=case when agents.region='' then excluded.region else agents.region end,
+				provider=case when agents.provider='' then excluded.provider else agents.provider end,
+				isp=case when agents.isp='' then excluded.isp else agents.isp end,
 				version=excluded.version,
-				token_hash=excluded.token_hash,
+				token_hash=case when agents.token_hash='' then excluded.token_hash else agents.token_hash end,
 				capabilities=excluded.capabilities,
 				protocols=excluded.protocols,
 				status=excluded.status,
@@ -679,7 +736,7 @@ func (p *Postgres) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration
 }
 
 func (p *Postgres) ListAgents(ctx context.Context) ([]model.Agent, error) {
-	rows, err := p.pool.Query(ctx, `select id, country, region, provider, isp, coalesce(version,''), capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
+	rows, err := p.pool.Query(ctx, `select id, country, region, provider, isp, coalesce(version,''), token_hash, capabilities, protocols, status, last_seen_at, created_at from agents order by id`)
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +745,7 @@ func (p *Postgres) ListAgents(ctx context.Context) ([]model.Agent, error) {
 	for rows.Next() {
 		var a model.Agent
 		var caps []byte
-		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &a.TokenHash, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := unmarshalJSONBytes(caps, &a.Capabilities); err != nil {
@@ -697,6 +754,21 @@ func (p *Postgres) ListAgents(ctx context.Context) ([]model.Agent, error) {
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
+}
+
+func scanPostgresStoredAgent(row pgx.Row) (model.Agent, error) {
+	var a model.Agent
+	var caps []byte
+	if err := row.Scan(&a.ID, &a.Country, &a.Region, &a.Provider, &a.ISP, &a.Version, &a.TokenHash, &caps, &a.Protocols, &a.Status, &a.LastSeenAt, &a.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return a, ErrNotFound
+		}
+		return a, err
+	}
+	if err := unmarshalJSONBytes(caps, &a.Capabilities); err != nil {
+		return a, err
+	}
+	return a, nil
 }
 
 func (p *Postgres) ListAgentConfigs(ctx context.Context) ([]config.AgentConfig, error) {
@@ -989,7 +1061,7 @@ func scanSchedule(row pgx.Row) (model.ScheduledJob, error) {
 	var sched model.ScheduledJob
 	var args []byte
 	var targets []byte
-	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.ResolveOnAgent, &sched.IntervalSeconds, &sched.NextRunAt, &sched.LastRunAt, &targets, &sched.CreatedAt, &sched.UpdatedAt)
+	err := row.Scan(&sched.ID, &sched.Revision, &sched.Name, &sched.Enabled, &sched.Tool, &sched.Target, &args, &sched.IPVersion, &sched.ResolveOnAgent, &sched.CronExpression, &sched.NextRunAt, &sched.LastRunAt, &targets, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sched, ErrNotFound
 	}

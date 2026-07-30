@@ -296,11 +296,30 @@ func (m *Memory) ListScheduledJobHistory(_ context.Context, scheduleID string, f
 	return out, nil
 }
 
+func (m *Memory) RegisterAgent(_ context.Context, a model.Agent, suppliedToken string) (model.Agent, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var current *model.Agent
+	if stored, ok := m.agents[a.ID]; ok {
+		current = &stored
+	}
+	registered, created, err := prepareAgentRegistration(&m.settings, current, a, suppliedToken)
+	if err != nil {
+		return model.Agent{}, false, err
+	}
+	if created {
+		m.settings.Revision++
+		m.settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	m.agents[registered.ID] = registered
+	return registered, created, nil
+}
+
 func (m *Memory) UpsertAgent(_ context.Context, a model.Agent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if old, ok := m.agents[a.ID]; ok {
-		a.CreatedAt = old.CreatedAt
+		a = preserveAgentRegistrationMetadata(old, a)
 	}
 	m.agents[a.ID] = a
 	return nil

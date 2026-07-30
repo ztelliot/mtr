@@ -29,7 +29,7 @@ import { ApiClient } from "./api";
 import { errorMessage } from "./errors";
 import { formatDateTime } from "./formatters";
 import { canReadManage, canWriteManage } from "./permissions";
-import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, HTTPAgentConfig, Permissions, PolicySettings, RateLimitConfig, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
+import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, HTTPAgentConfig, Permissions, PolicySettings, RateLimitConfig, RegisterToken, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
 
 const tools: Tool[] = ["ping", "traceroute", "mtr", "http", "dns", "port"];
 const protocolOptions = ["icmp", "tcp"];
@@ -117,6 +117,8 @@ export const __managePageTest = {
   labelSummaries,
   managedHTTPAgentFromConfig,
   normalizeIPVersions,
+  normalizeRegisterAgentIDs,
+  registerTokenDraftChanged,
   normalizeToken,
   normalizeTokenToolScope,
   setPolicyEnabled,
@@ -143,7 +145,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
   const [httpAgentModalOpen, setHTTPAgentModalOpen] = useState(false);
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [labelModalOpen, setLabelModalOpen] = useState(false);
-  const [savingRegisterTokenIndex, setSavingRegisterTokenIndex] = useState<number | null>(null);
+  const [savingRegisterTokenID, setSavingRegisterTokenID] = useState<string | null>(null);
   const [section, setSection] = useState("httpAgents");
   const [loading, setLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -388,7 +390,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
     setSavingSettings(true);
     try {
-      const response = await client.createManagedRegisterToken({ name: "" });
+      const response = await client.createManagedRegisterToken({ name: "", remaining_uses: 1, allowed_agent_ids: [] });
       const saved = response.token;
       setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: [...(current.register_tokens ?? []), saved] }));
       notifications.show({ color: "green", message: t("manage.registerTokenSaved") });
@@ -400,40 +402,42 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
   }
 
-  async function renameRegisterToken(index: number, name: string) {
+  async function saveRegisterToken(tokenID: string, draft: RegisterTokenDraft) {
     if (!client || !writable) {
       return;
     }
-    const token = (settings.register_tokens ?? [])[index];
-    if (!token?.id) {
+    if (!tokenID) {
       return;
     }
-    setSavingRegisterTokenIndex(index);
+    setSavingRegisterTokenID(tokenID);
     try {
-      const response = await client.updateManagedRegisterToken(token.id, { name });
+      const response = await client.updateManagedRegisterToken(tokenID, {
+        name: draft.name.trim(),
+        remaining_uses: Math.max(0, Math.floor(draft.remainingUses)),
+        allowed_agent_ids: normalizeRegisterAgentIDs(draft.allowedAgentIDs)
+      });
       const saved = response.token;
-      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: (current.register_tokens ?? []).map((item, itemIndex) => itemIndex === index ? saved : item) }));
+      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: (current.register_tokens ?? []).map((item) => item.id === tokenID ? saved : item) }));
       notifications.show({ color: "green", message: t("manage.registerTokenSaved") });
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setSavingRegisterTokenIndex(null);
+      setSavingRegisterTokenID(null);
     }
   }
 
-  async function deleteRegisterToken(index: number) {
+  async function deleteRegisterToken(tokenID: string) {
     if (!client || !writable) {
       return;
     }
-    const token = (settings.register_tokens ?? [])[index];
-    if (!token?.id) {
+    if (!tokenID) {
       return;
     }
     setSavingSettings(true);
     try {
-      const response = await client.deleteManagedRegisterToken(token.id);
-      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: response.tokens ?? (current.register_tokens ?? []).filter((_, itemIndex) => itemIndex !== index) }));
+      const response = await client.deleteManagedRegisterToken(tokenID);
+      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: response.tokens ?? (current.register_tokens ?? []).filter((item) => item.id !== tokenID) }));
       notifications.show({ color: "green", message: t("manage.registerTokenDeleted") });
       setError(null);
     } catch (err) {
@@ -443,25 +447,24 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
   }
 
-  async function rotateRegisterToken(index: number) {
+  async function rotateRegisterToken(tokenID: string) {
     if (!client || !writable) {
       return;
     }
-    const token = (settings.register_tokens ?? [])[index];
-    if (!token?.id) {
+    if (!tokenID) {
       return;
     }
-    setSavingRegisterTokenIndex(index);
+    setSavingRegisterTokenID(tokenID);
     try {
-      const response = await client.rotateManagedRegisterToken(token.id);
+      const response = await client.rotateManagedRegisterToken(tokenID);
       const saved = response.token;
-      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: (current.register_tokens ?? []).map((item, itemIndex) => itemIndex === index ? saved : item) }));
+      setSettings((current) => withSettingsDefaults({ ...current, revision: response.revision, updated_at: response.updated_at, register_tokens: (current.register_tokens ?? []).map((item) => item.id === tokenID ? saved : item) }));
       notifications.show({ color: "green", message: t("manage.registerTokenRotated") });
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setSavingRegisterTokenIndex(null);
+      setSavingRegisterTokenID(null);
     }
   }
 
@@ -642,9 +645,9 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         </Group>
         <Button
           aria-busy={loading}
-          className="manage-refresh-button"
+          className="refresh-button"
           disabled={loading}
-          leftSection={<RotateCcw className={loading ? "manage-refresh-icon is-spinning" : "manage-refresh-icon"} size={16} />}
+          leftSection={<RotateCcw className={loading ? "button-progress-icon is-spinning" : "button-progress-icon"} size={16} />}
           onClick={load}
           variant="default"
         >
@@ -764,26 +767,26 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
             <Paper className="manage-agent-box" withBorder p="md">
               <Stack gap="md">
                 <SectionHeader title={t("manage.tokens")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewTokenModal}><ResponsiveActionLabel full={t("manage.addToken")} compact={t("actions.add")} /></GuardedButton>} />
-                <Table.ScrollContainer minWidth={760}>
-                  <Table className="manage-table" verticalSpacing="xs">
+                <Table.ScrollContainer minWidth={1080}>
+                  <Table className="manage-table manage-token-table manage-api-token-table" verticalSpacing="xs">
                     <Table.Thead>
                       <Table.Tr>
-                        <Table.Th>{t("manage.tokenName")}</Table.Th>
-                        <Table.Th>{t("manage.token")}</Table.Th>
-                        <Table.Th>{t("manage.access")}</Table.Th>
-                        <Table.Th>{t("manage.scope")}</Table.Th>
-                        <Table.Th>{t("manage.tools")}</Table.Th>
+                        <Table.Th className="manage-token-name-column">{t("manage.tokenName")}</Table.Th>
+                        <Table.Th className="manage-token-secret-column">{t("manage.token")}</Table.Th>
+                        <Table.Th className="manage-api-token-access-column">{t("manage.access")}</Table.Th>
+                        <Table.Th className="manage-api-token-scope-column">{t("manage.scope")}</Table.Th>
+                        <Table.Th className="manage-api-token-tools-column">{t("manage.tools")}</Table.Th>
                         <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
                       </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
                       {(settings.api_tokens ?? []).map((token, index) => (
                         <Table.Tr key={`${token.id || token.secret}:${index}`}>
-                          <Table.Td>{token.name || token.secret.slice(0, 8) || "-"}</Table.Td>
-                          <Table.Td><Text className="manage-token-secret" fw={600}>{token.secret || "********"}</Text></Table.Td>
-                          <Table.Td><TokenAccessBadges token={token} t={t} /></Table.Td>
-                          <Table.Td>{tokenScopeLabel(token)}</Table.Td>
-                          <Table.Td><TokenToolBadges token={token} /></Table.Td>
+                          <Table.Td className="manage-token-name-column">{token.name || token.secret.slice(0, 8) || "-"}</Table.Td>
+                          <Table.Td className="manage-token-secret-column"><Text className="manage-token-secret" fw={600}>{token.secret || "********"}</Text></Table.Td>
+                          <Table.Td className="manage-api-token-access-column"><TokenAccessBadges token={token} t={t} /></Table.Td>
+                          <Table.Td className="manage-api-token-scope-column">{tokenScopeLabel(token)}</Table.Td>
+                          <Table.Td className="manage-api-token-tools-column"><TokenToolBadges token={token} /></Table.Td>
                           <Table.Td className="manage-table-actions">
                             <Group gap="xs" justify="flex-end">
                               <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editToken(token, index)}><Pencil size={16} /></ActionIcon></Tooltip>
@@ -802,38 +805,37 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
 
             <Paper className="manage-agent-box" withBorder p="md">
               <Stack gap="md">
-                <SectionHeader title={t("manage.registerTokenList")} action={<GuardedButton leftSection={<Plus size={16} />} loading={savingSettings} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={createRegisterToken}><ResponsiveActionLabel full={t("manage.addRegisterToken")} compact={t("actions.add")} /></GuardedButton>} />
-                <Table.ScrollContainer minWidth={680}>
-                  <Table className="manage-table" verticalSpacing="xs">
+                <SectionHeader title={t("manage.registerTokenList")} action={<GuardedButton leftSection={<Plus size={16} />} loading={savingSettings} disabled={!writable || savingRegisterTokenID !== null} disabledReason={t("manage.writeRequired")} onClick={createRegisterToken}><ResponsiveActionLabel full={t("manage.addRegisterToken")} compact={t("actions.add")} /></GuardedButton>} />
+                <Table.ScrollContainer minWidth={1080}>
+                  <Table className="manage-table manage-token-table manage-register-token-table" verticalSpacing="xs">
                     <Table.Thead>
                       <Table.Tr>
-                        <Table.Th>{t("manage.tokenName")}</Table.Th>
-                        <Table.Th>{t("manage.token")}</Table.Th>
+                        <Table.Th className="manage-token-name-column">{t("manage.tokenName")}</Table.Th>
+                        <Table.Th className="manage-token-secret-column">{t("manage.token")}</Table.Th>
+                        <Table.Th className="manage-register-token-uses-column">{t("manage.remainingUses")}</Table.Th>
+                        <Table.Th className="manage-register-token-agent-ids-column">{t("manage.allowedAgentIDs")}</Table.Th>
                         <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
                       </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
-                      {(settings.register_tokens ?? []).map((token, index) => (
-                        <Table.Tr key={`${token.id || token.token}:${index}`}>
-                          <Table.Td>
-                            <RegisterTokenNameInput
-                              disabled={!writable || savingRegisterTokenIndex === index}
-                              loading={savingRegisterTokenIndex === index}
-                              onSave={(name) => renameRegisterToken(index, name)}
-                              placeholder={t("manage.tokenName")}
-                              value={token.name ?? ""}
-                            />
-                          </Table.Td>
-                          <Table.Td><Text className="manage-token-secret" fw={600}>{token.token || "********"}</Text></Table.Td>
-                          <Table.Td className="manage-table-actions">
-                            <Group gap="xs" justify="flex-end">
-                              <GuardedActionIcon label={t("manage.rotateRegisterToken")} disabled={!writable || savingRegisterTokenIndex === index} disabledReason={t("manage.writeRequired")} variant="subtle" onClick={() => rotateRegisterToken(index)}><RefreshCw size={16} /></GuardedActionIcon>
-                              <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => deleteRegisterToken(index)}><Trash2 size={16} /></GuardedActionIcon>
-                            </Group>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                      {(settings.register_tokens ?? []).length === 0 && <EmptyRow colSpan={3} label={t("manage.noRegisterTokens")} />}
+                      {(settings.register_tokens ?? []).map((token, index) => {
+                        const tokenID = token.id ?? "";
+                        const tokenBusy = savingSettings || savingRegisterTokenID !== null;
+                        const tokenLoading = savingRegisterTokenID === tokenID;
+                        return (
+                          <RegisterTokenRow
+                            key={`${tokenID || token.token}:${index}`}
+                            disabled={!writable || tokenBusy}
+                            loading={tokenLoading}
+                            onDelete={() => deleteRegisterToken(tokenID)}
+                            onRotate={() => rotateRegisterToken(tokenID)}
+                            onSave={(draft) => saveRegisterToken(tokenID, draft)}
+                            t={t}
+                            token={token}
+                          />
+                        );
+                      })}
+                      {(settings.register_tokens ?? []).length === 0 && <EmptyRow colSpan={5} label={t("manage.noRegisterTokens")} />}
                     </Table.Tbody>
                   </Table>
                 </Table.ScrollContainer>
@@ -1036,35 +1038,98 @@ function EmptyRow({ colSpan, label }: { colSpan: number; label: string }) {
   return <Table.Tr><Table.Td colSpan={colSpan}><Text c="dimmed" ta="center">{label}</Text></Table.Td></Table.Tr>;
 }
 
-function RegisterTokenNameInput({ disabled, loading, onSave, placeholder, value }: { disabled: boolean; loading: boolean; onSave: (value: string) => void | Promise<void>; placeholder: string; value: string }) {
-  const [draft, setDraft] = useState(value);
+type RegisterTokenDraft = {
+  name: string;
+  remainingUses: number;
+  allowedAgentIDs: string[];
+};
+
+function RegisterTokenRow({ disabled, loading, onDelete, onRotate, onSave, t, token }: {
+  disabled: boolean;
+  loading: boolean;
+  onDelete: () => void | Promise<void>;
+  onRotate: () => void | Promise<void>;
+  onSave: (draft: RegisterTokenDraft) => void | Promise<void>;
+  t: (key: string) => string;
+  token: RegisterToken;
+}) {
+  const [draft, setDraft] = useState<RegisterTokenDraft>(() => registerTokenDraft(token));
 
   useEffect(() => {
-    setDraft(value);
-  }, [value]);
+    setDraft(registerTokenDraft(token));
+  }, [token]);
 
-  const changed = draft.trim() !== value.trim();
+  const changed = registerTokenDraftChanged(token, draft);
 
   return (
-    <Group className="manage-inline-name" gap="xs" wrap="nowrap">
-      <TextInput
-        aria-label={placeholder}
-        disabled={disabled}
-        value={draft}
-        placeholder={placeholder}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && changed && !disabled && !loading) {
-            event.preventDefault();
-            void onSave(draft);
-          }
-        }}
-      />
-      <Button disabled={disabled || !changed} loading={loading} onClick={() => onSave(draft)} size="xs">
-        <Save size={14} />
-      </Button>
-    </Group>
+    <Table.Tr>
+      <Table.Td className="manage-token-name-column">
+        <TextInput
+          aria-label={t("manage.tokenName")}
+          className="manage-register-token-input manage-register-token-name-input"
+          disabled={disabled}
+          onChange={(event) => {
+            const name = event.currentTarget.value;
+            setDraft((current) => ({ ...current, name }));
+          }}
+          placeholder={t("manage.tokenName")}
+          value={draft.name}
+        />
+      </Table.Td>
+      <Table.Td className="manage-token-secret-column"><Text className="manage-token-secret" fw={600}>{token.token || "********"}</Text></Table.Td>
+      <Table.Td className="manage-register-token-uses-column">
+        <NumberInput
+          aria-label={t("manage.remainingUses")}
+          allowDecimal={false}
+          allowNegative={false}
+          className="manage-register-token-input manage-register-token-uses-input"
+          disabled={disabled}
+          min={0}
+          onChange={(next) => setDraft((current) => ({ ...current, remainingUses: Math.max(0, Math.floor(Number(next) || 0)) }))}
+          value={draft.remainingUses}
+        />
+      </Table.Td>
+      <Table.Td className="manage-register-token-agent-ids-column">
+        <TagsInput
+          aria-label={t("manage.allowedAgentIDsPlaceholder")}
+          className="manage-register-token-input manage-register-token-agent-ids-input"
+          clearable
+          disabled={disabled}
+          onChange={(next) => setDraft((current) => ({ ...current, allowedAgentIDs: normalizeRegisterAgentIDs(next) }))}
+          placeholder={draft.allowedAgentIDs.length === 0 ? t("manage.allowedAgentIDsPlaceholder") : ""}
+          value={draft.allowedAgentIDs}
+        />
+      </Table.Td>
+      <Table.Td className="manage-table-actions">
+        <Group gap="xs" justify="flex-end">
+          <GuardedActionIcon label={t("actions.save")} disabled={disabled || !changed} variant="subtle" onClick={() => onSave(draft)}>
+            {loading ? <RotateCcw className="button-progress-icon is-spinning" size={16} /> : <Save size={16} />}
+          </GuardedActionIcon>
+          <GuardedActionIcon label={t("manage.rotateRegisterToken")} disabled={disabled} variant="subtle" onClick={onRotate}><RefreshCw size={16} /></GuardedActionIcon>
+          <GuardedActionIcon label={t("schedule.delete")} disabled={disabled} color="red" variant="subtle" onClick={onDelete}><Trash2 size={16} /></GuardedActionIcon>
+        </Group>
+      </Table.Td>
+    </Table.Tr>
   );
+}
+
+function registerTokenDraft(token: RegisterToken): RegisterTokenDraft {
+  return {
+    name: token.name ?? "",
+    remainingUses: token.remaining_uses ?? 0,
+    allowedAgentIDs: normalizeRegisterAgentIDs(token.allowed_agent_ids ?? [])
+  };
+}
+
+function registerTokenDraftChanged(token: RegisterToken, draft: RegisterTokenDraft): boolean {
+  const saved = registerTokenDraft(token);
+  return draft.name.trim() !== saved.name.trim()
+    || draft.remainingUses !== saved.remainingUses
+    || JSON.stringify(normalizeRegisterAgentIDs(draft.allowedAgentIDs)) !== JSON.stringify(saved.allowedAgentIDs);
+}
+
+function normalizeRegisterAgentIDs(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function ManageTabs({ value, onChange, data }: { value: string; onChange: (value: string) => void; data: { value: string; label: string }[] }) {
@@ -1101,8 +1166,18 @@ type GuardedButtonProps = {
   variant?: string;
 };
 
-function GuardedButton({ disabled, disabledReason: _disabledReason, children, variant = "default", ...props }: GuardedButtonProps) {
-  return <Button {...props} disabled={disabled} variant={variant}>{children}</Button>;
+function GuardedButton({ disabled, disabledReason: _disabledReason, children, leftSection, loading = false, variant = "default", ...props }: GuardedButtonProps) {
+  return (
+    <Button
+      {...props}
+      aria-busy={loading}
+      disabled={disabled || loading}
+      leftSection={loading ? <RotateCcw className="button-progress-icon is-spinning" size={16} /> : leftSection}
+      variant={variant}
+    >
+      {children}
+    </Button>
+  );
 }
 
 type GuardedActionIconProps = {

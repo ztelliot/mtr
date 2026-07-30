@@ -176,16 +176,16 @@ func TestSQLiteScheduledJobHistory(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	sched := model.ScheduledJob{
-		ID:              "sched-1",
-		Revision:        1,
-		Enabled:         true,
-		Tool:            model.ToolPing,
-		Target:          "1.1.1.1",
-		Args:            map[string]string{"count": "1"},
-		IntervalSeconds: 60,
-		NextRunAt:       now.Add(-time.Second),
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:             "sched-1",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		Args:           map[string]string{"count": "1"},
+		CronExpression: "* * * * *",
+		NextRunAt:      now.Add(-time.Second),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)

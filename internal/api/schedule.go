@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/ztelliot/mtr/internal/crontab"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
 	"github.com/ztelliot/mtr/internal/store"
@@ -43,12 +44,12 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		Args:            details.createReq.Args,
 		IPVersion:       details.scheduleVersion,
 		ResolveOnAgent:  details.createReq.ResolveOnAgent,
-		NextRunAt:       now,
+		CronExpression:  details.cronExpression,
+		NextRunAt:       details.nextRunAt,
 		ScheduleTargets: details.scheduleTargets,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	normalizeScheduleRunFields(&sched)
 	if err := s.store.CreateScheduledJob(r.Context(), sched); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -81,10 +82,10 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	nextRunAt := existing.NextRunAt
-	definitionChanged := scheduleDefinitionChanged(existing, req, details)
-	intervalChanged := scheduleIntervalsChanged(existing, details.scheduleTargets)
-	if nextRunAt.IsZero() || (details.enabled && (!existing.Enabled || definitionChanged || intervalChanged)) {
-		nextRunAt = now
+	definitionChanged := scheduleDefinitionChanged(existing, details)
+	cronChanged := existing.CronExpression != details.cronExpression
+	if nextRunAt.IsZero() || cronChanged || (details.enabled && (!existing.Enabled || definitionChanged)) {
+		nextRunAt = details.nextRunAt
 	}
 	revision := existing.Revision
 	if revision <= 0 {
@@ -103,16 +104,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		Args:            details.createReq.Args,
 		IPVersion:       details.scheduleVersion,
 		ResolveOnAgent:  details.createReq.ResolveOnAgent,
+		CronExpression:  details.cronExpression,
 		NextRunAt:       nextRunAt,
 		LastRunAt:       existing.LastRunAt,
 		ScheduleTargets: details.scheduleTargets,
 		CreatedAt:       existing.CreatedAt,
 		UpdatedAt:       now,
 	}
-	if len(sched.ScheduleTargets) > 0 && !definitionChanged {
-		mergeScheduleTargetRunState(sched.ScheduleTargets, existing.EffectiveScheduleTargets(), intervalChanged || !existing.Enabled)
-	}
-	normalizeScheduleRunFields(&sched)
 	if err := s.store.UpdateScheduledJob(r.Context(), sched); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -144,11 +142,23 @@ type scheduleRequestDetails struct {
 	createReq       model.CreateJobRequest
 	scheduleVersion model.IPVersion
 	enabled         bool
+	cronExpression  string
+	nextRunAt       time.Time
 	scheduleTargets []model.ScheduleTarget
 }
 
 func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request, req model.CreateScheduledJobRequest, defaultEnabled bool) (scheduleRequestDetails, bool) {
 	now := time.Now().UTC()
+	cronExpression, cronSchedule, err := crontab.Parse(req.CronExpression)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cron_expression must be a valid 5-field crontab expression: "+err.Error())
+		return scheduleRequestDetails{}, false
+	}
+	nextRunAt, err := crontab.NextSchedule(cronSchedule, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cron_expression must be a valid 5-field crontab expression: "+err.Error())
+		return scheduleRequestDetails{}, false
+	}
 	createReq := model.CreateJobRequest{
 		Tool:           req.Tool,
 		Target:         req.Target,
@@ -156,7 +166,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		IPVersion:      req.IPVersion,
 		ResolveOnAgent: req.ResolveOnAgent,
 	}
-	scheduleTargets, err := scheduleTargetsFromRequest(req, now)
+	scheduleTargets, err := scheduleTargetsFromRequest(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
@@ -199,7 +209,14 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	return scheduleRequestDetails{createReq: createReq, scheduleVersion: scheduleVersion, enabled: enabled, scheduleTargets: scheduleTargets}, true
+	return scheduleRequestDetails{
+		createReq:       createReq,
+		scheduleVersion: scheduleVersion,
+		enabled:         enabled,
+		cronExpression:  cronExpression,
+		nextRunAt:       nextRunAt,
+		scheduleTargets: scheduleTargets,
+	}, true
 }
 
 func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJobRequest, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
@@ -250,16 +267,16 @@ func scheduleTargetMatchesAgent(label string, agent model.Agent) bool {
 	return false
 }
 
-func scheduleDefinitionChanged(existing model.ScheduledJob, req model.CreateScheduledJobRequest, details scheduleRequestDetails) bool {
+func scheduleDefinitionChanged(existing model.ScheduledJob, details scheduleRequestDetails) bool {
 	return existing.Tool != details.createReq.Tool ||
 		existing.Target != details.createReq.Target ||
 		existing.IPVersion != details.scheduleVersion ||
 		existing.ResolveOnAgent != details.createReq.ResolveOnAgent ||
-		!scheduleTargetsSameDefinition(existing.EffectiveScheduleTargets(), details.scheduleTargets) ||
+		!scheduleTargetsSameDefinition(existing.ScheduleTargets, details.scheduleTargets) ||
 		!maps.Equal(existing.Args, details.createReq.Args)
 }
 
-func scheduleTargetsFromRequest(req model.CreateScheduledJobRequest, now time.Time) ([]model.ScheduleTarget, error) {
+func scheduleTargetsFromRequest(req model.CreateScheduledJobRequest) ([]model.ScheduleTarget, error) {
 	targets := req.ScheduleTargets
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("schedule_targets is required")
@@ -271,19 +288,11 @@ func scheduleTargetsFromRequest(req model.CreateScheduledJobRequest, now time.Ti
 		if label == "" {
 			return nil, fmt.Errorf("schedule_targets[%d].label is required", i)
 		}
-		if target.IntervalSeconds < 10 || target.IntervalSeconds > 86400 {
-			return nil, fmt.Errorf("schedule_targets[%d].interval_seconds must be between 10 and 86400", i)
-		}
 		if _, ok := seen[label]; ok {
 			return nil, fmt.Errorf("duplicate schedule target %q", label)
 		}
 		seen[label] = struct{}{}
-		out = append(out, model.ScheduleTarget{
-			ID:              uuid.NewString(),
-			Label:           label,
-			IntervalSeconds: target.IntervalSeconds,
-			NextRunAt:       now,
-		})
+		out = append(out, model.ScheduleTarget{Label: label})
 	}
 	return out, nil
 }
@@ -312,60 +321,6 @@ func scheduleTargetsSameDefinition(left []model.ScheduleTarget, right []model.Sc
 
 func scheduleTargetDefinitionKey(target model.ScheduleTarget) string {
 	return target.Label + "\x00" + strings.Join(target.AllowedAgentIDs, ",")
-}
-
-func scheduleIntervalsChanged(existing model.ScheduledJob, targets []model.ScheduleTarget) bool {
-	left := existing.EffectiveScheduleTargets()
-	if len(left) != len(targets) {
-		return true
-	}
-	leftByKey := map[string]int{}
-	for _, target := range left {
-		leftByKey[scheduleTargetDefinitionKey(target)] = target.IntervalSeconds
-	}
-	for _, target := range targets {
-		if leftByKey[scheduleTargetDefinitionKey(target)] != target.IntervalSeconds {
-			return true
-		}
-	}
-	return false
-}
-
-func mergeScheduleTargetRunState(next []model.ScheduleTarget, existing []model.ScheduleTarget, reset bool) {
-	if reset {
-		return
-	}
-	byKey := map[string]model.ScheduleTarget{}
-	for _, target := range existing {
-		byKey[target.Label] = target
-	}
-	for i := range next {
-		if old, ok := byKey[next[i].Label]; ok {
-			next[i].ID = old.ID
-			next[i].NextRunAt = old.NextRunAt
-			next[i].LastRunAt = old.LastRunAt
-		}
-	}
-}
-
-func normalizeScheduleRunFields(sched *model.ScheduledJob) {
-	if len(sched.ScheduleTargets) == 0 {
-		return
-	}
-	earliest := sched.ScheduleTargets[0].NextRunAt
-	var latestLast *time.Time
-	for _, target := range sched.ScheduleTargets {
-		if target.NextRunAt.Before(earliest) {
-			earliest = target.NextRunAt
-		}
-		if target.LastRunAt != nil && (latestLast == nil || target.LastRunAt.After(*latestLast)) {
-			t := *target.LastRunAt
-			latestLast = &t
-		}
-	}
-	sched.NextRunAt = earliest
-	sched.LastRunAt = latestLast
-	sched.IntervalSeconds = sched.ScheduleTargets[0].IntervalSeconds
 }
 
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {

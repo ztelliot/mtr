@@ -71,6 +71,14 @@ Server 运行时策略保存在持久化托管配置（managed settings）中，
 空数据库首次启动时，Server 会创建一个 admin API token 并打印到日志。使用这个 token 通过管理页，
 或调用 `/v1/manage/tokens`、`/v1/manage/register-tokens`、`/v1/manage/rate-limit`、
 `/v1/manage/labels` 和 `/v1/manage/agents` 来创建需要的 token 和策略。
+每个 Agent 注册 token 都有 `remaining_uses`（剩余新节点次数，新 token 默认为 `1`）。
+只有首次出现的 Agent ID 创建记录时才会在事务内扣减次数；已有 Agent 重连不扣减，
+次数为 0 时仍可重连。Agent 的国家、地区、provider 和 ISP 只允许首次注册时写入；
+可通过注册 token 的 `allowed_agent_ids` 限制它只能创建
+指定的 Agent ID，空列表表示不限制。白名单校验失败不会扣减次数，已经绑定的 Agent
+在白名单变更后仍可重连。
+后续连接仍可更新版本、能力列表和 IPv4/IPv6 协议支持。如需变更这些已锁定的身份字段，
+请使用新的 Agent ID。
 在 Server 或 Agent 配置中设置 `log_level: debug` 可开启更详细的调度和执行日志。
 
 Server 也可以主动调用通过 `/v1/manage/agents` 创建的托管 HTTP Agent；记录中需要
@@ -151,12 +159,13 @@ Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent:
 curl -X POST http://localhost:8080/v1/schedules \
   -H 'Authorization: Bearer developer-token' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}'
+  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","cron_expression":"*/5 * * * *","schedule_targets":[{"label":"agent"}]}'
 ```
 
 计划任务通过 `schedule_targets` 选择节点。每个 Agent 都会自动获得服务端管理的
 `agent` 标签和 `id:<agent-id>` 标签；`agent` 表示全部节点，自定义标签表示节点组，
-`id:<agent-id>` 表示单个节点。每个 target 都可以设置自己的 interval。自定义标签可来自
+`id:<agent-id>` 表示单个节点。`cron_expression` 使用标准 5 段格式
+`分 时 日 月 周`，统一按 UTC 解释；每个触发点会同时运行全部所选节点。自定义标签可来自
 Agent 配置、托管 HTTP Agent 配置或部署生成器。带固定 Agent allowlist 的 API token
 也可以使用组标签；服务端会把 allowlist 固化到 schedule target 上，运行时跳过
 不在 token scope 内的匹配 Agent。计划任务和任务读取接口有意允许被具备对应读权限的
@@ -295,6 +304,71 @@ initContainer 会把 fallback 值写入生成后的配置文件。
 服务端托管的 Agent 标签选择节点集；不选择表示全部可用节点，选择多个标签时按 OR 语义合并。
 计划任务则使用
 `schedule_targets` 标签选择节点，而不是单个 `agent_id`。
+
+## HTTP 访问日志
+
+Server 会在每个 HTTP 请求结束后输出一条结构化 JSON 访问日志。覆盖公开接口、正常鉴权
+API、鉴权拒绝、限流请求、未匹配路由、`/metrics`；长连接和流式请求会在连接结束时记录。
+日志消息为 `http access`，主要字段包括：
+
+- `request_id`、方法、路由模板、转义后的路径、状态码和耗时；
+- 实际读取的请求字节数、写出的响应字节数、声明的 Content-Length，以及请求/响应
+  Content-Type；
+- 解析后的客户端 IP、远端地址、Host、协议、User-Agent、鉴权结果和哈希后的 API token
+  主体；
+- `panicked` 标记，便于发现由 HTTP Server 在路由外层恢复的异常。
+
+Server 会接受安全的 `X-Request-ID` 并在响应头中返回；缺失或格式不安全时自动生成 UUID。
+由于 API 支持通过 `access_token` 查询参数鉴权，访问日志有意不记录查询字符串，避免泄露
+凭据。将 `log_level` 设置为 `info` 或 `debug` 即可输出访问日志。
+
+## Prometheus Watch 指标
+
+Server 在 `/metrics` 暴露 Prometheus 指标，用于把 Watch 的历史展示和告警迁移到
+Prometheus/Grafana。每次抓取会导出每个计划任务当前 revision、每个 Agent 最新一次
+**已完成**的结果；正在执行的下一轮任务不会暂时覆盖上一次完成结果。指标还包括 Agent
+在线/启用状态、计划任务的 Crontab 配置和节点标签。
+
+同一个 `/metrics` 接口还会导出 HTTP 访问统计：
+
+- `mtr_http_requests_total`：按规范化方法、路由模板、状态码和鉴权结果统计请求量；
+- `mtr_http_request_duration_seconds`、`mtr_http_request_size_bytes`、
+  `mtr_http_response_size_bytes`：按方法和路由统计耗时及请求/响应体积直方图；
+- `mtr_http_requests_in_flight`：按方法统计当前并发请求数。
+
+未知方法统一标记为 `OTHER`，未匹配路由统一标记为 `unmatched`，不会把原始动态路径变成
+无界的 Prometheus 时序。同时会导出标准 `go_*` Go Runtime 指标和 `process_*` 进程指标。
+
+当 Server 配置了 API token 时，Prometheus 请求需要携带具有
+`schedule_access: read`（或 `write`）权限的 token。示例抓取配置：
+
+```yaml
+scrape_configs:
+  - job_name: mtr-watch
+    metrics_path: /metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/mtr-watch.token
+    static_configs:
+      - targets: [mtr-server.example:8080]
+```
+
+`scrape_interval` 应足以覆盖 Watch 的 Crontab 运行频率；Exporter 暴露的是最新完成状态，
+如果两次抓取之间完成了多轮任务，Prometheus 不会补录中间轮次的瞬时值。
+
+主要指标包括：
+
+- 通用结果：`mtr_watch_result_success`、`mtr_watch_result_timestamp_seconds`、
+  `mtr_watch_result_duration_seconds`。
+- Ping：丢包比例、收发包数和 RTT；HTTP：分阶段耗时、状态码和下载量；
+  DNS：记录数量；Port：端口状态和连接耗时。
+- Traceroute/MTR：逐跳 RTT、丢包、探测数，以及完整路径信息。
+
+Prometheus 样本值只能是数字，文本通过值恒为 `1` 的 info 指标保存：DNS 使用
+`mtr_watch_dns_record_info`，完整路由使用 `mtr_watch_route_path_info`，逐跳地址使用
+`mtr_watch_route_hop_info`。文本标签同时附带稳定哈希；单项超过 2048 个字符时会截断并将
+`truncated` 设为 `true`。Exporter 不会使用每次变化的 `job_id` 作为标签。
 
 ## Agent/Server mTLS 证书
 
@@ -544,7 +618,8 @@ kubectl -n mtr create secret generic mtr-agent-tls \
 
 `<managed-register-token>` 是管理页或 `/v1/manage/register-tokens` 返回的 token
 值。空数据库首次启动时，Server 会在日志中打印初始 admin API token；使用该 token
-创建 Agent 注册 token 后，再把返回值写入 `mtr-agent-env`。
+创建 Agent 注册 token，设置本次上线允许的 Agent ID 和对应的剩余次数后，
+再把返回值写入 `mtr-agent-env`。
 
 然后应用基础清单：
 

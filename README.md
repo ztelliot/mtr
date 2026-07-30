@@ -82,7 +82,18 @@ creates one admin API token and prints it to the log. Use that token with the
 Manage page or the
 `/v1/manage/tokens`, `/v1/manage/register-tokens`, `/v1/manage/rate-limit`,
 `/v1/manage/labels`, and `/v1/manage/agents` endpoints to create the tokens and
-policy you want. Set
+policy you want. Each Agent register token has a `remaining_uses` allowance
+(new tokens default to `1`). The allowance is consumed atomically only when a
+previously unseen Agent ID is created; reconnecting an existing Agent does not
+consume it and remains possible at zero.
+Set `allowed_agent_ids` on a register token to restrict which exact Agent IDs
+it may create. An empty list means the token is unrestricted;
+allowlist failures do not consume a use, and already-bound Agents may still
+reconnect after the allowlist changes.
+An Agent's country, region, provider, and ISP are fixed by its first
+registration; later connections may still refresh version, capabilities, and
+IPv4/IPv6 protocol support. Use a new Agent ID when those fixed identity fields
+must change. Set
 `log_level: debug` in the Server or Agent config for verbose scheduling and
 execution logs.
 
@@ -175,18 +186,19 @@ Create a scheduled detection task:
 curl -X POST http://localhost:8080/v1/schedules \
   -H 'Authorization: Bearer developer-token' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","schedule_targets":[{"label":"agent","interval_seconds":60}]}'
+  -d '{"name":"cf-ping","tool":"ping","target":"1.1.1.1","cron_expression":"*/5 * * * *","schedule_targets":[{"label":"agent"}]}'
 ```
 
 Scheduled jobs select nodes with `schedule_targets`. Every Agent gets the
 server-managed `agent` label plus `id:<agent-id>`. Custom labels are set in
 server-side Agent or managed HTTP Agent config. Use `agent` for all nodes, a
 custom label for a group, or `id:<agent-id>` for one node.
-Each target can carry its own interval. API tokens with a fixed Agent allowlist
-may still use group labels; the server stores that allowlist on the schedule target and
-skips matching Agents outside the token scope when the schedule runs. Schedule
-and job read endpoints are intentionally shareable to any token with the
-corresponding read permission.
+`cron_expression` uses the standard five fields `minute hour day month weekday`
+and is evaluated in UTC. All selected targets run together at each cron tick.
+API tokens with a fixed Agent allowlist may still use group labels; the server
+stores that allowlist on the schedule target and skips matching Agents outside
+the token scope when the schedule runs. Schedule and job read endpoints are
+intentionally shareable to any token with the corresponding read permission.
 
 Query scheduled task history:
 
@@ -330,6 +342,83 @@ selection means every eligible node, while multiple tags use OR semantics.
 Ad-hoc `traceroute` and `mtr` jobs require an explicit Agent selection because
 the server requires `agent_id` for those tools. Scheduled jobs use
 `schedule_targets` labels instead of a single `agent_id`.
+
+## HTTP Access Logs
+
+The Server writes one structured JSON access log after every HTTP request,
+including public endpoints, authenticated APIs, rejected authentication,
+rate-limited requests, unmatched routes, `/metrics`, and long-lived streams when
+they close. Access records use the `http access` message and include:
+
+- `request_id`, method, route template, escaped path, status, and duration;
+- request bytes read, response bytes written, declared content length, and
+  request/response content types;
+- resolved client IP, remote address, host, protocol, user agent, authentication
+  result, and the hashed API-token subject;
+- a `panicked` flag so failed handlers remain visible even if the HTTP server
+  recovers the panic outside the router.
+
+The Server accepts a safe `X-Request-ID` value and returns it in the response;
+otherwise it generates a UUID. Query strings are intentionally excluded from
+access records because API authentication also supports the `access_token`
+query parameter. Set `log_level: info` or `debug` to emit access logs.
+
+## Prometheus Watch Metrics
+
+The Server exposes Prometheus metrics at `/metrics` so Watch history and alerts
+can move to Prometheus and Grafana. Each scrape exports the latest **completed**
+result for every Agent in the current schedule revision. A new run that is still
+active does not temporarily hide the previous completed result. Agent
+online/enabled state, schedule crontab metadata, and configured node labels are
+also exported.
+
+The same endpoint exports HTTP access statistics:
+
+- `mtr_http_requests_total` by normalized method, route template, status code,
+  and authentication result;
+- `mtr_http_request_duration_seconds`, `mtr_http_request_size_bytes`, and
+  `mtr_http_response_size_bytes` histograms by method and route;
+- `mtr_http_requests_in_flight` by method.
+
+Unknown methods are labeled `OTHER` and unmatched routes are labeled
+`unmatched`, preventing raw paths from creating unbounded Prometheus series.
+Standard `go_*` runtime and `process_*` process metrics are exported as well.
+
+When API tokens are configured, Prometheus must send a token with
+`schedule_access: read` (or `write`). For example:
+
+```yaml
+scrape_configs:
+  - job_name: mtr-watch
+    metrics_path: /metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/mtr-watch.token
+    static_configs:
+      - targets: [mtr-server.example:8080]
+```
+
+Set `scrape_interval` often enough to capture the Watch cron cadence. The
+exporter exposes the latest completed state, so Prometheus cannot backfill
+intermediate runs when several finish between two scrapes.
+
+The primary metric groups are:
+
+- Common result state: `mtr_watch_result_success`,
+  `mtr_watch_result_timestamp_seconds`, and
+  `mtr_watch_result_duration_seconds`.
+- Ping packet loss/count/RTT, HTTP phase timing/status/download size, DNS record
+  count, and TCP port state/connect timing.
+- Traceroute/MTR per-hop RTT/loss/probe count plus complete route information.
+
+Prometheus sample values are numeric only. Text is represented by info metrics
+whose value is always `1`: `mtr_watch_dns_record_info` stores DNS records,
+`mtr_watch_route_path_info` stores complete paths, and
+`mtr_watch_route_hop_info` stores hop addresses. Text labels include a stable
+hash; values longer than 2048 characters are shortened and marked with
+`truncated="true"`. Per-run `job_id` values are intentionally never used as
+labels.
 
 ## Agent/Server mTLS
 
@@ -624,6 +713,7 @@ kubectl -n mtr create secret generic mtr-agent-tls \
 `<managed-register-token>` is the token value returned by the Manage page or
 `/v1/manage/register-tokens`. On a fresh database, Server prints the initial
 admin API token on startup; use that token to create an Agent register token,
+set its allowed Agent IDs and remaining uses for the rollout,
 then store the returned value in `mtr-agent-env`.
 
 Then apply the baseline resources:

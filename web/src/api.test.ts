@@ -75,10 +75,10 @@ describe("api client", () => {
   it("creates schedules and fetches their history", async () => {
     const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === "/api/v1/schedules" && init?.method === "POST") {
-        return new Response(JSON.stringify({ id: "sched-1", tool: "ping", target: "1.1.1.1", enabled: true, interval_seconds: 60 }), { status: 201 });
+        return new Response(JSON.stringify({ id: "sched-1", tool: "ping", target: "1.1.1.1", enabled: true, cron_expression: "*/5 * * * *" }), { status: 201 });
       }
       if (url === "/api/v1/schedules/sched-1" && init?.method === "PUT") {
-        return new Response(JSON.stringify({ id: "sched-1", tool: "ping", target: "8.8.8.8", enabled: false, interval_seconds: 120 }), { status: 200 });
+        return new Response(JSON.stringify({ id: "sched-1", tool: "ping", target: "8.8.8.8", enabled: false, cron_expression: "0 * * * *" }), { status: 200 });
       }
       if (url === "/api/v1/schedules/sched-1" && init?.method === "DELETE") {
         return new Response(null, { status: 204 });
@@ -97,8 +97,8 @@ describe("api client", () => {
     vi.stubGlobal("fetch", fetcher);
 
     const client = new ApiClient({ apiBaseUrl: "/api", apiToken: "token" });
-    await expect(client.createSchedule({ tool: "ping", target: "1.1.1.1", schedule_targets: [{ label: "agent", interval_seconds: 60 }] })).resolves.toMatchObject({ id: "sched-1" });
-    await expect(client.updateSchedule("sched-1", { tool: "ping", target: "8.8.8.8", enabled: false, schedule_targets: [{ label: "agent", interval_seconds: 120 }] })).resolves.toMatchObject({ target: "8.8.8.8", enabled: false });
+    await expect(client.createSchedule({ tool: "ping", target: "1.1.1.1", cron_expression: "*/5 * * * *", schedule_targets: [{ label: "agent" }] })).resolves.toMatchObject({ id: "sched-1" });
+    await expect(client.updateSchedule("sched-1", { tool: "ping", target: "8.8.8.8", enabled: false, cron_expression: "0 * * * *", schedule_targets: [{ label: "agent" }] })).resolves.toMatchObject({ target: "8.8.8.8", enabled: false });
     await expect(client.deleteSchedule("sched-1")).resolves.toBeUndefined();
     await expect(client.listJobEvents("job-1")).resolves.toMatchObject([{ job_id: "job-1", agent_id: "edge-1", event: { type: "summary" } }]);
     await expect(client.listScheduleHistory("sched-1", "24h")).resolves.toMatchObject([{ id: "job-1" }]);

@@ -160,12 +160,15 @@ speedtest:
 func TestNormalizeManagedSettingsGeneratesAndRejectsDuplicateTokens(t *testing.T) {
 	settings := DefaultManagedSettings()
 	settings.APITokens = []APITokenPermission{{Tools: map[string]APIToolScope{"ping": {}}}}
-	settings.RegisterTokens = []RegisterToken{{Name: "edge"}}
+	settings.RegisterTokens = []RegisterToken{{Name: "edge", AllowedAgentIDs: []string{" edge-1 ", "edge-1", "", "edge-2"}}}
 	if err := NormalizeManagedSettings(&settings); err != nil {
 		t.Fatalf("expected missing secrets to be generated: %v", err)
 	}
 	if settings.APITokens[0].ID == "" || settings.APITokens[0].Secret == "" || settings.RegisterTokens[0].ID == "" || settings.RegisterTokens[0].Token == "" || settings.RegisterTokens[0].Name != "edge" {
 		t.Fatalf("expected generated tokens: %#v", settings)
+	}
+	if got := settings.RegisterTokens[0].AllowedAgentIDs; len(got) != 2 || got[0] != "edge-1" || got[1] != "edge-2" {
+		t.Fatalf("expected normalized allowed agent ids: %#v", got)
 	}
 	settings = DefaultManagedSettings()
 	settings.APITokens = []APITokenPermission{{Secret: "same", All: true}, {Secret: "same", All: true}}
@@ -176,6 +179,11 @@ func TestNormalizeManagedSettingsGeneratesAndRejectsDuplicateTokens(t *testing.T
 	settings.RegisterTokens = []RegisterToken{{ID: "same", Token: "one"}, {ID: "same", Token: "two"}}
 	if err := NormalizeManagedSettings(&settings); err == nil {
 		t.Fatal("expected duplicate register token id to be rejected")
+	}
+	settings = DefaultManagedSettings()
+	settings.RegisterTokens = []RegisterToken{{Token: "one", RemainingUses: -1}}
+	if err := NormalizeManagedSettings(&settings); err == nil {
+		t.Fatal("expected negative register token remaining uses to be rejected")
 	}
 }
 

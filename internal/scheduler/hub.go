@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ztelliot/mtr/internal/config"
+	"github.com/ztelliot/mtr/internal/crontab"
 	"github.com/ztelliot/mtr/internal/grpcwire"
 	"github.com/ztelliot/mtr/internal/model"
 	"github.com/ztelliot/mtr/internal/policy"
@@ -21,14 +22,13 @@ import (
 )
 
 type Hub struct {
-	store          store.Store
-	policies       policy.Set
-	labelConfigs   map[string]config.LabelConfig
-	registerTokens []string
-	log            *slog.Logger
-	offlineAfter   time.Duration
-	pollInterval   time.Duration
-	maxInflight    int
+	store        store.Store
+	policies     policy.Set
+	labelConfigs map[string]config.LabelConfig
+	log          *slog.Logger
+	offlineAfter time.Duration
+	pollInterval time.Duration
+	maxInflight  int
 
 	mu                         sync.Mutex
 	meta                       map[string]agentMeta
@@ -119,7 +119,6 @@ func (h *Hub) ApplySettings(settings config.ManagedSettings) {
 	defer h.mu.Unlock()
 	h.policies = basePolicies
 	h.labelConfigs = labelConfigs
-	h.registerTokens = normalizedRegisterTokens(settings.RegisterTokens)
 	h.offlineAfter = time.Duration(globalScheduler.AgentOfflineAfterSec) * time.Second
 	h.pollInterval = time.Duration(globalScheduler.PollIntervalSec) * time.Second
 	h.maxInflight = globalScheduler.MaxInflightPerAgent
@@ -156,14 +155,20 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		return
 	}
 	for _, sched := range schedules {
-		policies := h.policiesForLabels([]string{model.AgentAllLabel})
-		dueTargets := dueScheduleTargets(sched, now)
-		if len(dueTargets) == 0 {
+		nextRun, err := crontab.Next(sched.CronExpression, now)
+		if err != nil {
+			sched.Enabled = false
+			sched.UpdatedAt = now
+			if updateErr := h.store.UpdateScheduledJob(ctx, sched); updateErr != nil {
+				h.log.Warn("disable scheduled job with invalid cron expression", "schedule_id", sched.ID, "cron_expression", sched.CronExpression, "err", updateErr)
+			} else {
+				h.log.Warn("disabled scheduled job with invalid cron expression", "schedule_id", sched.ID, "cron_expression", sched.CronExpression, "err", err)
+			}
 			continue
 		}
+		policies := h.policiesForLabels([]string{model.AgentAllLabel})
 		if _, ok := policies.Get(sched.Tool); !ok {
-			advanceScheduleTargets(&sched, dueTargets, now)
-			_ = h.store.UpdateScheduledJobRun(ctx, sched)
+			h.advanceScheduledJob(ctx, &sched, now, nextRun)
 			h.log.Debug("skip scheduled job with disabled tool", "schedule_id", sched.ID, "tool", sched.Tool)
 			continue
 		}
@@ -183,8 +188,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		if sched.ResolveOnAgent {
 			literalVersion, literal, err := policy.LiteralIPVersion(sched.Tool, sched.Target)
 			if err != nil {
-				advanceScheduleTargets(&sched, dueTargets, now)
-				_ = h.store.UpdateScheduledJobRun(ctx, sched)
+				h.advanceScheduledJob(ctx, &sched, now, nextRun)
 				h.log.Warn("infer scheduled job target version", "schedule_id", sched.ID, "target", sched.Target, "err", err)
 				continue
 			}
@@ -194,8 +198,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		} else if sched.Tool != model.ToolDNS {
 			resolvedTarget, resolvedVersion, err := policies.ResolveTarget(ctx, sched.Tool, sched.Target, sched.IPVersion)
 			if err != nil {
-				advanceScheduleTargets(&sched, dueTargets, now)
-				_ = h.store.UpdateScheduledJobRun(ctx, sched)
+				h.advanceScheduledJob(ctx, &sched, now, nextRun)
 				h.log.Warn("resolve scheduled job target", "schedule_id", sched.ID, "target", sched.Target, "err", err)
 				continue
 			}
@@ -206,7 +209,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 		}
 		seenAgentIDs := map[string]struct{}{}
 		runs := make([]model.Job, 0)
-		for _, target := range dueTargets {
+		for _, target := range sched.ScheduleTargets {
 			agents, err := h.scheduledRunAgents(ctx, sched, target, job.IPVersion)
 			if err != nil {
 				h.log.Warn("list scheduled run agents", "schedule_id", sched.ID, "schedule_target_label", target.Label, "err", err)
@@ -237,8 +240,7 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 			}
 		}
 		if len(runs) == 0 {
-			advanceScheduleTargets(&sched, dueTargets, now)
-			_ = h.store.UpdateScheduledJobRun(ctx, sched)
+			h.advanceScheduledJob(ctx, &sched, now, nextRun)
 			h.log.Warn("skip scheduled fanout with no matching online agents", "schedule_id", sched.ID, "tool", sched.Tool)
 			continue
 		}
@@ -246,71 +248,18 @@ func (h *Hub) runDueSchedules(ctx context.Context) {
 			h.log.Warn("create scheduled job runs", "schedule_id", sched.ID, "runs", len(runs), "err", err)
 			continue
 		}
-		advanceScheduleTargets(&sched, dueTargets, now)
-		if err := h.store.UpdateScheduledJobRun(ctx, sched); err != nil {
-			h.log.Warn("update scheduled job run", "schedule_id", sched.ID, "err", err)
-		}
+		h.advanceScheduledJob(ctx, &sched, now, nextRun)
 		h.log.Debug("scheduled job queued", "schedule_id", sched.ID, "runs", len(runs), "next_run_at", sched.NextRunAt)
 	}
 }
 
-func dueScheduleTargets(sched model.ScheduledJob, now time.Time) []model.ScheduleTarget {
-	targets := sched.EffectiveScheduleTargets()
-	out := make([]model.ScheduleTarget, 0, len(targets))
-	for _, target := range targets {
-		if target.NextRunAt.IsZero() || !target.NextRunAt.After(now) {
-			out = append(out, target)
-		}
-	}
-	return out
-}
-
-func advanceScheduleTargets(sched *model.ScheduledJob, dueTargets []model.ScheduleTarget, now time.Time) {
-	dueByID := map[string]model.ScheduleTarget{}
-	for _, target := range dueTargets {
-		dueByID[target.ID] = target
-	}
-	for i := range sched.ScheduleTargets {
-		if _, ok := dueByID[sched.ScheduleTargets[i].ID]; !ok {
-			continue
-		}
-		nextRun := nextScheduleTargetRun(sched.ScheduleTargets[i], now)
-		sched.ScheduleTargets[i].LastRunAt = &now
-		sched.ScheduleTargets[i].NextRunAt = nextRun
-	}
-	syncScheduleAggregateRunFields(sched)
-	sched.UpdatedAt = now
-}
-
-func nextScheduleTargetRun(target model.ScheduleTarget, now time.Time) time.Time {
-	interval := time.Duration(target.IntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = time.Duration(10) * time.Second
-	}
-	nextRun := now.Add(interval)
-	if candidate := target.NextRunAt.Add(interval); candidate.After(now) {
-		nextRun = candidate
-	}
-	return nextRun
-}
-
-func syncScheduleAggregateRunFields(sched *model.ScheduledJob) {
-	if len(sched.ScheduleTargets) == 0 {
-		return
-	}
-	nextRun := sched.ScheduleTargets[0].NextRunAt
-	var lastRunAt *time.Time
-	for _, target := range sched.ScheduleTargets {
-		if target.NextRunAt.Before(nextRun) {
-			nextRun = target.NextRunAt
-		}
-		if target.LastRunAt != nil && (lastRunAt == nil || target.LastRunAt.After(*lastRunAt)) {
-			t := *target.LastRunAt
-			lastRunAt = &t
-		}
-	}
+func (h *Hub) advanceScheduledJob(ctx context.Context, sched *model.ScheduledJob, now, nextRun time.Time) {
+	sched.LastRunAt = &now
 	sched.NextRunAt = nextRun
-	sched.LastRunAt = lastRunAt
+	sched.UpdatedAt = now
+	if err := h.store.UpdateScheduledJobRun(ctx, *sched); err != nil {
+		h.log.Warn("update scheduled job run", "schedule_id", sched.ID, "err", err)
+	}
 }
 
 func (h *Hub) scheduledRunAgents(ctx context.Context, sched model.ScheduledJob, target model.ScheduleTarget, version model.IPVersion) ([]model.Agent, error) {
@@ -366,26 +315,31 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 		return errors.New("first message must be hello")
 	}
 	hello := first.Agent
-	if !h.registerTokenAllowed(hello.Token) {
-		return errors.New("invalid agent token")
+	agentID := strings.TrimSpace(hello.ID)
+	if agentID == "" {
+		return errors.New("agent id is required")
 	}
 	agent := model.Agent{
-		ID:           hello.ID,
+		ID:           agentID,
 		Country:      hello.Country,
 		Region:       hello.Region,
 		Provider:     hello.Provider,
 		ISP:          hello.ISP,
 		Version:      hello.Version,
-		TokenHash:    hashToken(hello.Token),
 		Capabilities: hello.Capabilities,
 		Protocols:    hello.Protocols,
 		Status:       model.AgentOnline,
 		LastSeenAt:   time.Now().UTC(),
 		CreatedAt:    time.Now().UTC(),
 	}
-	if err := h.store.UpsertAgent(stream.Context(), agent); err != nil {
+	registered, created, err := h.store.RegisterAgent(stream.Context(), agent, hello.Token)
+	if errors.Is(err, store.ErrInvalidRegisterToken) {
+		return errors.New("invalid agent token")
+	}
+	if err != nil {
 		return err
 	}
+	agent = registered
 
 	cancelQueueSize := h.inflightLimit() * 2
 	if cancelQueueSize < 1 {
@@ -399,7 +353,7 @@ func (h *Hub) Connect(stream grpcwire.Control_ConnectServer) error {
 	cancelCh := make(chan string, cancelQueueSize)
 	h.grpcCancels[agent.ID] = cancelCh
 	h.mu.Unlock()
-	h.log.Info("agent connected", "agent_id", agent.ID, "country", agent.Country, "region", agent.Region, "provider", agent.Provider, "isp", agent.ISP, "capabilities", hello.Capabilities, "protocols", hello.Protocols)
+	h.log.Info("agent connected", "agent_id", agent.ID, "new_agent", created, "country", agent.Country, "region", agent.Region, "provider", agent.Provider, "isp", agent.ISP, "capabilities", hello.Capabilities, "protocols", hello.Protocols)
 	defer func() {
 		runningJobs := h.runningJobs(agent.ID)
 		h.mu.Lock()
@@ -453,17 +407,6 @@ func (h *Hub) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, error
 		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, transport, labels)
 	}
 	return agents, nil
-}
-
-func (h *Hub) registerTokenAllowed(token string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, allowed := range h.registerTokens {
-		if token == allowed {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Hub) recvLoop(stream grpcwire.Control_ConnectServer, agentID string, errCh chan<- error) {
@@ -1373,23 +1316,6 @@ func (h *Hub) agentStaleAfterLocked(agentID string, offlineAfter time.Duration) 
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
-}
-
-func normalizedRegisterTokens(tokens []config.RegisterToken) []string {
-	out := make([]string, 0, len(tokens))
-	seen := map[string]struct{}{}
-	for _, item := range tokens {
-		token := strings.TrimSpace(item.Token)
-		if token == "" {
-			continue
-		}
-		if _, ok := seen[token]; ok {
-			continue
-		}
-		seen[token] = struct{}{}
-		out = append(out, token)
-	}
-	return out
 }
 
 func minRuntime(base config.Runtime, next config.Runtime) config.Runtime {

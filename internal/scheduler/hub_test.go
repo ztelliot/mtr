@@ -32,26 +32,6 @@ func upsertHubTestAgentConfigLabels(t *testing.T, ctx context.Context, st store.
 	}
 }
 
-func TestRegisterTokenAllowedRequiresConfiguredToken(t *testing.T) {
-	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
-
-	if hub.registerTokenAllowed("change-me-agent-token") {
-		t.Fatal("unconfigured register token should not allow agent registration")
-	}
-}
-
-func TestApplySettingsRegisterTokensRestrictRegistration(t *testing.T) {
-	hub := NewHub(store.NewMemory(), policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
-	hub.ApplySettings(config.ManagedSettings{RegisterTokens: []config.RegisterToken{{Name: "managed", Token: "managed-token"}}})
-
-	if !hub.registerTokenAllowed("managed-token") {
-		t.Fatal("managed register token should allow agent registration")
-	}
-	if hub.registerTokenAllowed("change-me-agent-token") {
-		t.Fatal("unexpected token should not allow agent registration")
-	}
-}
-
 func TestFailTimedOutQueuedJobPublishesFailure(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -109,7 +89,7 @@ func TestFailTimedOutQueuedJobPublishesFailure(t *testing.T) {
 	}
 }
 
-func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
+func TestRunDueSchedulesRunsAllLabelTargetsOnOneCronTick(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Now().UTC().Add(-time.Minute)
@@ -130,12 +110,13 @@ func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
 		Tool:           model.ToolPing,
 		Target:         "1.1.1.1",
 		ResolveOnAgent: true,
+		CronExpression: "* * * * *",
 		NextRunAt:      now,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{ID: "blue", Label: "blue", IntervalSeconds: 30, NextRunAt: now},
-			{ID: "red", Label: "red", IntervalSeconds: 60, NextRunAt: now},
+			{Label: "blue"},
+			{Label: "red"},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -160,13 +141,43 @@ func TestRunDueSchedulesUsesLabelTargetsWithIndependentIntervals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.LastRunAt == nil || len(loaded.ScheduleTargets) != 2 {
-		t.Fatalf("schedule targets not updated: %#v", loaded)
+	if loaded.LastRunAt == nil || !loaded.NextRunAt.After(*loaded.LastRunAt) || len(loaded.ScheduleTargets) != 2 {
+		t.Fatalf("schedule cron state not advanced: %#v", loaded)
 	}
-	for _, target := range loaded.ScheduleTargets {
-		if target.LastRunAt == nil || !target.NextRunAt.After(*target.LastRunAt) {
-			t.Fatalf("target run state not advanced: %#v", target)
-		}
+	if loaded.NextRunAt.Location() != time.UTC || loaded.NextRunAt.Second() != 0 || loaded.NextRunAt.Nanosecond() != 0 {
+		t.Fatalf("next cron tick is not aligned to a UTC minute: %s", loaded.NextRunAt)
+	}
+}
+
+func TestRunDueSchedulesDisablesInvalidCronWithoutCreatingJobs(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	sched := model.ScheduledJob{
+		ID: "sched-invalid-cron", Revision: 1, Enabled: true, Tool: model.ToolPing, Target: "1.1.1.1",
+		CronExpression: "61 * * * *", NextRunAt: now, CreatedAt: now, UpdatedAt: now,
+		ScheduleTargets: []model.ScheduleTarget{{Label: "agent"}},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+
+	hub.runDueSchedules(ctx)
+
+	loaded, err := st.GetScheduledJob(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Enabled {
+		t.Fatalf("invalid cron schedule remained enabled: %#v", loaded)
+	}
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("invalid cron schedule created jobs: %#v", jobs)
 	}
 }
 
@@ -183,16 +194,17 @@ func TestScheduledIDLabelsMatchOnlyRealAgentID(t *testing.T) {
 		}
 	}
 	sched := model.ScheduledJob{
-		ID:        "sched-id-label",
-		Revision:  1,
-		Enabled:   true,
-		Tool:      model.ToolPing,
-		Target:    "1.1.1.1",
-		NextRunAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             "sched-id-label",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		CronExpression: "* * * * *",
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{ID: "target-real", Label: model.AgentIDLabel("edge-real"), IntervalSeconds: 30, NextRunAt: now},
+			{Label: model.AgentIDLabel("edge-real")},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -224,16 +236,17 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-allowed", []string{"blue"})
 	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-denied", []string{"blue"})
 	sched := model.ScheduledJob{
-		ID:        "sched-allowed-scope",
-		Revision:  1,
-		Enabled:   true,
-		Tool:      model.ToolPing,
-		Target:    "1.1.1.1",
-		NextRunAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             "sched-allowed-scope",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		CronExpression: "* * * * *",
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{ID: "target-blue", Label: "blue", AllowedAgentIDs: []string{"edge-allowed"}, IntervalSeconds: 30, NextRunAt: now},
+			{Label: "blue", AllowedAgentIDs: []string{"edge-allowed"}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -265,16 +278,17 @@ func TestScheduledTargetsDoNotDriftToNewMatchingAgents(t *testing.T) {
 	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-frozen", []string{"blue"})
 	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-new", []string{"blue"})
 	sched := model.ScheduledJob{
-		ID:        "sched-frozen-scope",
-		Revision:  1,
-		Enabled:   true,
-		Tool:      model.ToolPing,
-		Target:    "1.1.1.1",
-		NextRunAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             "sched-frozen-scope",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		CronExpression: "* * * * *",
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{ID: "target-blue", Label: "blue", AllowedAgentIDs: []string{"edge-frozen"}, IntervalSeconds: 30, NextRunAt: now},
+			{Label: "blue", AllowedAgentIDs: []string{"edge-frozen"}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {

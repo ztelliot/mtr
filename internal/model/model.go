@@ -430,17 +430,12 @@ type CreateJobRequest struct {
 }
 
 type ScheduleTarget struct {
-	ID              string     `json:"id,omitempty"`
-	Label           string     `json:"label"`
-	AllowedAgentIDs []string   `json:"allowed_agent_ids,omitempty"`
-	IntervalSeconds int        `json:"interval_seconds"`
-	NextRunAt       time.Time  `json:"next_run_at"`
-	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	Label           string   `json:"label"`
+	AllowedAgentIDs []string `json:"allowed_agent_ids,omitempty"`
 }
 
 type ScheduleTargetRequest struct {
-	Label           string `json:"label"`
-	IntervalSeconds int    `json:"interval_seconds"`
+	Label string `json:"label"`
 }
 
 type ScheduledJob struct {
@@ -453,7 +448,7 @@ type ScheduledJob struct {
 	Args            map[string]string `json:"args,omitempty"`
 	IPVersion       IPVersion         `json:"ip_version,omitempty"`
 	ResolveOnAgent  bool              `json:"resolve_on_agent,omitempty"`
-	IntervalSeconds int               `json:"interval_seconds"`
+	CronExpression  string            `json:"cron_expression"`
 	NextRunAt       time.Time         `json:"next_run_at"`
 	LastRunAt       *time.Time        `json:"last_run_at,omitempty"`
 	ScheduleTargets []ScheduleTarget  `json:"schedule_targets,omitempty"`
@@ -469,9 +464,6 @@ type CreateScheduledJobRequest struct {
 	Args            map[string]string       `json:"args,omitempty"`
 	IPVersion       IPVersion               `json:"ip_version,omitempty"`
 	ResolveOnAgent  bool                    `json:"resolve_on_agent,omitempty"`
+	CronExpression  string                  `json:"cron_expression"`
 	ScheduleTargets []ScheduleTargetRequest `json:"schedule_targets,omitempty"`
-}
-
-func (s ScheduledJob) EffectiveScheduleTargets() []ScheduleTarget {
-	return append([]ScheduleTarget(nil), s.ScheduleTargets...)
 }

@@ -117,10 +117,12 @@ export interface RegisterToken {
   id?: string;
   name?: string;
   token: string;
+  remaining_uses: number;
+  allowed_agent_ids?: string[];
   rotate?: boolean;
 }
 
-export type ManagedRegisterTokenRequest = Pick<RegisterToken, "name">;
+export type ManagedRegisterTokenRequest = Partial<Pick<RegisterToken, "name" | "remaining_uses" | "allowed_agent_ids">>;
 
 export interface ManagedRegisterTokenListResponse {
   revision?: number;
@@ -256,7 +258,7 @@ export interface ScheduledJob {
   args?: Record<string, string>;
   ip_version?: IPVersion;
   resolve_on_agent?: boolean;
-  interval_seconds: number;
+  cron_expression: string;
   next_run_at: string;
   last_run_at?: string;
   schedule_targets?: ScheduleTarget[];
@@ -265,12 +267,8 @@ export interface ScheduledJob {
 }
 
 export interface ScheduleTarget {
-  id?: string;
   label: string;
   allowed_agent_ids?: string[];
-  interval_seconds: number;
-  next_run_at: string;
-  last_run_at?: string;
 }
 
 export interface CreateScheduledJobRequest {
@@ -281,12 +279,12 @@ export interface CreateScheduledJobRequest {
   args?: Record<string, string>;
   ip_version?: IPVersion;
   resolve_on_agent?: boolean;
+  cron_expression: string;
   schedule_targets?: ScheduleTargetRequest[];
 }
 
 export interface ScheduleTargetRequest {
   label: string;
-  interval_seconds: number;
 }
 
 export interface Agent {

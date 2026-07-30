@@ -12,6 +12,13 @@ const permissions: Permissions = {
 };
 
 describe("schedule page permission helpers", () => {
+  it("requires a five-field crontab expression", () => {
+    expect(__schedulePageTest.cronExpressionIsValid("*/5 * * * *")).toBe(true);
+    expect(__schedulePageTest.cronExpressionIsValid("0 8 * * 1-5")).toBe(true);
+    expect(__schedulePageTest.cronExpressionIsValid("@daily")).toBe(false);
+    expect(__schedulePageTest.cronExpressionIsValid("*/30 * * * * *")).toBe(false);
+  });
+
   it("allows a schedule label when any matching agent can run the form", () => {
     const agents = [
       testAgent("edge-head", ["agent", "id:edge-head", "blue"], {

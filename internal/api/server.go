@@ -35,18 +35,20 @@ const (
 )
 
 type Server struct {
-	store        store.Store
-	policies     policy.Set
-	labelConfigs map[string]config.LabelConfig
-	limiter      *abuse.Limiter
-	hub          *scheduler.Hub
-	rootCtx      context.Context
-	tokens       map[string]TokenScope
-	requireAuth  bool
-	runtimeMu    sync.RWMutex
-	geoIPURL     string
-	log          *slog.Logger
-	clientIP     clientIPResolver
+	store         store.Store
+	policies      policy.Set
+	labelConfigs  map[string]config.LabelConfig
+	limiter       *abuse.Limiter
+	hub           *scheduler.Hub
+	rootCtx       context.Context
+	tokens        map[string]TokenScope
+	requireAuth   bool
+	runtimeMu     sync.RWMutex
+	geoIPURL      string
+	log           *slog.Logger
+	clientIP      clientIPResolver
+	metrics       http.Handler
+	accessMetrics *httpAccessMetrics
 }
 
 type dispatchTarget struct {
@@ -105,12 +107,15 @@ func NewWithOptions(st store.Store, policies policy.Set, limiter *abuse.Limiter,
 			s.labelConfigs = config.NormalizeLabelConfigs(settings.LabelConfigs)
 		}
 	}
+	s.accessMetrics = newHTTPAccessMetrics()
+	s.metrics = newWatchMetricsHandler(s.rootCtx, st, s.accessMetrics)
 	for _, config := range tokenConfigs {
 		if config.Token != "" {
 			s.tokens[config.Token] = normalizeTokenScope(config.Scope)
 		}
 	}
 	r := chi.NewRouter()
+	r.Use(s.accessLog)
 	r.Get("/healthz", s.getHealth)
 	r.Get("/v1/version", s.getVersion)
 	if s.geoIPURL != "" {
@@ -118,6 +123,7 @@ func NewWithOptions(st store.Store, policies policy.Set, limiter *abuse.Limiter,
 	}
 	r.Group(func(r chi.Router) {
 		r.Use(s.auth)
+		r.Get("/metrics", s.getMetrics)
 		r.Get("/v1/permissions", s.getPermissions)
 		r.Post("/v1/jobs", s.createJob)
 		r.Get("/v1/jobs/{id}", s.getJob)
@@ -163,7 +169,7 @@ func (s *Server) getHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := s.clientIP.Resolve(r)
-		s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "client_ip", clientIP, "remote_addr", r.RemoteAddr)
+		setHTTPAccessAuthentication(r.Context(), accessAuthNotEvaluated, "")
 		if !s.limiterSnapshot().AllowRequest(clientIP) {
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
@@ -172,23 +178,33 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		if len(tokens) > 0 {
 			token, ok := bearerToken(r.Header.Get("Authorization"))
 			if r.Header.Get("Authorization") != "" && !ok {
+				setHTTPAccessAuthentication(r.Context(), accessAuthMalformed, "")
 				writeError(w, http.StatusUnauthorized, "authorization header must use Bearer scheme")
 				return
 			}
 			if token == "" {
 				token = r.URL.Query().Get("access_token")
 			}
+			if token == "" {
+				setHTTPAccessAuthentication(r.Context(), accessAuthMissing, "")
+			}
 			scope, ok := tokens[token]
 			if !ok {
+				if token != "" {
+					setHTTPAccessAuthentication(r.Context(), accessAuthInvalid, "token:"+managedSecretHash(token))
+				}
 				writeError(w, http.StatusUnauthorized, "invalid api token")
 				return
 			}
 			r = r.WithContext(withPrincipal(r.Context(), principal{token: token, scope: scope}))
+			setHTTPAccessAuthentication(r.Context(), accessAuthAuthenticated, "token:"+managedSecretHash(token))
 		} else if requireAuth {
+			setHTTPAccessAuthentication(r.Context(), accessAuthMissing, "")
 			writeError(w, http.StatusUnauthorized, "api token is required")
 			return
 		} else {
 			r = r.WithContext(withPrincipal(r.Context(), principal{scope: allTokenScope}))
+			setHTTPAccessAuthentication(r.Context(), accessAuthAnonymous, "anonymous")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -1128,6 +1144,13 @@ func (s *Server) deleteManagedAgent(w http.ResponseWriter, r *http.Request) {
 		if s.hub != nil {
 			s.hub.ReloadHTTPAgents(s.rootCtx)
 		}
+		// HTTP agents also have a runtime record in the shared agents store.
+		// Remove it with the managed configuration so it cannot be mistaken for
+		// a disconnected gRPC agent after the HTTP configuration is gone.
+		if err := s.store.DeleteAgent(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		s.auditManage(r.Context(), action, id, "allow", "")
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1336,7 +1359,9 @@ type managedAPITokenPatchPayload struct {
 }
 
 type managedRegisterTokenPayload struct {
-	Name string `json:"name,omitempty"`
+	Name            *string   `json:"name,omitempty"`
+	RemainingUses   *int      `json:"remaining_uses,omitempty"`
+	AllowedAgentIDs *[]string `json:"allowed_agent_ids,omitempty"`
 }
 
 type managedAPITokensResponse struct {
@@ -1641,7 +1666,19 @@ func (s *Server) createManagedRegisterToken(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings.RegisterTokens = append(settings.RegisterTokens, config.RegisterToken{Name: payload.Name})
+	remainingUses := 1
+	if payload.RemainingUses != nil {
+		remainingUses = *payload.RemainingUses
+	}
+	name := ""
+	if payload.Name != nil {
+		name = *payload.Name
+	}
+	var allowedAgentIDs []string
+	if payload.AllowedAgentIDs != nil {
+		allowedAgentIDs = append([]string(nil), (*payload.AllowedAgentIDs)...)
+	}
+	settings.RegisterTokens = append(settings.RegisterTokens, config.RegisterToken{Name: name, RemainingUses: remainingUses, AllowedAgentIDs: allowedAgentIDs})
 	saved, status, err := s.saveManagedSettings(r.Context(), settings)
 	if err != nil {
 		writeError(w, status, err.Error())
@@ -1672,7 +1709,15 @@ func (s *Server) updateManagedRegisterToken(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, store.ErrNotFound.Error())
 		return
 	}
-	settings.RegisterTokens[index].Name = payload.Name
+	if payload.Name != nil {
+		settings.RegisterTokens[index].Name = *payload.Name
+	}
+	if payload.RemainingUses != nil {
+		settings.RegisterTokens[index].RemainingUses = *payload.RemainingUses
+	}
+	if payload.AllowedAgentIDs != nil {
+		settings.RegisterTokens[index].AllowedAgentIDs = append([]string(nil), (*payload.AllowedAgentIDs)...)
+	}
 	settings.RegisterTokens[index].Rotate = false
 	saved, status, err := s.saveManagedSettings(r.Context(), settings)
 	if err != nil {
@@ -2086,6 +2131,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	if status >= http.StatusInternalServerError {
+		msg = strings.ToLower(http.StatusText(status))
+		if msg == "" {
+			msg = "internal server error"
+		}
+	}
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 

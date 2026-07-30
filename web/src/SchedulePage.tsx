@@ -6,7 +6,6 @@ import {
   Input,
   Loader,
   MultiSelect,
-  NumberInput,
   Paper,
   ScrollArea,
   Select,
@@ -18,13 +17,13 @@ import {
   Tooltip
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { AlertTriangle, Pencil, Play, Trash2, X } from "lucide-react";
+import { AlertTriangle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { agentLocationProviderLabel, agentRegionLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
 import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
-import { formatBytes, formatDateTime, formatHistoryDateTime, formatInterval, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
+import { formatBytes, formatDateTime, formatHistoryDateTime, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
 import { fetchGeoIPQueued, ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
 import { buildCreateJobRequest, defaultFormState, navTools, normalizeFormTarget, normalizeTargetForTool, parseHostPort } from "./jobForm";
 import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed, toolAllowedForAgent } from "./permissions";
@@ -54,6 +53,7 @@ type ScheduleStatColumn = "last" | "min" | "max" | "mean" | "stdev";
 export const __schedulePageTest = {
   agentsForScheduleLabel,
   agentsForScheduleLabels,
+  cronExpressionIsValid,
   scheduleIPVersionOptions,
   schedulePermissionFormError
 };
@@ -71,9 +71,8 @@ export function SchedulePage({
 }) {
   const [form, setForm] = useState<JobFormState>(defaultFormState);
   const [name, setName] = useState("");
-  const [intervalSeconds, setIntervalSeconds] = useState<number | string>(300);
+  const [cronExpression, setCronExpression] = useState("*/5 * * * *");
   const [scheduleLabels, setScheduleLabels] = useState<string[]>(["agent"]);
-  const [scheduleTargetIntervals, setScheduleTargetIntervals] = useState<Record<string, number | string>>({});
   const [enabled, setEnabled] = useState(true);
   const [editingScheduleId, setEditingScheduleId] = useState("");
   const [timeRange, setTimeRange] = useState<ScheduleTimeRange>("24h");
@@ -141,15 +140,15 @@ export function SchedulePage({
     [scheduleDNSRows, scheduleMtrRows, scheduleTargetIP, selectedJob, selectedSchedule?.tool]
   );
   const scheduleTargetDrafts = useMemo(
-    () => buildScheduleTargetDrafts(scheduleLabels, intervalSeconds, scheduleTargetIntervals),
-    [intervalSeconds, scheduleLabels, scheduleTargetIntervals]
+    () => buildScheduleTargetDrafts(scheduleLabels),
+    [scheduleLabels]
   );
-  const intervalError = scheduleTargetDrafts.every((target) => intervalIsValid(target.interval_seconds)) ? null : t("errors.intervalRequired");
+  const cronError = cronExpressionIsValid(cronExpression) ? null : t("errors.cronRequired");
   const scheduleTargetError = scheduleTargetFormError(scheduleLabels, scheduleLabelOptions, t);
   const schedulePermissionForm = { ...form, agentId: "" };
   const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...schedulePermissionForm, agentId: schedulePermissionForm.agentId || "schedule-target" } : schedulePermissionForm;
   const formError = localizedFormError(validationForm, permissions, t) || schedulePermissionFormError(form, permissions, routeAgents, scheduleLabels, t);
-  const showFormError = attemptedSubmit && (formError || scheduleTargetError || intervalError);
+  const showFormError = attemptedSubmit && (formError || scheduleTargetError || cronError);
 
   useEffect(() => {
     if (!allowedTools.length || allowedTools.includes(form.tool)) {
@@ -369,17 +368,14 @@ export function SchedulePage({
   }
 
   function schedulePayload(): CreateScheduledJobRequest {
-    const scheduleTargets = scheduleTargetDrafts.map((target) => ({
-      ...target,
-      interval_seconds: Number(target.interval_seconds)
-    }));
     const requestForm = formWithPermissionDefaults({ ...form, agentId: "" }, permissions);
     const jobRequest = buildCreateJobRequest(requestForm);
     return {
       ...jobRequest,
       name: name.trim() || undefined,
       enabled,
-      schedule_targets: scheduleTargets
+      cron_expression: cronExpression.trim().replace(/\s+/g, " "),
+      schedule_targets: scheduleTargetDrafts
     };
   }
 
@@ -387,9 +383,8 @@ export function SchedulePage({
     const nextTool = allowedTools[0] ?? defaultFormState.tool;
     setEditingScheduleId("");
     setName("");
-    setIntervalSeconds(300);
+    setCronExpression("*/5 * * * *");
     setScheduleLabels(["agent"]);
-    setScheduleTargetIntervals({});
     setEnabled(true);
     setAttemptedSubmit(false);
     setForm({ ...defaultFormState, tool: nextTool, target: "" });
@@ -400,7 +395,7 @@ export function SchedulePage({
     setAttemptedSubmit(false);
     setError(null);
     setName(schedule.name ?? "");
-    setIntervalSeconds(schedule.interval_seconds);
+    setCronExpression(schedule.cron_expression);
     fillScheduleTargets(schedule);
     setEnabled(schedule.enabled);
     setForm(scheduleFormState(schedule));
@@ -409,7 +404,6 @@ export function SchedulePage({
   function fillScheduleTargets(schedule: ScheduledJob) {
     const targets = effectiveScheduleTargets(schedule);
     setScheduleLabels(targets.map((target) => target.label));
-    setScheduleTargetIntervals(Object.fromEntries(targets.map((target) => [scheduleTargetKey(target.label), target.interval_seconds])));
   }
 
   function startEditSchedule(schedule: ScheduledJob) {
@@ -464,7 +458,7 @@ export function SchedulePage({
   async function saveSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAttemptedSubmit(true);
-    if (!client || !canWriteSchedules(permissions) || formError || scheduleTargetError || intervalError || submitting) {
+    if (!client || !canWriteSchedules(permissions) || formError || scheduleTargetError || cronError || submitting) {
       return;
     }
     setSubmitting(true);
@@ -534,14 +528,13 @@ export function SchedulePage({
                 onBlur={cleanTargetInput}
                 placeholder={targetPlaceholder(form.tool, t)}
               />
-              <NumberInput
-                className="schedule-interval-field"
+              <TextInput
+                className="schedule-cron-field"
                 disabled={submitting}
-                label={t("schedule.defaultInterval")}
-                min={10}
-                max={86400}
-                value={intervalSeconds}
-                onChange={setIntervalSeconds}
+                label={t("schedule.cron")}
+                placeholder="*/5 * * * *"
+                value={cronExpression}
+                onChange={(event) => setCronExpression(event.currentTarget.value)}
               />
               {form.tool !== "dns" && scheduleIPOptions.length > 1 && (
                 <Select
@@ -604,24 +597,6 @@ export function SchedulePage({
                 </div>
               </div>
             </div>
-            {scheduleLabels.length > 1 && (
-              <div className="schedule-label-interval-panel">
-                <Text className="schedule-label-interval-title">{t("schedule.labelIntervals")}</Text>
-                <div className="schedule-group-intervals">
-                  {scheduleLabels.map((label) => (
-                    <NumberInput
-                      key={label}
-                      disabled={submitting}
-                      label={scheduleLabelDisplay(label, routeAgents, t)}
-                      min={10}
-                      max={86400}
-                      value={scheduleTargetIntervals[scheduleTargetKey(label)] ?? intervalSeconds}
-                      onChange={(value) => setScheduleTargetIntervals((current) => ({ ...current, [scheduleTargetKey(label)]: value }))}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
           </form>
         </Paper>
       )}
@@ -633,15 +608,23 @@ export function SchedulePage({
       )}
       {showFormError && (
         <Alert color="yellow" radius="md">
-          {formError || scheduleTargetError || intervalError}
+          {formError || scheduleTargetError || cronError}
         </Alert>
       )}
 
       <Paper className="schedule-panel schedule-list-panel" withBorder>
         <Group justify="space-between" mb="sm">
           <Text className="schedule-section-title">{t("schedule.list")}</Text>
-          <Button size="xs" variant="default" onClick={() => void loadSchedules()} disabled={!client || loadingSchedules}>
-            {loadingSchedules ? t("status.streamLive") : t("schedule.refresh")}
+          <Button
+            aria-busy={loadingSchedules}
+            className="refresh-button"
+            disabled={!client || loadingSchedules}
+            leftSection={<RotateCcw className={loadingSchedules ? "button-progress-icon is-spinning" : "button-progress-icon"} size={16} />}
+            onClick={() => void loadSchedules()}
+            size="xs"
+            variant="default"
+          >
+            {t("schedule.refresh")}
           </Button>
         </Group>
         <ScheduleList
@@ -991,29 +974,12 @@ function scheduleLabelDisplay(label: string, agents: Agent[], t: (key: string, o
   return agent ? agentSelectLabel(agent, t) : agentID;
 }
 
-function buildScheduleTargetDrafts(
-  labels: string[],
-  intervalSeconds: number | string,
-  intervals: Record<string, number | string>
-): ScheduleTargetRequest[] {
-  if (labels.length <= 1) {
-    return labels.map((label) => ({
-      label,
-      interval_seconds: Number(intervalSeconds)
-    }));
-  }
-  return labels.map((label) => ({
-    label,
-    interval_seconds: Number(intervals[scheduleTargetKey(label)] ?? intervalSeconds)
-  }));
+function buildScheduleTargetDrafts(labels: string[]): ScheduleTargetRequest[] {
+  return labels.map((label) => ({ label }));
 }
 
-function scheduleTargetKey(label: string): string {
-  return label;
-}
-
-function intervalIsValid(value: number): boolean {
-  return Number.isFinite(value) && value >= 10 && value <= 86400;
+function cronExpressionIsValid(value: string): boolean {
+  return value.trim().split(/\s+/).length === 5;
 }
 
 function scheduleTargetFormError(
@@ -1064,12 +1030,6 @@ function ScheduleNodesCell({
       </Tooltip>
     </Table.Td>
   );
-}
-
-function scheduleIntervalLabel(schedule: ScheduledJob): string {
-  const targets = effectiveScheduleTargets(schedule);
-  const intervals = [...new Set(targets.map((target) => target.interval_seconds))];
-  return intervals.length === 1 ? formatInterval(intervals[0]) : intervals.map(formatInterval).join(" / ");
 }
 
 function SchedulePingDashboard({
@@ -1772,7 +1732,7 @@ function ScheduleList({
             <Table.Th>{t("schedule.tool")}</Table.Th>
             <Table.Th className="schedule-target-column">{t("form.target")}</Table.Th>
             <Table.Th>{t("schedule.nodes")}</Table.Th>
-            <Table.Th>{t("schedule.intervalShort")}</Table.Th>
+            <Table.Th>{t("schedule.cron")}</Table.Th>
             <Table.Th>{t("results.status")}</Table.Th>
           </Table.Tr>
         </Table.Thead>
@@ -1787,7 +1747,7 @@ function ScheduleList({
               <Table.Td>{t(`nav.${schedule.tool}`)}</Table.Td>
               <Table.Td className="mono-label schedule-target-column">{scheduleTargetLabel(schedule)}</Table.Td>
               <ScheduleNodesCell schedule={schedule} agents={agents} t={t} />
-              <Table.Td>{scheduleIntervalLabel(schedule)}</Table.Td>
+              <Table.Td className="mono-label">{schedule.cron_expression}</Table.Td>
               <Table.Td><StatusBadge status={schedule.enabled ? "enabled" : "disabled"} t={t} /></Table.Td>
             </Table.Tr>
           ))}

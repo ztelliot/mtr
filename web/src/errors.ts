@@ -16,7 +16,6 @@ const apiErrorKeys: Record<string, string> = {
   "target resolved to no addresses": "apiErrors.targetResolvedToNoAddresses",
   "schedule write access is not allowed": "apiErrors.scheduleWriteAccessDenied",
   "schedule read access is not allowed": "apiErrors.scheduleReadAccessDenied",
-  "interval_seconds must be between 10 and 86400": "apiErrors.scheduleIntervalRange",
   "streaming unsupported": "apiErrors.streamingUnsupported",
   "agent not found": "apiErrors.agentNotFound",
   "agent is offline": "apiErrors.agentOffline",
@@ -30,6 +29,7 @@ const apiErrorKeys: Record<string, string> = {
 };
 
 const apiErrorPatterns: ErrorPattern[] = [
+  { pattern: /^cron_expression must be a valid 5-field crontab expression:/, key: "apiErrors.scheduleCronInvalid" },
   { pattern: /^tool "([^"]+)" is not enabled$/, key: "apiErrors.toolNotEnabled", params: ([, tool]) => ({ tool }) },
   { pattern: /^(.+) requires agent_id$/, key: "apiErrors.agentRequired", params: ([, tool]) => ({ tool }) },
   { pattern: /^(.+) requires port$/, key: "apiErrors.portRequired", params: ([, tool]) => ({ tool }) },

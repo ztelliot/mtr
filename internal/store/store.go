@@ -27,6 +27,7 @@ type Store interface {
 	DeleteScheduledJob(context.Context, string) error
 	UpdateScheduledJobRun(context.Context, model.ScheduledJob) error
 	ListScheduledJobHistory(context.Context, string, ScheduledJobHistoryFilter) ([]model.Job, error)
+	RegisterAgent(context.Context, model.Agent, string) (model.Agent, bool, error)
 	UpsertAgent(context.Context, model.Agent) error
 	TouchAgent(context.Context, string) error
 	MarkAgentOffline(context.Context, string) error

@@ -144,10 +144,12 @@ type APIToolScope struct {
 }
 
 type RegisterToken struct {
-	ID     string `yaml:"id" json:"id,omitempty"`
-	Name   string `yaml:"name" json:"name,omitempty"`
-	Token  string `yaml:"token" json:"token"`
-	Rotate bool   `yaml:"rotate" json:"rotate,omitempty"`
+	ID              string   `yaml:"id" json:"id,omitempty"`
+	Name            string   `yaml:"name" json:"name,omitempty"`
+	Token           string   `yaml:"token" json:"token"`
+	RemainingUses   int      `yaml:"remaining_uses" json:"remaining_uses"`
+	AllowedAgentIDs []string `yaml:"allowed_agent_ids" json:"allowed_agent_ids,omitempty"`
+	Rotate          bool     `yaml:"rotate" json:"rotate,omitempty"`
 }
 
 type ManagedSettings struct {
@@ -372,7 +374,10 @@ func cloneRegisterTokens(tokens []RegisterToken) []RegisterToken {
 		return nil
 	}
 	out := make([]RegisterToken, len(tokens))
-	copy(out, tokens)
+	for i, token := range tokens {
+		token.AllowedAgentIDs = cloneStringSlice(token.AllowedAgentIDs)
+		out[i] = token
+	}
 	return out
 }
 
@@ -483,6 +488,10 @@ func NormalizeRegisterTokens(tokens []RegisterToken) ([]RegisterToken, error) {
 		}
 		seenIDs[item.ID] = struct{}{}
 		item.Name = strings.TrimSpace(item.Name)
+		item.AllowedAgentIDs = normalizeRegisterTokenAgentIDs(item.AllowedAgentIDs)
+		if item.RemainingUses < 0 {
+			return nil, fmt.Errorf("register_tokens[%d].remaining_uses must be non-negative", i)
+		}
 		item.Token = strings.TrimSpace(item.Token)
 		if item.Token == "" {
 			item.Token = uuid.NewString()
@@ -494,6 +503,26 @@ func NormalizeRegisterTokens(tokens []RegisterToken) ([]RegisterToken, error) {
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func normalizeRegisterTokenAgentIDs(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func DefaultRuntime() Runtime {

@@ -24,6 +24,17 @@ describe("manage token helpers", () => {
     expect(__managePageTest.displayTokenToolScope("dns", selected.dns).allowed_args).toEqual({ type: "A,AAAA,CNAME,MX,TXT,NS" });
   });
 
+  it("normalizes and de-duplicates register token Agent IDs", () => {
+    expect(__managePageTest.normalizeRegisterAgentIDs([" edge-1 ", "", "edge-1", "edge-2"])).toEqual(["edge-1", "edge-2"]);
+  });
+
+  it("tracks all register token fields behind one row-level save", () => {
+    const token = { token: "secret", name: "edge", remaining_uses: 1, allowed_agent_ids: ["edge-1"] };
+    expect(__managePageTest.registerTokenDraftChanged(token, { name: "edge", remainingUses: 1, allowedAgentIDs: ["edge-1"] })).toBe(false);
+    expect(__managePageTest.registerTokenDraftChanged(token, { name: "edge", remainingUses: 2, allowedAgentIDs: ["edge-1"] })).toBe(true);
+    expect(__managePageTest.registerTokenDraftChanged(token, { name: "edge", remainingUses: 1, allowedAgentIDs: ["edge-1", "edge-2"] })).toBe(true);
+  });
+
   it("treats an empty token IP version selection as backend default access", () => {
     expect(__managePageTest.normalizeIPVersions([])).toBeUndefined();
     expect(__managePageTest.normalizeIPVersions(["0", "4", "6"])).toBeUndefined();
