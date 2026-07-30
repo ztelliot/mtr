@@ -430,8 +430,56 @@ type CreateJobRequest struct {
 }
 
 type ScheduleTarget struct {
-	Label           string   `json:"label"`
+	Label      string             `json:"label"`
+	AgentScope ScheduleAgentScope `json:"agent_scope"`
+}
+
+type ScheduleAgentScope struct {
+	All             bool     `json:"all,omitempty"`
 	AllowedAgentIDs []string `json:"allowed_agent_ids,omitempty"`
+	DeniedAgentIDs  []string `json:"denied_agent_ids,omitempty"`
+	AllowedLabels   []string `json:"allowed_labels,omitempty"`
+	DeniedLabels    []string `json:"denied_labels,omitempty"`
+}
+
+func (scope ScheduleAgentScope) Allows(agent Agent) bool {
+	agentID := strings.TrimSpace(agent.ID)
+	if agentID == "" || scheduleScopeContains(scope.DeniedAgentIDs, agentID) {
+		return false
+	}
+	if !scope.All {
+		if len(scope.AllowedAgentIDs) > 0 {
+			if !scheduleScopeContains(scope.AllowedAgentIDs, agentID) {
+				return false
+			}
+		} else if len(scope.AllowedLabels) == 0 {
+			return false
+		}
+	}
+	if scheduleScopeAgentHasAnyLabel(agent, scope.DeniedLabels) {
+		return false
+	}
+	return len(scope.AllowedLabels) == 0 || scheduleScopeAgentHasAnyLabel(agent, scope.AllowedLabels)
+}
+
+func scheduleScopeContains(values []string, want string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func scheduleScopeAgentHasAnyLabel(agent Agent, labels []string) bool {
+	for _, want := range labels {
+		for _, label := range agent.Labels {
+			if strings.TrimSpace(label) == strings.TrimSpace(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type ScheduleTargetRequest struct {

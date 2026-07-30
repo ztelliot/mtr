@@ -660,8 +660,12 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 		Target:         "example.com",
 		CronExpression: "* * * * *",
 		NextRunAt:      now,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ScheduleTargets: []model.ScheduleTarget{{
+			Label:      "agent",
+			AgentScope: model.ScheduleAgentScope{AllowedAgentIDs: []string{"edge-1"}},
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
@@ -733,6 +737,9 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("read-only schedule GET %s status = %d, body = %s", path, rec.Code, rec.Body.String())
 		}
+		if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+			t.Fatalf("schedule GET %s exposed internal agent scope: %s", path, rec.Body.String())
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/schedules/"+sched.ID+"/history", nil)
@@ -783,6 +790,9 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+		t.Fatalf("create schedule exposed internal agent scope: %s", rec.Body.String())
+	}
 	var sched model.ScheduledJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
 		t.Fatal(err)
@@ -790,8 +800,12 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	if len(sched.ScheduleTargets) != 1 || sched.ScheduleTargets[0].Label != "blue" {
 		t.Fatalf("schedule targets = %#v", sched.ScheduleTargets)
 	}
-	if !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-1"}) {
-		t.Fatalf("allowed agents = %#v", sched.ScheduleTargets[0].AllowedAgentIDs)
+	storedSchedule, err := st.GetScheduledJob(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(storedSchedule.ScheduleTargets[0].AgentScope, model.ScheduleAgentScope{AllowedAgentIDs: []string{"edge-1"}}) {
+		t.Fatalf("stored agent scope = %#v", storedSchedule.ScheduleTargets[0].AgentScope)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"cron_expression":"* * * * *","schedule_targets":[{"label":"id:edge-1"}]}`))
@@ -803,7 +817,7 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	}
 }
 
-func TestCreateScheduleFreezesTagAndDenyScopesToCurrentAgents(t *testing.T) {
+func TestCreateSchedulePersistsDynamicTagAndDenyScope(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Now().UTC()
@@ -839,6 +853,9 @@ func TestCreateScheduleFreezesTagAndDenyScopesToCurrentAgents(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+		t.Fatalf("create schedule exposed internal agent scope: %s", rec.Body.String())
+	}
 	var sched model.ScheduledJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
 		t.Fatal(err)
@@ -846,8 +863,13 @@ func TestCreateScheduleFreezesTagAndDenyScopesToCurrentAgents(t *testing.T) {
 	if len(sched.ScheduleTargets) != 1 {
 		t.Fatalf("schedule targets = %#v", sched.ScheduleTargets)
 	}
-	if !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-1"}) {
-		t.Fatalf("allowed agents should be frozen to matching current scope: %#v", sched.ScheduleTargets[0].AllowedAgentIDs)
+	storedSchedule, err := st.GetScheduledJob(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantScope := model.ScheduleAgentScope{AllowedLabels: []string{"blue"}, DeniedLabels: []string{"blocked"}}
+	if !reflect.DeepEqual(storedSchedule.ScheduleTargets[0].AgentScope, wantScope) {
+		t.Fatalf("dynamic tag scope = %#v, want %#v", storedSchedule.ScheduleTargets[0].AgentScope, wantScope)
 	}
 }
 
@@ -1044,6 +1066,9 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+		t.Fatalf("create schedule exposed internal agent scope: %s", rec.Body.String())
+	}
 	var sched model.ScheduledJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
 		t.Fatal(err)
@@ -1055,6 +1080,9 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+		t.Fatalf("update schedule exposed internal agent scope: %s", rec.Body.String())
 	}
 	var updated model.ScheduledJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
@@ -2128,12 +2156,19 @@ func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("schedule target with mixed policy agents status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("agent_scope")) {
+		t.Fatalf("create schedule exposed internal agent scope: %s", rec.Body.String())
+	}
 	var sched model.ScheduledJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &sched); err != nil {
 		t.Fatal(err)
 	}
-	if len(sched.ScheduleTargets) != 1 || !reflect.DeepEqual(sched.ScheduleTargets[0].AllowedAgentIDs, []string{"edge-get"}) {
-		t.Fatalf("schedule should freeze only per-agent-policy-valid agents: %#v", sched.ScheduleTargets)
+	storedSchedule, err := st.GetScheduledJob(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedSchedule.ScheduleTargets) != 1 || !storedSchedule.ScheduleTargets[0].AgentScope.All {
+		t.Fatalf("schedule should preserve unrestricted dynamic scope: %#v", storedSchedule.ScheduleTargets)
 	}
 }
 

@@ -54,7 +54,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, sched)
+	writeJSON(w, http.StatusCreated, publicScheduledJob(sched))
 }
 
 func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +119,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, sched)
+	writeJSON(w, http.StatusOK, publicScheduledJob(sched))
 }
 
 func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +145,27 @@ type scheduleRequestDetails struct {
 	cronExpression  string
 	nextRunAt       time.Time
 	scheduleTargets []model.ScheduleTarget
+}
+
+type scheduledJobResponse struct {
+	model.ScheduledJob
+	ScheduleTargets []model.ScheduleTargetRequest `json:"schedule_targets,omitempty"`
+}
+
+func publicScheduledJob(sched model.ScheduledJob) scheduledJobResponse {
+	targets := make([]model.ScheduleTargetRequest, 0, len(sched.ScheduleTargets))
+	for _, target := range sched.ScheduleTargets {
+		targets = append(targets, model.ScheduleTargetRequest{Label: target.Label})
+	}
+	return scheduledJobResponse{ScheduledJob: sched, ScheduleTargets: targets}
+}
+
+func publicScheduledJobs(schedules []model.ScheduledJob) []scheduledJobResponse {
+	out := make([]scheduledJobResponse, 0, len(schedules))
+	for _, sched := range schedules {
+		out = append(out, publicScheduledJob(sched))
+	}
+	return out
 }
 
 func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request, req model.CreateScheduledJobRequest, defaultEnabled bool) (scheduleRequestDetails, bool) {
@@ -221,6 +242,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJobRequest, version model.IPVersion, targets []model.ScheduleTarget) ([]model.ScheduleTarget, error) {
 	scope := principalFromContext(ctx).scope
+	agentScope := scheduleAgentScope(scope)
 	agents, err := s.agentsWithManagedLabels(ctx)
 	if err != nil {
 		return nil, err
@@ -228,12 +250,12 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJ
 	out := make([]model.ScheduleTarget, 0, len(targets))
 	for _, target := range targets {
 		matched := false
-		target.AllowedAgentIDs = nil
+		target.AgentScope = agentScope
 		for _, agent := range agents {
 			if !scheduleTargetMatchesAgent(target.Label, agent) {
 				continue
 			}
-			if !scopeAllowsAgentRecord(scope, agent) {
+			if !target.AgentScope.Allows(agent) {
 				continue
 			}
 			agentPolicies := s.policiesForLabels(agent.Labels)
@@ -246,15 +268,47 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJ
 				continue
 			}
 			matched = true
-			target.AllowedAgentIDs = append(target.AllowedAgentIDs, agent.ID)
 		}
 		if !matched {
 			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, req.Tool)
 		}
-		sort.Strings(target.AllowedAgentIDs)
 		out = append(out, target)
 	}
 	return out, nil
+}
+
+func scheduleAgentScope(scope TokenScope) model.ScheduleAgentScope {
+	out := model.ScheduleAgentScope{
+		All:            scopeAllowsAllAgents(scope),
+		DeniedAgentIDs: normalizedScheduleScopeValues(scope.DeniedAgents, false),
+		AllowedLabels:  normalizedScheduleScopeValues(scope.AgentTags, false),
+		DeniedLabels:   normalizedScheduleScopeValues(scope.DeniedTags, false),
+	}
+	if !out.All {
+		out.AllowedAgentIDs = normalizedScheduleScopeValues(scope.Agents, true)
+	}
+	return out
+}
+
+func normalizedScheduleScopeValues(values []string, excludeWildcard bool) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || (excludeWildcard && value == "*") {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
 }
 
 func scheduleTargetMatchesAgent(label string, agent model.Agent) bool {
@@ -320,7 +374,8 @@ func scheduleTargetsSameDefinition(left []model.ScheduleTarget, right []model.Sc
 }
 
 func scheduleTargetDefinitionKey(target model.ScheduleTarget) string {
-	return target.Label + "\x00" + strings.Join(target.AllowedAgentIDs, ",")
+	scope, _ := json.Marshal(target.AgentScope)
+	return target.Label + "\x00" + string(scope)
 }
 
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +388,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, schedules)
+	writeJSON(w, http.StatusOK, publicScheduledJobs(schedules))
 }
 
 func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request) {
@@ -350,7 +405,7 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, sched)
+	writeJSON(w, http.StatusOK, publicScheduledJob(sched))
 }
 
 func (s *Server) listScheduleHistory(w http.ResponseWriter, r *http.Request) {

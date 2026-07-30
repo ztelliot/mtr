@@ -268,7 +268,6 @@ export interface ScheduledJob {
 
 export interface ScheduleTarget {
   label: string;
-  allowed_agent_ids?: string[];
 }
 
 export interface CreateScheduledJobRequest {

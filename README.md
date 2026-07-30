@@ -195,10 +195,11 @@ server-side Agent or managed HTTP Agent config. Use `agent` for all nodes, a
 custom label for a group, or `id:<agent-id>` for one node.
 `cron_expression` uses the standard five fields `minute hour day month weekday`
 and is evaluated in UTC. All selected targets run together at each cron tick.
-API tokens with a fixed Agent allowlist may still use group labels; the server
-stores that allowlist on the schedule target and skips matching Agents outside
-the token scope when the schedule runs. Schedule and job read endpoints are
-intentionally shareable to any token with the corresponding read permission.
+The server stores the creator's Agent scope as selector rules on each schedule
+target. Labels and unrestricted scopes are re-evaluated against the current
+Agent set on every cron tick, so newly added matching Agents are included while
+fixed allowlists and deny rules remain enforced. Schedule and job read endpoints
+are intentionally shareable to any token with the corresponding read permission.
 
 Query scheduled task history:
 

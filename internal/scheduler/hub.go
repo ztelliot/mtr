@@ -275,7 +275,7 @@ func (h *Hub) scheduledRunAgents(ctx context.Context, sched model.ScheduledJob, 
 		if !scheduledTargetMatchesAgent(target, agent) {
 			continue
 		}
-		if !scheduledTargetAllowsAgent(target, agent.ID) {
+		if !target.AgentScope.Allows(agent) {
 			continue
 		}
 		if policy.AgentSupports(agent, sched.Tool, version) {
@@ -283,18 +283,6 @@ func (h *Hub) scheduledRunAgents(ctx context.Context, sched model.ScheduledJob, 
 		}
 	}
 	return out, nil
-}
-
-func scheduledTargetAllowsAgent(target model.ScheduleTarget, agentID string) bool {
-	if len(target.AllowedAgentIDs) == 0 {
-		return true
-	}
-	for _, allowed := range target.AllowedAgentIDs {
-		if allowed == agentID {
-			return true
-		}
-	}
-	return false
 }
 
 func scheduledTargetMatchesAgent(target model.ScheduleTarget, agent model.Agent) bool {

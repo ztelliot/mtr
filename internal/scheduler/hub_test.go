@@ -115,8 +115,8 @@ func TestRunDueSchedulesRunsAllLabelTargetsOnOneCronTick(t *testing.T) {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{Label: "blue"},
-			{Label: "red"},
+			{Label: "blue", AgentScope: model.ScheduleAgentScope{All: true}},
+			{Label: "red", AgentScope: model.ScheduleAgentScope{All: true}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -156,7 +156,7 @@ func TestRunDueSchedulesDisablesInvalidCronWithoutCreatingJobs(t *testing.T) {
 	sched := model.ScheduledJob{
 		ID: "sched-invalid-cron", Revision: 1, Enabled: true, Tool: model.ToolPing, Target: "1.1.1.1",
 		CronExpression: "61 * * * *", NextRunAt: now, CreatedAt: now, UpdatedAt: now,
-		ScheduleTargets: []model.ScheduleTarget{{Label: "agent"}},
+		ScheduleTargets: []model.ScheduleTarget{{Label: "agent", AgentScope: model.ScheduleAgentScope{All: true}}},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestScheduledIDLabelsMatchOnlyRealAgentID(t *testing.T) {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{Label: model.AgentIDLabel("edge-real")},
+			{Label: model.AgentIDLabel("edge-real"), AgentScope: model.ScheduleAgentScope{All: true}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -246,7 +246,7 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{Label: "blue", AllowedAgentIDs: []string{"edge-allowed"}},
+			{Label: "blue", AgentScope: model.ScheduleAgentScope{AllowedAgentIDs: []string{"edge-allowed"}}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
@@ -265,20 +265,14 @@ func TestScheduledTargetsSkipAgentsOutsideAllowedScope(t *testing.T) {
 	}
 }
 
-func TestScheduledTargetsDoNotDriftToNewMatchingAgents(t *testing.T) {
+func TestScheduledTargetsIncludeAgentsAddedAfterScheduleCreation(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Now().UTC().Add(-time.Minute)
-	for _, agent := range []model.Agent{
-		{ID: "edge-frozen", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-		{ID: "edge-new", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
-	} {
-		upsertHubTestAgent(t, ctx, st, agent)
-	}
-	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-frozen", []string{"blue"})
-	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-new", []string{"blue"})
+	upsertHubTestAgent(t, ctx, st, model.Agent{ID: "edge-existing", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-existing", []string{"blue"})
 	sched := model.ScheduledJob{
-		ID:             "sched-frozen-scope",
+		ID:             "sched-dynamic-scope",
 		Revision:       1,
 		Enabled:        true,
 		Tool:           model.ToolPing,
@@ -288,12 +282,14 @@ func TestScheduledTargetsDoNotDriftToNewMatchingAgents(t *testing.T) {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduleTargets: []model.ScheduleTarget{
-			{Label: "blue", AllowedAgentIDs: []string{"edge-frozen"}},
+			{Label: "blue", AgentScope: model.ScheduleAgentScope{All: true}},
 		},
 	}
 	if err := st.CreateScheduledJob(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
+	upsertHubTestAgent(t, ctx, st, model.Agent{ID: "edge-new", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-new", []string{"blue"})
 	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
 
 	hub.runDueSchedules(ctx)
@@ -302,8 +298,69 @@ func TestScheduledTargetsDoNotDriftToNewMatchingAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 1 || jobs[0].AgentID != "edge-frozen" {
-		t.Fatalf("scheduled scope drifted to new agent: %#v", jobs)
+	gotAgents := map[string]bool{}
+	for _, job := range jobs {
+		gotAgents[job.AgentID] = true
+	}
+	if len(jobs) != 2 || !gotAgents["edge-existing"] || !gotAgents["edge-new"] {
+		t.Fatalf("scheduled dynamic scope jobs = %#v", jobs)
+	}
+}
+
+func TestScheduledTargetsExcludeAgentsThatNoLongerMatchAtRunTime(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now().UTC().Add(-time.Minute)
+	agents := []model.Agent{
+		{ID: "edge-keep", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-relabeled", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-incompatible", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+		{ID: "edge-disabled", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
+	}
+	for _, agent := range agents {
+		upsertHubTestAgent(t, ctx, st, agent)
+		upsertHubTestAgentConfigLabels(t, ctx, st, agent.ID, []string{"blue"})
+	}
+	sched := model.ScheduledJob{
+		ID:             "sched-current-agent-state",
+		Revision:       1,
+		Enabled:        true,
+		Tool:           model.ToolPing,
+		Target:         "1.1.1.1",
+		IPVersion:      model.IPv4,
+		CronExpression: "* * * * *",
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		ScheduleTargets: []model.ScheduleTarget{
+			{Label: "blue", AgentScope: model.ScheduleAgentScope{All: true}},
+		},
+	}
+	if err := st.CreateScheduledJob(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-relabeled", []string{"green"})
+	agents[2].Protocols = model.ProtocolIPv6
+	upsertHubTestAgent(t, ctx, st, agents[2])
+	disabledConfig, err := st.GetAgentConfig(ctx, "edge-disabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabledConfig.Disabled = true
+	if err := st.UpsertAgentConfig(ctx, disabledConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	hub.runDueSchedules(ctx)
+
+	jobs, err := st.ListActiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].AgentID != "edge-keep" {
+		t.Fatalf("scheduled jobs should use current agent state: %#v", jobs)
 	}
 }
 

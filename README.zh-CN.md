@@ -166,10 +166,10 @@ curl -X POST http://localhost:8080/v1/schedules \
 `agent` 标签和 `id:<agent-id>` 标签；`agent` 表示全部节点，自定义标签表示节点组，
 `id:<agent-id>` 表示单个节点。`cron_expression` 使用标准 5 段格式
 `分 时 日 月 周`，统一按 UTC 解释；每个触发点会同时运行全部所选节点。自定义标签可来自
-Agent 配置、托管 HTTP Agent 配置或部署生成器。带固定 Agent allowlist 的 API token
-也可以使用组标签；服务端会把 allowlist 固化到 schedule target 上，运行时跳过
-不在 token scope 内的匹配 Agent。计划任务和任务读取接口有意允许被具备对应读权限的
-token 共享读取。
+Agent 配置、托管 HTTP Agent 配置或部署生成器。服务端会把创建者的 Agent scope
+以选择规则保存到 schedule target；每次触发时都会根据当前节点重新计算标签和无限制范围，
+因此后续新增的匹配节点也会运行，同时固定 allowlist 和 deny 规则仍然生效。计划任务和任务
+读取接口有意允许被具备对应读权限的 token 共享读取。
 
 查询计划任务历史：
 

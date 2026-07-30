@@ -213,6 +213,31 @@ func TestNormalizeAgentLabelsAddsTransportLabelsAndDropsReservedInput(t *testing
 	}
 }
 
+func TestScheduleAgentScopeMatchesDynamicAndRestrictedAgents(t *testing.T) {
+	agent := Agent{ID: "edge-1", Labels: []string{"agent", "blue"}}
+	tests := []struct {
+		name  string
+		scope ScheduleAgentScope
+		want  bool
+	}{
+		{name: "missing scope fails closed", scope: ScheduleAgentScope{}, want: false},
+		{name: "unrestricted", scope: ScheduleAgentScope{All: true}, want: true},
+		{name: "allowed id", scope: ScheduleAgentScope{AllowedAgentIDs: []string{"edge-1"}}, want: true},
+		{name: "different id", scope: ScheduleAgentScope{AllowedAgentIDs: []string{"edge-2"}}, want: false},
+		{name: "allowed label", scope: ScheduleAgentScope{AllowedLabels: []string{"blue"}}, want: true},
+		{name: "different label", scope: ScheduleAgentScope{AllowedLabels: []string{"green"}}, want: false},
+		{name: "denied id", scope: ScheduleAgentScope{All: true, DeniedAgentIDs: []string{"edge-1"}}, want: false},
+		{name: "denied label", scope: ScheduleAgentScope{All: true, DeniedLabels: []string{"blue"}}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.scope.Allows(agent); got != test.want {
+				t.Fatalf("Allows() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDNSRecordJSONIncludesOnlyTypeAndValue(t *testing.T) {
 	b, err := json.Marshal(DNSRecord{Type: "A", Value: "93.184.216.34"})
 	if err != nil {

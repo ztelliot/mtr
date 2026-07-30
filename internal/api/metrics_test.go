@@ -264,7 +264,7 @@ func watchMetricsSchedule(id string, tool model.Tool, target string, now time.Ti
 	return model.ScheduledJob{
 		ID: id, Revision: 1, Name: id, Enabled: true, Tool: tool, Target: target,
 		IPVersion: model.IPv4, CronExpression: "*/5 * * * *", NextRunAt: now.Add(5 * time.Minute), CreatedAt: now, UpdatedAt: now,
-		ScheduleTargets: []model.ScheduleTarget{{Label: "asia"}},
+		ScheduleTargets: []model.ScheduleTarget{{Label: "asia", AgentScope: model.ScheduleAgentScope{All: true}}},
 	}
 }
 
