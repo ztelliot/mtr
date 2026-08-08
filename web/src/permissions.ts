@@ -247,7 +247,9 @@ export function ipVersionOptions(permissions: Permissions | null, tool: Tool, ag
 
 export function protocolOptions(permissions: Permissions | null, tool: Tool, agent?: Agent | null): Array<{ value: JobFormState["protocol"]; label: string }> {
   const options: Array<{ value: JobFormState["protocol"]; label: string }> = [
+    { value: "auto", label: "Auto" },
     { value: "icmp", label: "ICMP" },
+    { value: "udp", label: "UDP" },
     { value: "tcp", label: "TCP" }
   ];
   return options.filter((option) => permissionAllowsArg(effectivePermissions(permissions, agent), tool, "protocol", option.value));

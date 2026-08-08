@@ -376,7 +376,7 @@ function parseIPVersion(value: string | null): JobFormState["ipVersion"] | undef
 }
 
 function parseProtocol(value: string | null): JobFormState["protocol"] | undefined {
-  return value === "icmp" || value === "tcp" ? value : undefined;
+  return value === "auto" || value === "icmp" || value === "udp" || value === "tcp" ? value : undefined;
 }
 
 function parseDNSType(value: string | null): JobFormState["dnsType"] | undefined {

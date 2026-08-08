@@ -32,7 +32,8 @@ import { canReadManage, canWriteManage } from "./permissions";
 import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, HTTPAgentConfig, Permissions, PolicySettings, RateLimitConfig, RegisterToken, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
 
 const tools: Tool[] = ["ping", "traceroute", "mtr", "http", "dns", "port"];
-const protocolOptions = ["icmp", "tcp"];
+const pingProtocolOptions = ["auto", "icmp", "udp", "tcp"];
+const routeProtocolOptions = ["icmp", "tcp"];
 const methodOptions = ["GET", "HEAD"];
 const dnsTypeOptions = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
 const ipVersionOptions: IPVersion[] = [0, 4, 6];
@@ -1819,6 +1820,7 @@ function selectedTools(record?: Partial<Record<Tool, unknown>>): Tool[] {
 function defaultAllowedArgs(tool: Tool): Record<string, string> {
   switch (tool) {
     case "ping":
+      return { protocol: "auto,icmp,udp,tcp", port: defaultPortRange };
     case "traceroute":
     case "mtr":
       return { protocol: "icmp,tcp", port: defaultPortRange };
@@ -1886,16 +1888,17 @@ function resolveOnAgentValue(value: string | null): boolean | undefined {
 
 function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; args: Record<string, string>; disabled: boolean; onChange: (value: Record<string, string>) => void; t: (key: string) => string }) {
   const singleField = tool === "dns" || tool === "port" || tool === "http";
+  const availableProtocols = tool === "ping" ? pingProtocolOptions : routeProtocolOptions;
   return (
     <SimpleGrid className={singleField ? "manage-tool-args-grid manage-tool-args-grid-single" : "manage-tool-args-grid"} cols={singleField ? 1 : { base: 1, md: 2 }}>
       {(tool === "ping" || tool === "traceroute" || tool === "mtr") && (
         <MultiSelect
           className="manage-nowrap-multiselect"
           label={t("form.protocol")}
-          data={protocolOptions.map((protocol) => ({ value: protocol, label: protocol }))}
-          value={valuesFromPattern(args.protocol, protocolOptions)}
+          data={availableProtocols.map((protocol) => ({ value: protocol, label: protocol }))}
+          value={valuesFromPattern(args.protocol, availableProtocols)}
           disabled={disabled}
-          onChange={(selected) => onChange({ ...args, protocol: patternFromValues(selected, protocolOptions) })}
+          onChange={(selected) => onChange({ ...args, protocol: patternFromValues(selected, availableProtocols) })}
         />
       )}
       {tool === "http" && (

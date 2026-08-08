@@ -49,7 +49,7 @@ func PoliciesWithRuntime(runtime config.Runtime) Set {
 	runtime = normalizeRuntime(runtime)
 	probeTimeout := time.Duration(runtime.ProbeStepTimeoutSec) * time.Second
 	return Set{runtime: runtime, byTool: map[model.Tool]Policy{
-		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
+		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
 		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
 		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
 		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD"}},

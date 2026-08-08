@@ -220,6 +220,19 @@ func TestHTTPAgentHealthIncludesVersion(t *testing.T) {
 	if _, ok := agent["hide_first_hops"]; ok {
 		t.Fatalf("health response must not expose hide_first_hops: %#v", agent)
 	}
+	network, ok := raw["network"].(map[string]any)
+	if !ok || network["ping_group_range"] == nil || network["cap_net_raw"] == nil || network["icmp_echo_datagram"] == nil {
+		t.Fatalf("health response must expose network diagnostics: %#v", raw)
+	}
+}
+
+func TestCapabilitySetContainsNETRAW(t *testing.T) {
+	if !capabilitySetContains("0000000000002000", 13) {
+		t.Fatal("expected CAP_NET_RAW bit to be detected")
+	}
+	if capabilitySetContains("00000004010000eb", 13) {
+		t.Fatal("restricted runtime capability mask must not report CAP_NET_RAW")
+	}
 }
 
 func TestHTTPAgentPathPrefix(t *testing.T) {
@@ -251,6 +264,76 @@ func TestHTTPAgentPathPrefix(t *testing.T) {
 	handler.ServeHTTP(invokeRec, invokeReq)
 	if invokeRec.Code != http.StatusOK {
 		t.Fatalf("prefixed invoke status = %d, body = %s", invokeRec.Code, invokeRec.Body.String())
+	}
+}
+
+func TestEventAgentInvokeDoesNotRequireHTTPBearerToken(t *testing.T) {
+	handler := newEventAgentHandler(config.Agent{ID: "edge-event-1", HTTPToken: "must-not-be-used"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := `{"id":"job-1","tool":"ping","target":"127.0.0.1","ip_version":4,"args":{"count":"1"},"timeout_seconds":1}`
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("content type = %q", rec.Header().Get("Content-Type"))
+	}
+	var response eventInvokeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("event invoke must return one JSON document: %v; body=%s", err, rec.Body.String())
+	}
+	if response.JobID != "job-1" || len(response.Events) != 1 || response.Events[0]["type"] != model.JobErrorTargetBlocked || response.Result["type"] != "summary" {
+		t.Fatalf("unexpected function body: %#v", response)
+	}
+}
+
+func TestEventAgentHealthzAction(t *testing.T) {
+	handler := newEventAgentHandler(config.Agent{
+		ID:           "edge-event-1",
+		Country:      "CN",
+		Region:       "cn-east-3",
+		Provider:     "huaweicloud",
+		ISP:          "bgp",
+		Capabilities: []string{"ping", "dns"},
+		Protocols:    1,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{"action":"healthz"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("status = %d, content type = %q, body = %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+		Agent  struct {
+			ID        string `json:"id"`
+			Region    string `json:"region"`
+			Protocols int    `json:"protocols"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ok" || body.Agent.ID != "edge-event-1" || body.Agent.Region != "cn-east-3" || body.Agent.Protocols != 1 {
+		t.Fatalf("unexpected health event: %#v", body)
+	}
+}
+
+func TestEventAgentReturnsValidationErrors(t *testing.T) {
+	handler := newEventAgentHandler(config.Agent{ID: "edge-event-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{"message":"HelloWorld"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "tool") {
+		t.Fatalf("unexpected validation response: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -291,21 +374,25 @@ func TestNextRetryDelayCapsAtFiveMinutes(t *testing.T) {
 
 func TestParseAgentModes(t *testing.T) {
 	tests := []struct {
-		raw      string
-		wantGRPC bool
-		wantHTTP bool
-		wantOK   bool
+		raw       string
+		wantGRPC  bool
+		wantHTTP  bool
+		wantEvent bool
+		wantOK    bool
 	}{
 		{raw: "grpc", wantGRPC: true, wantOK: true},
 		{raw: "http", wantHTTP: true, wantOK: true},
+		{raw: "event", wantEvent: true, wantOK: true},
+		{raw: "grpc,event", wantGRPC: true, wantEvent: true, wantOK: true},
 		{raw: "grpc,http", wantGRPC: true, wantHTTP: true, wantOK: true},
 		{raw: "both", wantGRPC: true, wantHTTP: true, wantOK: true},
+		{raw: "http,event"},
 		{raw: "bad"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.raw, func(t *testing.T) {
 			got, ok := parseAgentModes(tt.raw)
-			if ok != tt.wantOK || got.grpc != tt.wantGRPC || got.http != tt.wantHTTP {
+			if ok != tt.wantOK || got.grpc != tt.wantGRPC || got.http != tt.wantHTTP || got.event != tt.wantEvent {
 				t.Fatalf("parseAgentModes(%q) = %#v, %v", tt.raw, got, ok)
 			}
 		})

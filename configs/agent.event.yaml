@@ -1,0 +1,25 @@
+id: "edge-event-1"
+mode: "event"
+log_level: "info"
+country: "CN"
+region: "edge"
+provider: "faas"
+isp: "bgp"
+http_addr: ":8000"
+http_path_prefix: ""
+protocols: 1
+hide_first_hops: 0
+capabilities:
+  - ping
+  - traceroute
+  - mtr
+  - http
+  - dns
+  - port
+speedtest:
+  max_bytes: 0
+http_tls:
+  enabled: false
+  ca_files: []
+  cert_file: ""
+  key_file: ""

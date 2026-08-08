@@ -8,7 +8,7 @@ const fullPermissions: Permissions = {
     dns: { allowed_args: { type: "A,AAAA,CNAME,MX,TXT,NS" }, ip_versions: [0, 4, 6], requires_agent: false },
     http: { allowed_args: { method: "GET,HEAD" }, ip_versions: [0, 4, 6], requires_agent: false },
     mtr: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true },
-    ping: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: false },
+    ping: { allowed_args: { port: "1-65535", protocol: "auto,icmp,udp,tcp" }, ip_versions: [0, 4, 6], requires_agent: false },
     port: { allowed_args: { port: "1-65535" }, ip_versions: [0, 4, 6], requires_agent: false },
     traceroute: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
   },
@@ -23,7 +23,7 @@ describe("permission helpers", () => {
   ];
 
   it("treats allowed args as backend CSV rules", () => {
-    expect(protocolOptions(fullPermissions, "ping").map((option) => option.value)).toEqual(["icmp", "tcp"]);
+    expect(protocolOptions(fullPermissions, "ping").map((option) => option.value)).toEqual(["auto", "icmp", "udp", "tcp"]);
     expect(httpMethodOptions(fullPermissions).map((option) => option.value)).toEqual(["HEAD", "GET"]);
     expect(dnsTypeOptions(fullPermissions)).toEqual(["A", "AAAA", "CNAME", "MX", "TXT", "NS"]);
   });

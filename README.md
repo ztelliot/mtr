@@ -10,8 +10,8 @@ Chinese version: [README.zh-CN.md](README.zh-CN.md)
 - `cmd/server`: REST API, gRPC Agent control plane, storage, policy, scheduling,
   and rate limiting.
 - `cmd/agent`: edge worker. In `grpc` mode it keeps a long-lived control-plane
-  connection to Server; in `http` mode it exposes an invoke endpoint for
-  gateways and FaaS platforms.
+  connection to Server; `http` exposes a streaming invoke endpoint, while
+  `event` adapts synchronous cloud function events.
 
 ## Quick Start
 
@@ -103,7 +103,7 @@ Agent exposes `/invoke` when its mode includes `http`; `http_token` is required
 for that mode. Use `http_path_prefix` to serve HTTP endpoints below a prefix
 such as `/api` or `/v1`, and include that same prefix in the managed Agent
 `base_url`. Server probes `/healthz` at startup to learn version, location,
-provider, capabilities, and protocols, then probes it again only while
+provider, capabilities, protocols, and network privilege diagnostics, then probes it again only while
 recovering from connection failures. Listener TLS is controlled by Agent
 `http_tls`; client-side TLS settings live on the managed HTTP Agent record.
 Client verification checks the configured CA chain only, so in-cluster addresses
@@ -141,10 +141,144 @@ line is a structured progress, hop, metric, or final summary event. Server
 outbound mode restores only the browser-facing envelope needed for routing and
 replay, such as `job_id` and `agent_id`; it does not repeat task-level fields
 like `tool`, `target`, or protocol in incremental events. gRPC mode uses the
-same compact event shape on the Agent-to-Server path. For Alibaba Cloud FC,
-Tencent Cloud SCF, or Huawei FunctionGraph, deploy `Dockerfile.agent` as a
-custom container or HTTP function and route trigger traffic to `/invoke` on port
-`9000`; the image still runs the unified `mtr-agent` binary.
+same compact event shape on the Agent-to-Server path.
+
+### Event mode
+
+Use `event` mode when a function platform invokes the Agent one request at a
+time and waits for a complete response. It exposes only `POST /invoke`, listens
+on `:8000` by default, and leaves authentication to the platform's invocation
+API or IAM layer. Unlike HTTP mode, it does not use `http_token`, path prefixes,
+listener TLS, or streaming responses.
+
+`configs/agent.event.yaml` contains a complete example:
+
+```yaml
+mode: "event"
+id: "edge-event-1"
+http_addr: ":8000"
+http_path_prefix: ""
+http_tls:
+  enabled: false
+speedtest:
+  max_bytes: 0
+```
+
+Send `action: healthz` to inspect the Agent and its runtime network privileges:
+
+```sh
+curl -X POST http://localhost:8000/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"healthz"}'
+```
+
+Job requests use the existing `JobSpec` fields. `action` may be omitted or set
+to `invoke` or `job`:
+
+```sh
+curl -X POST http://localhost:8000/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
+```
+
+The function returns one `application/json` document after the job finishes.
+Progress events are collected in `events`, while the final summary is placed in
+`result`:
+
+```json
+{
+  "job_id": "job-1",
+  "events": [
+    {"type": "target_resolved", "metric": {"target_ip": "1.1.1.1", "ip_version": 4}},
+    {"type": "metric", "metric": {"seq": 1, "latency_ms": 27.1}}
+  ],
+  "result": {
+    "type": "summary",
+    "exit_code": 0,
+    "metric": {"protocol": "udp", "port": 33434, "packets_transmitted": 1, "packets_received": 1}
+  }
+}
+```
+
+The `http` and `event` modes use different `/invoke` contracts and therefore
+cannot run together in one process.
+
+#### Container image
+
+The same image built from `Dockerfile.agent` supports `grpc`, `http`, and
+`event` modes. It contains only the Agent binary and CA certificates; runtime
+configuration is supplied through a mounted YAML file, `MTR_*` environment
+variables, or both. The default config file is optional.
+
+Build the image and start an event-mode container locally:
+
+```sh
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  -f Dockerfile.agent \
+  -t mtr-agent:latest .
+
+docker run --rm -p 8000:8000 \
+  --user 65532:65532 \
+  -e MTR_MODE=event \
+  -e MTR_HTTP_ADDR=:8000 \
+  -e MTR_ID=edge-event-1 \
+  -e MTR_COUNTRY=CN \
+  -e MTR_REGION=edge \
+  -e MTR_PROVIDER=faas \
+  mtr-agent:latest
+```
+
+For deployment, configure the platform to forward `POST /invoke` to port 8000.
+The Agent does not implement `/init`; a platform that requires an initializer
+needs a small adapter. The function timeout should exceed the job's
+`timeout_seconds` and leave room for cold start. Provider-specific envelopes
+added outside the container must be handled by the caller or a Server adapter.
+
+To push the image, replace `--load` with `--push` and use the desired registry
+tag. Add `--provenance=false --sbom=false` only when the registry rejects
+Buildx attestation manifests. Build for the architecture used by the runtime,
+usually `linux/amd64` or `linux/arm64`.
+
+#### Network privileges
+
+Function runtimes often choose the container UID/GID and restrict Linux
+capabilities. A Dockerfile cannot restore a capability removed from the runtime
+bounding set, and adding a `cap_net_raw` file capability may cause the binary to
+fail at startup. Check `network.cap_net_raw` in the `healthz` response instead
+of relying on image metadata.
+
+When `NET_RAW` is unavailable, ping can use `udp`, `tcp`, or `auto` mode. ICMP
+traceroute and MTR still require `NET_RAW`; their TCP mode remains available.
+
+UDP ping sends a real UDP datagram. A UDP reply or an ICMP Port Unreachable
+response counts as reachability; the default destination port is `33434` and
+`args.port` may override it. Firewalls may silently discard UDP, so explicit
+UDP never falls back. Only `protocol: auto` may try ICMP, then UDP, then TCP;
+after the first successful probe it locks that protocol for the rest of the
+job. The result summary always includes the actual `protocol`, and auto results
+also include `requested_protocol: auto`.
+
+`healthz` also reports `network.ping_group_range` and whether the kernel permits
+unprivileged ICMP Echo datagram sockets for IPv4 and IPv6.
+
+For example, to test ICMP mode on ordinary Docker, run the Agent as root while
+dropping every capability except `NET_RAW`:
+
+```sh
+docker run --rm -p 8000:8000 \
+  --user 0:0 \
+  --cap-drop ALL \
+  --cap-add NET_RAW \
+  -e MTR_ID=edge-docker-1 \
+  -e MTR_MODE=event \
+  -e MTR_HTTP_ADDR=:8000 \
+  mtr-agent:latest
+```
+
+If the runtime forces a non-root user, `--cap-add NET_RAW` may still leave the
+permitted and effective sets empty. The `healthz` result is authoritative.
 
 Agent speed test endpoint:
 
@@ -167,7 +301,10 @@ curl -X POST http://localhost:8080/v1/jobs \
   -d '{"tool":"ping","target":"1.1.1.1"}'
 ```
 
-`ping`, `traceroute`, and `mtr` accept `args.protocol` as `icmp` or `tcp`.
+`ping` accepts `args.protocol` as `icmp`, `udp`, `tcp`, or `auto`; the default is
+strict `icmp`, and only an explicit `auto` request may fall back. UDP defaults
+to port `33434`, while TCP defaults to port `80`; `args.port` overrides either.
+`traceroute` and `mtr` continue to accept only `icmp` or `tcp`.
 `count` and `max_hops` are controlled by Server runtime policy, not by user
 requests. `dns` replaces the old `nslookup` tool name. `port` performs a native
 TCP connect probe and requires `args.port`. By default, Server resolves target
@@ -557,16 +694,21 @@ The Agent image only needs the compiled Agent binary and CA certificates; diagno
 
 ## Docker Hardening
 
-For container deployments, run as a non-root user, use a read-only root
+For container deployments, prefer a non-root user, use a read-only root
 filesystem, disable privilege escalation, and explicitly reduce Linux
 capabilities. Server does not need extra capabilities. Agent needs `NET_RAW`
-for ICMP-backed `ping`, `traceroute`, and `mtr`.
+only for ICMP-backed `ping`, `traceroute`, and `mtr`; UDP/TCP ping does not need
+it.
 
-The examples use `65532:65532` as an unprivileged container UID/GID. Mounted
-config and certificate files must be readable by that UID/GID. For private
-keys, prefer mode `0640` with group `65532`, or use Docker/Compose secrets. The
-published container images do not include Server or Agent runtime config;
-mount those files explicitly.
+The Server example uses `65532:65532` as an unprivileged container UID/GID. The
+ICMP Agent example uses UID 0 with every capability dropped except `NET_RAW`,
+because Docker does not place `--cap-add NET_RAW` in a non-root process's
+permitted/effective sets. An Agent restricted to UDP/TCP ping can instead use
+UID/GID `65532:65532` and omit `--cap-add`. Mounted config and certificate files
+must be readable by the selected UID/GID. For private keys, prefer mode `0640`
+with the matching group, or use Docker/Compose secrets. The published container
+images do not include Server or Agent runtime config; mount those files
+explicitly.
 
 ```sh
 docker network create mtr-net
@@ -589,7 +731,7 @@ docker run -d --name mtr-server \
 
 docker run -d --name mtr-agent \
   --network mtr-net \
-  --user 65532:65532 \
+  --user 0:0 \
   --cap-drop ALL \
   --cap-add NET_RAW \
   --security-opt no-new-privileges:true \

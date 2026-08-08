@@ -248,13 +248,21 @@ func TestRuntimeConfigControlsServerOwnedArgsAndTimeouts(t *testing.T) {
 	}
 }
 
-func TestUDPProtocolIsRejected(t *testing.T) {
-	_, err := DefaultPolicies().Validate(model.CreateJobRequest{
-		Tool:   model.ToolPing,
+func TestPingAllowsUDPAndAutoProtocols(t *testing.T) {
+	for _, protocol := range []string{"udp", "auto"} {
+		if _, err := DefaultPolicies().Validate(model.CreateJobRequest{
+			Tool:   model.ToolPing,
+			Target: "1.1.1.1",
+			Args:   map[string]string{"protocol": protocol},
+		}); err != nil {
+			t.Fatalf("expected ping protocol %q to be allowed: %v", protocol, err)
+		}
+	}
+	if _, err := DefaultPolicies().Validate(model.CreateJobRequest{
+		Tool:   model.ToolTraceroute,
 		Target: "1.1.1.1",
 		Args:   map[string]string{"protocol": "udp"},
-	})
-	if err == nil {
-		t.Fatal("expected udp protocol to be rejected")
+	}); err == nil {
+		t.Fatal("expected traceroute udp protocol to remain rejected")
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,6 +28,7 @@ import (
 	"github.com/ztelliot/mtr/internal/runner"
 	"github.com/ztelliot/mtr/internal/tlsutil"
 	"github.com/ztelliot/mtr/internal/version"
+	"golang.org/x/net/icmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -79,6 +81,15 @@ func main() {
 		stopHTTP, httpErr, err = startHTTPAgentServer(ctx, cfg.HTTPAddr, cfg, log)
 		if err != nil {
 			log.Error("start http agent", "err", err)
+			os.Exit(1)
+		}
+		defer stopHTTP()
+	}
+	if modes.event {
+		var err error
+		stopHTTP, httpErr, err = startEventAgentServer(ctx, cfg.HTTPAddr, cfg, log)
+		if err != nil {
+			log.Error("start event agent", "err", err)
 			os.Exit(1)
 		}
 		defer stopHTTP()
@@ -159,8 +170,9 @@ func firstExistingConfig(systemPath string, localPath string) string {
 }
 
 type agentModes struct {
-	grpc bool
-	http bool
+	grpc  bool
+	http  bool
+	event bool
 }
 
 func parseAgentModes(raw string) (agentModes, bool) {
@@ -171,6 +183,8 @@ func parseAgentModes(raw string) (agentModes, bool) {
 			modes.grpc = true
 		case "http":
 			modes.http = true
+		case "event":
+			modes.event = true
 		case "both", "all":
 			modes.grpc = true
 			modes.http = true
@@ -179,7 +193,10 @@ func parseAgentModes(raw string) (agentModes, bool) {
 			return agentModes{}, false
 		}
 	}
-	return modes, modes.grpc || modes.http
+	if modes.http && modes.event {
+		return agentModes{}, false
+	}
+	return modes, modes.grpc || modes.http || modes.event
 }
 
 func agentCapabilities(in []string) []model.Tool {
@@ -197,11 +214,25 @@ func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, 
 		return nil, nil, fmt.Errorf("http_token is required when agent mode includes http")
 	}
 	cfg.ID = defaultHTTPAgentID(cfg.ID)
-	handler := newHTTPAgentHandler(cfg, log)
 	tlsConfig, err := tlsutil.ServerTLSConfig(cfg.HTTPTLS.CAFiles, cfg.HTTPTLS.CertFile, cfg.HTTPTLS.KeyFile, cfg.HTTPTLS.Enabled)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http_tls: %w", err)
 	}
+	return startAgentHTTPServer(ctx, listen, newHTTPAgentHandler(cfg, log), tlsConfig, "http agent listening", cfg.ID, log)
+}
+
+func startEventAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger) (func(), <-chan error, error) {
+	if cfg.HTTPPathPrefix != "" {
+		return nil, nil, fmt.Errorf("http_path_prefix is not supported in event mode")
+	}
+	if cfg.HTTPTLS.Enabled {
+		return nil, nil, fmt.Errorf("http_tls is not supported in event mode")
+	}
+	cfg.ID = defaultHTTPAgentID(cfg.ID)
+	return startAgentHTTPServer(ctx, listen, newEventAgentHandler(cfg, log), nil, "event agent listening", cfg.ID, log)
+}
+
+func startAgentHTTPServer(ctx context.Context, listen string, handler http.Handler, tlsConfig *tls.Config, message string, agentID string, log *slog.Logger) (func(), <-chan error, error) {
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           handler,
@@ -214,7 +245,7 @@ func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, 
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("http agent listening", "addr", listen, "agent_id", cfg.ID, "tls", tlsConfig != nil)
+		log.Info(message, "addr", listen, "agent_id", agentID, "tls", tlsConfig != nil)
 		var err error
 		if tlsConfig != nil {
 			err = srv.ListenAndServeTLS("", "")
@@ -256,19 +287,7 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 	mux.Handle("/speedtest/random", newSpeedtestHandler(cfg.Speedtest, cfg.HTTPToken, log))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":  "ok",
-			"version": version.Current(),
-			"agent": map[string]any{
-				"id":           agentID,
-				"country":      cfg.Country,
-				"region":       cfg.Region,
-				"provider":     cfg.Provider,
-				"isp":          cfg.ISP,
-				"capabilities": agentCapabilities(cfg.Capabilities),
-				"protocols":    model.ProtocolMask(cfg.Protocols),
-			},
-		})
+		writeJSON(w, http.StatusOK, agentHealthPayload(cfg, agentID))
 	})
 	mux.HandleFunc("/invoke", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
@@ -298,25 +317,10 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
-		createReq := model.CreateJobRequest{
-			Tool:           spec.Tool,
-			Target:         spec.Target,
-			Args:           policy.AgentArgs(spec.Tool, spec.Args),
-			IPVersion:      spec.IPVersion,
-			AgentID:        agentID,
-			ResolveOnAgent: spec.ResolveOnAgent,
-		}
-		spec.Args = createReq.Args
-		p, err := policies.ValidateTrusted(createReq)
+		p, err := prepareAgentJob(&spec, agentID, policies)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
-		}
-		if spec.TimeoutSeconds > 0 {
-			p.Timeout = time.Duration(spec.TimeoutSeconds) * time.Second
-		}
-		if spec.ProbeTimeoutSeconds > 0 {
-			p.ProbeTimeout = time.Duration(spec.ProbeTimeoutSeconds) * time.Second
 		}
 
 		flusher, ok := w.(http.Flusher)
@@ -336,33 +340,7 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			flusher.Flush()
 			return nil
 		}
-		sendEvent := func(event model.StreamEvent) error {
-			redactStreamEvent(&event, spec.Tool, cfg.HideFirstHops)
-			return writeLine(event.WirePayload())
-		}
-
-		resolvedTarget, resolvedVersion, err := resolveAgentTarget(req.Context(), spec.Tool, spec.Target, spec.ResolvedTarget, spec.IPVersion, spec.ResolveOnAgent, spec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
-		job := model.Job{ID: spec.ID, Tool: spec.Tool, Target: spec.Target, ResolvedTarget: resolvedTarget, Args: spec.Args, IPVersion: resolvedVersion, ResolveOnAgent: spec.ResolveOnAgent}
-		if err != nil {
-			failureType := agentPreflightFailureType(err)
-			_ = sendEvent(model.StreamEvent{Type: failureType, Message: failureType})
-			parsed := agentPreflightFailureResult(job, err)
-			compactParsedResult(parsed)
-			_ = writeLine(parsed.WirePayload())
-			log.Warn("agent rejected job", "job_id", spec.ID, "failure_type", failureType, "err", err)
-			return
-		}
-
-		log.Debug("http job start", "job_id", spec.ID, "tool", spec.Tool, "target", spec.Target)
-		parsed, runErr := r.RunStream(req.Context(), job, p, sendEvent)
-		if parsed != nil {
-			redactHops(parsed, cfg.HideFirstHops)
-			compactParsedResult(parsed)
-			_ = writeLine(parsed.WirePayload())
-		}
-		if runErr != nil {
-			log.Warn("http job failed", "job_id", spec.ID, "err", runErr)
-		}
+		executeAgentJob(req.Context(), cfg, spec, p, r, log, writeLine)
 	})
 	handler := http.Handler(mux)
 	if cfg.HTTPPathPrefix != "" {
@@ -371,6 +349,200 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 		handler = prefixed
 	}
 	return logHTTPRequests(log, handler)
+}
+
+func newEventAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
+	agentID := defaultHTTPAgentID(cfg.ID)
+	r := runner.New()
+	policies := policy.DefaultPolicies()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/invoke", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		requestBody, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		var event struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(requestBody, &event); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(event.Action)) {
+		case "healthz":
+			writeJSON(w, http.StatusOK, agentHealthPayload(cfg, agentID))
+			return
+		case "", "invoke", "job":
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported event action"})
+			return
+		}
+
+		var spec grpcwire.JobSpec
+		if err := json.Unmarshal(requestBody, &spec); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		p, err := prepareAgentJob(&spec, agentID, policies)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		response := eventInvokeResponse{
+			JobID:  spec.ID,
+			Events: make([]map[string]any, 0),
+		}
+		collect := func(v any) error {
+			payload, ok := v.(map[string]any)
+			if !ok {
+				return fmt.Errorf("unexpected event payload %T", v)
+			}
+			if payload["type"] == "summary" {
+				response.Result = payload
+				return nil
+			}
+			response.Events = append(response.Events, payload)
+			return nil
+		}
+		executeAgentJob(req.Context(), cfg, spec, p, r, log, collect)
+		if response.Result == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job did not produce a result"})
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, response)
+	})
+	return logHTTPRequests(log, mux)
+}
+
+type eventInvokeResponse struct {
+	JobID  string           `json:"job_id,omitempty"`
+	Events []map[string]any `json:"events"`
+	Result map[string]any   `json:"result"`
+}
+
+func agentHealthPayload(cfg config.Agent, agentID string) map[string]any {
+	return map[string]any{
+		"status":  "ok",
+		"version": version.Current(),
+		"network": agentNetworkHealthPayload(),
+		"agent": map[string]any{
+			"id":           agentID,
+			"country":      cfg.Country,
+			"region":       cfg.Region,
+			"provider":     cfg.Provider,
+			"isp":          cfg.ISP,
+			"capabilities": agentCapabilities(cfg.Capabilities),
+			"protocols":    model.ProtocolMask(cfg.Protocols),
+		},
+	}
+}
+
+func agentNetworkHealthPayload() map[string]any {
+	capabilities := map[string]any{
+		"effective": false,
+		"bounded":   false,
+	}
+	if status, err := os.ReadFile("/proc/self/status"); err == nil {
+		for _, line := range strings.Split(string(status), "\n") {
+			key, value, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "CapEff":
+				capabilities["effective"] = capabilitySetContains(strings.TrimSpace(value), 13)
+			case "CapBnd":
+				capabilities["bounded"] = capabilitySetContains(strings.TrimSpace(value), 13)
+			}
+		}
+	}
+	network := map[string]any{
+		"cap_net_raw": capabilities,
+		"icmp_echo_datagram": map[string]any{
+			"ipv4": probeICMPEchoDatagram("udp4", "0.0.0.0"),
+			"ipv6": probeICMPEchoDatagram("udp6", "::"),
+		},
+	}
+	if value, err := os.ReadFile("/proc/sys/net/ipv4/ping_group_range"); err == nil {
+		network["ping_group_range"] = strings.Join(strings.Fields(string(value)), " ")
+	} else {
+		network["ping_group_range"] = ""
+	}
+	return network
+}
+
+func capabilitySetContains(raw string, capability uint) bool {
+	value, err := strconv.ParseUint(raw, 16, 64)
+	return err == nil && value&(uint64(1)<<capability) != 0
+}
+
+func probeICMPEchoDatagram(network string, address string) map[string]any {
+	conn, err := icmp.ListenPacket(network, address)
+	if err != nil {
+		return map[string]any{"available": false, "error": err.Error()}
+	}
+	_ = conn.Close()
+	return map[string]any{"available": true}
+}
+
+func prepareAgentJob(spec *grpcwire.JobSpec, agentID string, policies policy.Set) (policy.Policy, error) {
+	createReq := model.CreateJobRequest{
+		Tool:           spec.Tool,
+		Target:         spec.Target,
+		Args:           policy.AgentArgs(spec.Tool, spec.Args),
+		IPVersion:      spec.IPVersion,
+		AgentID:        agentID,
+		ResolveOnAgent: spec.ResolveOnAgent,
+	}
+	spec.Args = createReq.Args
+	p, err := policies.ValidateTrusted(createReq)
+	if err != nil {
+		return policy.Policy{}, err
+	}
+	if spec.TimeoutSeconds > 0 {
+		p.Timeout = time.Duration(spec.TimeoutSeconds) * time.Second
+	}
+	if spec.ProbeTimeoutSeconds > 0 {
+		p.ProbeTimeout = time.Duration(spec.ProbeTimeoutSeconds) * time.Second
+	}
+	return p, nil
+}
+
+func executeAgentJob(ctx context.Context, cfg config.Agent, spec grpcwire.JobSpec, p policy.Policy, r runner.Runner, log *slog.Logger, writeLine func(any) error) {
+	sendEvent := func(event model.StreamEvent) error {
+		redactStreamEvent(&event, spec.Tool, cfg.HideFirstHops)
+		return writeLine(event.WirePayload())
+	}
+
+	resolvedTarget, resolvedVersion, err := resolveAgentTarget(ctx, spec.Tool, spec.Target, spec.ResolvedTarget, spec.IPVersion, spec.ResolveOnAgent, spec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
+	job := model.Job{ID: spec.ID, Tool: spec.Tool, Target: spec.Target, ResolvedTarget: resolvedTarget, Args: spec.Args, IPVersion: resolvedVersion, ResolveOnAgent: spec.ResolveOnAgent}
+	if err != nil {
+		failureType := agentPreflightFailureType(err)
+		_ = sendEvent(model.StreamEvent{Type: failureType, Message: failureType})
+		parsed := agentPreflightFailureResult(job, err)
+		compactParsedResult(parsed)
+		_ = writeLine(parsed.WirePayload())
+		log.Warn("agent rejected job", "job_id", spec.ID, "failure_type", failureType, "err", err)
+		return
+	}
+
+	log.Debug("agent job start", "job_id", spec.ID, "tool", spec.Tool, "target", spec.Target)
+	parsed, runErr := r.RunStream(ctx, job, p, sendEvent)
+	if parsed != nil {
+		redactHops(parsed, cfg.HideFirstHops)
+		compactParsedResult(parsed)
+		_ = writeLine(parsed.WirePayload())
+	}
+	if runErr != nil {
+		log.Warn("agent job failed", "job_id", spec.ID, "err", runErr)
+	}
 }
 
 func bearerToken(header string) (string, bool) {

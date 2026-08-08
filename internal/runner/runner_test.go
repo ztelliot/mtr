@@ -3,11 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -292,6 +294,135 @@ func TestRunBuiltinPingSummaryIncludesTargetIP(t *testing.T) {
 	}
 	if len(events) == 0 || events[0].Type != "target_resolved" || events[0].Metric["target_ip"] != "127.0.0.1" {
 		t.Fatalf("expected target_resolved event, events = %#v", events)
+	}
+}
+
+func TestRunBuiltinUDPPingReportsProtocolAndPort(t *testing.T) {
+	listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		n, peer, err := listener.ReadFrom(buf)
+		if err == nil {
+			_, _ = listener.WriteTo(buf[:n], peer)
+		}
+	}()
+
+	port := listener.LocalAddr().(*net.UDPAddr).Port
+	result, err := runBuiltinPing(context.Background(), model.Job{
+		Tool:      model.ToolPing,
+		Target:    "127.0.0.1",
+		Args:      map[string]string{"count": "1", "protocol": "udp", "port": strconv.Itoa(port)},
+		IPVersion: model.IPv4,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || result.Summary["protocol"] != "udp" || result.Summary["port"] != port {
+		t.Fatalf("unexpected udp ping result: %#v", result)
+	}
+	if _, ok := result.Summary["requested_protocol"]; ok {
+		t.Fatalf("explicit udp must not be reported as auto: %#v", result.Summary)
+	}
+}
+
+func TestRunBuiltinPingExplicitUDPDoesNotFallback(t *testing.T) {
+	originalUDP := pingUDPProbe
+	originalTCP := pingTCPProbe
+	t.Cleanup(func() {
+		pingUDPProbe = originalUDP
+		pingTCPProbe = originalTCP
+	})
+	udpCalls := 0
+	tcpCalls := 0
+	pingUDPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, error) {
+		udpCalls++
+		return 0, errors.New("udp unavailable")
+	}
+	pingTCPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, error) {
+		tcpCalls++
+		return time.Millisecond, nil
+	}
+
+	result, err := runBuiltinPing(context.Background(), model.Job{
+		Tool:      model.ToolPing,
+		Target:    "127.0.0.1",
+		Args:      map[string]string{"count": "1", "protocol": "udp"},
+		IPVersion: model.IPv4,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if udpCalls != 1 || tcpCalls != 0 || result.ExitCode != 1 || result.Summary["protocol"] != "udp" {
+		t.Fatalf("explicit udp unexpectedly fell back: udp=%d tcp=%d result=%#v", udpCalls, tcpCalls, result)
+	}
+}
+
+func TestRunBuiltinPingAutoFallsBackAndReportsActualProtocol(t *testing.T) {
+	originalListen := listenPingICMP
+	originalUDP := pingUDPProbe
+	originalTCP := pingTCPProbe
+	t.Cleanup(func() {
+		listenPingICMP = originalListen
+		pingUDPProbe = originalUDP
+		pingTCPProbe = originalTCP
+	})
+	listenPingICMP = func(model.IPVersion) (*icmp.PacketConn, error) {
+		return nil, errors.New("raw socket denied")
+	}
+	pingUDPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, error) {
+		return 0, errors.New("udp filtered")
+	}
+	tcpCalls := 0
+	pingTCPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, error) {
+		tcpCalls++
+		return 2 * time.Millisecond, nil
+	}
+
+	result, err := runBuiltinPing(context.Background(), model.Job{
+		Tool:      model.ToolPing,
+		Target:    "127.0.0.1",
+		Args:      map[string]string{"count": "1", "protocol": "auto"},
+		IPVersion: model.IPv4,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || result.Summary["requested_protocol"] != "auto" || result.Summary["protocol"] != "tcp" || result.Summary["port"] != 80 || tcpCalls != 1 {
+		t.Fatalf("unexpected auto fallback result: tcp=%d result=%#v", tcpCalls, result)
+	}
+	if _, ok := result.Summary["protocol_fallbacks"]; ok {
+		t.Fatalf("auto fallback internals must not be returned: %#v", result.Summary)
+	}
+}
+
+func TestRunBuiltinPingExplicitICMPDoesNotFallbackWhenSocketDenied(t *testing.T) {
+	originalListen := listenPingICMP
+	originalUDP := pingUDPProbe
+	t.Cleanup(func() {
+		listenPingICMP = originalListen
+		pingUDPProbe = originalUDP
+	})
+	listenPingICMP = func(model.IPVersion) (*icmp.PacketConn, error) {
+		return nil, errors.New("raw socket denied")
+	}
+	udpCalls := 0
+	pingUDPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, error) {
+		udpCalls++
+		return time.Millisecond, nil
+	}
+
+	result, err := runBuiltinPing(context.Background(), model.Job{
+		Tool:      model.ToolPing,
+		Target:    "127.0.0.1",
+		Args:      map[string]string{"count": "1", "protocol": "icmp"},
+		IPVersion: model.IPv4,
+	}, nil)
+	if err == nil || udpCalls != 0 || result.Summary["protocol"] != "icmp" {
+		t.Fatalf("explicit icmp unexpectedly fell back: udp=%d err=%v result=%#v", udpCalls, err, result)
 	}
 }
 

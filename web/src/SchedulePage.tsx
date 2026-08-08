@@ -1838,7 +1838,7 @@ function scheduleFormState(schedule: ScheduledJob): JobFormState {
     target: scheduleTargetForForm(schedule),
     ipVersion: (schedule.ip_version ?? 0) as IPVersion,
     agentId: "",
-    protocol: args.protocol === "tcp" ? "tcp" : "icmp",
+    protocol: args.protocol === "auto" || args.protocol === "udp" || args.protocol === "tcp" ? args.protocol : "icmp",
     method: args.method === "GET" ? "GET" : "HEAD",
     dnsType: scheduleDNSType(args.type),
     resolveOnAgent: schedule.resolve_on_agent ?? defaultFormState.resolveOnAgent

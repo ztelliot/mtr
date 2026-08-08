@@ -31,7 +31,14 @@ const (
 	defaultPingProbeTimeout  = time.Second
 	defaultPingInterval      = time.Second
 	defaultRouteProbeTimeout = time.Second
+	defaultUDPProbePort      = 33434
 	tcpProbeTimeout          = 2 * time.Second
+)
+
+var (
+	listenPingICMP = listenICMP
+	pingUDPProbe   = udpProbeWithTimeout
+	pingTCPProbe   = tcpProbeWithTimeout
 )
 
 func runBuiltin(ctx context.Context, job model.Job, probeTimeout time.Duration, sink StreamSink) (*model.ToolResult, error) {
@@ -60,40 +67,54 @@ func runBuiltinPing(ctx context.Context, job model.Job, sink StreamSink) (*model
 func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSink, probeTimeout time.Duration) (*model.ToolResult, error) {
 	probeTimeout = normalizedPingProbeTimeout(probeTimeout)
 	count := parsePositiveInt(argOr(job.Args, "count", "10"))
-	mode := probeMode(argOr(job.Args, "protocol", "icmp"))
-	port := parsePort(job.Args, defaultProbePort(mode))
+	requestedMode := pingProbeMode(argOr(job.Args, "protocol", "icmp"))
+	mode := requestedMode
 	targetIP, version, err := resolveOne(ctx, executionTarget(job), job.IPVersion)
 	if err != nil {
 		result := newBuiltinResult(job, -1)
+		setPingProtocolSummary(result, requestedMode, mode, job.Args)
 		fillErrorSummary(ctx, result, err)
 		emitPingTimeoutMetric(sink, ctx, err, 1)
 		return result, err
 	}
 	emitResolvedTarget(sink, targetIP, version)
 	var conn *icmp.PacketConn
-	if mode == "icmp" {
-		conn, err = listenICMP(version)
+	if mode == "auto" || mode == "icmp" {
+		mode = "icmp"
+		conn, err = listenPingICMP(version)
 		if err != nil {
-			result := newBuiltinResult(job, -1)
-			result.IPVersion = version
-			fillErrorSummary(ctx, result, err)
-			emitPingTimeoutMetric(sink, ctx, err, 1)
-			return result, err
+			if requestedMode == "auto" {
+				mode = "udp"
+			} else {
+				result := newBuiltinResult(job, -1)
+				result.IPVersion = version
+				setPingProtocolSummary(result, requestedMode, mode, job.Args)
+				fillErrorSummary(ctx, result, err)
+				emitPingTimeoutMetric(sink, ctx, err, 1)
+				return result, err
+			}
 		}
-		defer conn.Close()
 	}
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
 
 	result := newBuiltinResult(job, 0)
 	result.IPVersion = version
 	result.Summary["target_ip"] = targetIP.String()
+	setPingProtocolSummary(result, requestedMode, mode, job.Args)
 	id := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(0xffff)
 	attempted := 0
 	var samples []float64
 	received := 0
+	autoSelecting := requestedMode == "auto"
 	for seq := 0; seq < count; seq++ {
 		select {
 		case <-ctx.Done():
 			result.ExitCode = -1
+			setPingProtocolSummary(result, requestedMode, mode, job.Args)
 			fillPingSummary(result, attempted, received, samples)
 			fillErrorSummary(ctx, result, ctx.Err())
 			emitPingTimeoutMetric(sink, ctx, ctx.Err(), attempted+1)
@@ -101,7 +122,27 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 		default:
 		}
 		attempted = seq + 1
-		rtt, err := probeOnce(ctx, conn, targetIP, version, mode, port, 64, id, seq+1, probeTimeout)
+		var rtt time.Duration
+		for {
+			port := parsePort(job.Args, defaultProbePort(mode))
+			rtt, err = probeOnce(ctx, conn, targetIP, version, mode, port, 64, id, seq+1, probeTimeout)
+			if !autoSelecting || err == nil || mode == "tcp" {
+				autoSelecting = false
+				break
+			}
+			switch mode {
+			case "icmp":
+				if conn != nil {
+					_ = conn.Close()
+					conn = nil
+				}
+				mode = "udp"
+			case "udp":
+				mode = "tcp"
+			}
+			setPingProtocolSummary(result, requestedMode, mode, job.Args)
+		}
+		setPingProtocolSummary(result, requestedMode, mode, job.Args)
 		if err == nil {
 			received++
 			ms := float64(rtt.Microseconds()) / 1000
@@ -114,6 +155,7 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 			case <-ctx.Done():
 				timer.Stop()
 				result.ExitCode = -1
+				setPingProtocolSummary(result, requestedMode, mode, job.Args)
 				fillPingSummary(result, attempted, received, samples)
 				fillErrorSummary(ctx, result, ctx.Err())
 				return result, ctx.Err()
@@ -121,6 +163,7 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 			}
 		}
 	}
+	setPingProtocolSummary(result, requestedMode, mode, job.Args)
 	fillPingSummary(result, count, received, samples)
 	if received == 0 {
 		result.ExitCode = 1
@@ -129,13 +172,80 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 	return result, nil
 }
 
+func setPingProtocolSummary(result *model.ToolResult, requested string, actual string, args map[string]string) {
+	result.Summary["protocol"] = actual
+	if requested == "auto" {
+		result.Summary["requested_protocol"] = "auto"
+	}
+	port := parsePort(args, defaultProbePort(actual))
+	if port > 0 {
+		result.Summary["port"] = port
+	} else {
+		delete(result.Summary, "port")
+	}
+}
+
 func probeOnce(ctx context.Context, conn *icmp.PacketConn, target net.IP, version model.IPVersion, mode string, port int, ttl int, id int, seq int, timeout time.Duration) (time.Duration, error) {
 	switch mode {
 	case "tcp":
-		return tcpProbeWithTimeout(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
+		return pingTCPProbe(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
+	case "udp":
+		return pingUDPProbe(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
 	default:
 		return icmpProbe(ctx, conn, target, version, ttl, id, seq, timeout)
 	}
+}
+
+func udpProbeWithTimeout(ctx context.Context, target net.IP, version model.IPVersion, port int, ttl int, timeout time.Duration) (time.Duration, error) {
+	network := "udp4"
+	if version == model.IPv6 {
+		network = "udp6"
+	}
+	dialer := net.Dialer{
+		Timeout: timeout,
+		Control: func(_ string, _ string, c syscall.RawConn) error {
+			var controlErr error
+			err := c.Control(func(fd uintptr) {
+				if version == model.IPv6 {
+					controlErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+					return
+				}
+				controlErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+			})
+			if err != nil {
+				return err
+			}
+			return controlErr
+		},
+	}
+	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(target.String(), strconv.Itoa(port)))
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(timeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return 0, err
+	}
+	payload := []byte("mtr-udp-ping")
+	start := time.Now()
+	if _, err := conn.Write(payload); err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return time.Since(start), nil
+		}
+		return 0, err
+	}
+	buf := make([]byte, 1500)
+	if _, err := conn.Read(buf); err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return time.Since(start), nil
+		}
+		return 0, err
+	}
+	return time.Since(start), nil
 }
 
 func icmpProbe(ctx context.Context, conn *icmp.PacketConn, target net.IP, version model.IPVersion, ttl int, id int, seq int, timeout time.Duration) (time.Duration, error) {
@@ -1012,8 +1122,23 @@ func probeMode(raw string) string {
 	}
 }
 
+func pingProbeMode(raw string) string {
+	switch strings.ToLower(raw) {
+	case "auto":
+		return "auto"
+	case "udp":
+		return "udp"
+	case "tcp":
+		return "tcp"
+	default:
+		return "icmp"
+	}
+}
+
 func defaultProbePort(mode string) int {
 	switch mode {
+	case "udp":
+		return defaultUDPProbePort
 	case "tcp":
 		return 80
 	default:

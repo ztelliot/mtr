@@ -84,6 +84,16 @@ func TestLoadAgentNormalizesHTTPPathPrefix(t *testing.T) {
 	}
 }
 
+func TestLoadAgentDefaultsEventModeToPort8000(t *testing.T) {
+	cfg, err := LoadAgent(writeConfig(t, `mode: event`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPAddr != ":8000" {
+		t.Fatalf("event http addr = %q", cfg.HTTPAddr)
+	}
+}
+
 func TestLoadAgentRejectsInvalidHTTPPathPrefix(t *testing.T) {
 	if _, err := LoadAgent(writeConfig(t, `http_path_prefix: "/api?token=x"`)); err == nil {
 		t.Fatal("expected invalid http path prefix to be rejected")

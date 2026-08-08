@@ -372,7 +372,7 @@ export interface JobFormState {
   agentId: string;
   agentTags: string[];
   count: string;
-  protocol: "icmp" | "tcp";
+  protocol: "auto" | "icmp" | "udp" | "tcp";
   port: string;
   method: "HEAD" | "GET";
   dnsType: "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "NS";

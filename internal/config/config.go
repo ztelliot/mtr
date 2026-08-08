@@ -645,7 +645,7 @@ func defaultAgent(cfg *Agent) {
 		cfg.Mode = "grpc"
 	}
 	if cfg.HTTPAddr == "" {
-		cfg.HTTPAddr = ":9000"
+		cfg.HTTPAddr = defaultAgentHTTPAddr(cfg.Mode)
 	}
 	if cfg.Protocols == 0 {
 		cfg.Protocols = 3
@@ -654,6 +654,15 @@ func defaultAgent(cfg *Agent) {
 		cfg.Capabilities = []string{"ping", "traceroute", "mtr", "http", "dns", "port"}
 	}
 	defaultSpeedtest(&cfg.Speedtest)
+}
+
+func defaultAgentHTTPAddr(mode string) string {
+	for _, part := range strings.Split(mode, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "event") {
+			return ":8000"
+		}
+	}
+	return ":9000"
 }
 
 func defaultSpeedtest(cfg *Speedtest) {

@@ -7,7 +7,7 @@
 
 - `cmd/server`：REST API、gRPC Agent 控制平面、存储、策略、调度与限流。
 - `cmd/agent`：边缘侧 Worker。`grpc` 模式通过长连接控制面连接 Server；
-  `http` 模式暴露调用端点，便于网关转发或 FaaS 平台部署。
+  `http` 模式暴露流式调用端点；`event` 模式适配由云平台同步调用的事件函数。
 
 ## 快速开始
 
@@ -86,7 +86,7 @@ Server 也可以主动调用通过 `/v1/manage/agents` 创建的托管 HTTP Agen
 会暴露 `/invoke` 端点；HTTP 模式必须配置 `http_token`。可以设置 Agent 的
 `http_path_prefix`，把这些 HTTP 端点挂到 `/api` 或 `/v1` 之类的前缀下；托管 Agent
 的 `base_url` 也要包含同样的前缀。Server 启动时会探测一次 `/healthz`，获取版本、
-地域、服务商、能力和协议；之后只会在连接失败恢复过程中再次探测。HTTP Agent 的监听 TLS
+地域、服务商、能力、协议和网络权限诊断；之后只会在连接失败恢复过程中再次探测。HTTP Agent 的监听 TLS
 由 Agent 配置里的 `http_tls` 控制；调用侧 TLS 参数保存在托管 HTTP Agent 记录上。
 客户端 TLS 校验只检查配置的 CA 链，因此集群内访问地址不需要和证书 SAN 一致。
 
@@ -119,9 +119,131 @@ curl -N -X POST http://localhost:9000/invoke \
 响应是紧凑的换行分隔 JSON（`application/x-ndjson`）：每一行都是结构化的进度、
 跳点、指标事件或最终汇总事件。Server outbound 模式只恢复浏览器路由和回放需要的外层字段，
 例如 `job_id` 和 `agent_id`；它不会在增量事件中重复添加 `tool`、`target` 或协议等任务级字段。
-gRPC 模式在 Agent 到 Server 的路径上也使用同样的紧凑事件格式。对于阿里云 FC、腾讯云 SCF
-或华为 FunctionGraph，可将 `Dockerfile.agent` 作为自定义容器或 HTTP 函数部署，并将触发器流量路由到
-`9000` 端口的 `/invoke`；镜像中运行的仍然是统一的 `mtr-agent` 二进制。
+gRPC 模式在 Agent 到 Server 的路径上也使用同样的紧凑事件格式。
+
+### 事件函数模式
+
+当云函数平台以单次请求调用 Agent，并同步等待完整结果时，可以使用 `event` 模式。该模式只提供
+`POST /invoke`，默认监听 `:8000`，鉴权交给平台的调用接口或 IAM。它不使用 `http_token`、路径
+前缀、监听 TLS 和流式响应。
+
+`configs/agent.event.yaml` 提供了一份完整示例：
+
+```yaml
+mode: "event"
+id: "edge-event-1"
+http_addr: ":8000"
+http_path_prefix: ""
+http_tls:
+  enabled: false
+speedtest:
+  max_bytes: 0
+```
+
+发送 `action: healthz` 可以查看 Agent 信息和运行环境的网络权限：
+
+```sh
+curl -X POST http://localhost:8000/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"healthz"}'
+```
+
+任务请求沿用现有 `JobSpec` 字段；`action` 可以省略，也可以设为 `invoke` 或 `job`：
+
+```sh
+curl -X POST http://localhost:8000/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
+```
+
+任务结束后，函数会一次性返回一个 `application/json` 文档。过程事件放在 `events`，最终汇总放在
+`result`：
+
+```json
+{
+  "job_id": "job-1",
+  "events": [
+    {"type": "target_resolved", "metric": {"target_ip": "1.1.1.1", "ip_version": 4}},
+    {"type": "metric", "metric": {"seq": 1, "latency_ms": 27.1}}
+  ],
+  "result": {
+    "type": "summary",
+    "exit_code": 0,
+    "metric": {"protocol": "udp", "port": 33434, "packets_transmitted": 1, "packets_received": 1}
+  }
+}
+```
+
+`http` 和 `event` 的 `/invoke` 协议不同，因此不能在同一进程中同时启用。
+
+#### 容器镜像
+
+`Dockerfile.agent` 构建的同一个镜像支持 `grpc`、`http` 和 `event` 三种模式。镜像只包含 Agent
+二进制和 CA 证书；运行参数可以来自挂载的 YAML、`MTR_*` 环境变量，或两者组合。默认配置文件
+不是必需的。
+
+下面的命令会构建镜像，并以 event 模式在本地启动：
+
+```sh
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  -f Dockerfile.agent \
+  -t mtr-agent:latest .
+
+docker run --rm -p 8000:8000 \
+  --user 65532:65532 \
+  -e MTR_MODE=event \
+  -e MTR_HTTP_ADDR=:8000 \
+  -e MTR_ID=edge-event-1 \
+  -e MTR_COUNTRY=CN \
+  -e MTR_REGION=edge \
+  -e MTR_PROVIDER=faas \
+  mtr-agent:latest
+```
+
+部署时，需要让平台把 `POST /invoke` 转发到 8000 端口。Agent 没有实现 `/init`；如果平台强制
+要求初始化入口，需要增加一层简单适配。函数超时应大于任务的 `timeout_seconds`，并为冷启动留出
+余量。平台在容器外添加的响应封装，应由调用方或 Server 适配器处理。
+
+推送镜像时，把 `--load` 换成 `--push`，并替换成目标仓库的镜像标签。只有当仓库不接受 Buildx
+attestation manifest 时，才需要添加 `--provenance=false --sbom=false`。构建架构应与函数运行
+环境一致，通常是 `linux/amd64` 或 `linux/arm64`。
+
+#### 网络权限
+
+云函数运行时通常会指定容器 UID/GID，并限制 Linux capability。Dockerfile 无法补回已经从
+bounding set 移除的权限；强行给二进制写入 `cap_net_raw` 还可能导致程序无法启动。实际权限应以
+`healthz` 返回的 `network.cap_net_raw` 为准。
+
+没有 `NET_RAW` 时，ping 可以使用 `udp`、`tcp` 或 `auto`。ICMP traceroute/MTR 仍然需要
+`NET_RAW`，但可以改用 TCP 模式。
+
+UDP ping 会发送真实 UDP 数据报；收到 UDP 回复或 ICMP Port Unreachable 都判定为目标可达。
+默认目标端口为 `33434`，也可通过 `args.port` 指定。防火墙可能静默丢弃 UDP，因此显式 `udp`
+绝不降级；只有显式传入 `protocol: auto` 才会依次尝试 ICMP、UDP、TCP，并在第一个探测成功后将
+本次任务固定到该协议。结果 summary 始终包含实际使用的 `protocol`；auto 结果还会包含
+`requested_protocol: auto`。
+
+`healthz` 还会返回 `network.ping_group_range`，以及内核是否允许 IPv4/IPv6 无特权 ICMP Echo
+datagram socket。
+
+例如在普通 Docker 中测试 ICMP 模式时，可以让 Agent 以 root 启动，同时丢弃除 `NET_RAW` 外的
+全部 capability：
+
+```sh
+docker run --rm -p 8000:8000 \
+  --user 0:0 \
+  --cap-drop ALL \
+  --cap-add NET_RAW \
+  -e MTR_ID=edge-docker-1 \
+  -e MTR_MODE=event \
+  -e MTR_HTTP_ADDR=:8000 \
+  mtr-agent:latest
+```
+
+如果运行时强制使用非 root 用户，`--cap-add NET_RAW` 仍可能无法进入 permitted/effective 集合；
+应以 `healthz` 的结果为准。
 
 Agent 测速端点：
 
@@ -143,7 +265,9 @@ curl -X POST http://localhost:8080/v1/jobs \
   -d '{"tool":"ping","target":"1.1.1.1"}'
 ```
 
-`ping`、`traceroute` 和 `mtr` 接受 `args.protocol`，可选值为 `icmp` 或 `tcp`；
+`ping` 的 `args.protocol` 可选 `icmp`、`udp`、`tcp` 或 `auto`；默认严格使用 `icmp`，只有显式
+选择 `auto` 才允许降级。UDP 默认端口为 `33434`，TCP 默认端口为 `80`，均可通过 `args.port`
+覆盖。`traceroute` 和 `mtr` 仍只接受 `icmp` 或 `tcp`；
 `count` 和 `max_hops` 由 Server 运行时配置控制，用户不可直接指定。`dns` 替代旧的
 `nslookup` 工具名。`port` 执行原生 TCP 连接探测，并要求提供 `args.port`。默认情况下，
 Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent: true` 可将 DNS 解析和解析后 IP
@@ -476,12 +600,15 @@ Agent 镜像只需要编译后的 Agent 二进制和 CA 证书；诊断工具均
 
 ## Docker 部署加固
 
-容器运行时建议使用非 root 用户、只读根文件系统、禁用提权并显式收敛 Linux capabilities。
-Server 不需要额外 capability；Agent 的 ICMP `ping`、`traceroute`、`mtr` 需要 `NET_RAW`。
+容器运行时建议优先使用非 root 用户、只读根文件系统、禁用提权并显式收敛 Linux capabilities。
+Server 不需要额外 capability；只有 Agent 的 ICMP `ping`、`traceroute`、`mtr` 需要
+`NET_RAW`，UDP/TCP ping 不需要。
 
-示例中的 `65532:65532` 是容器内非特权 UID/GID。挂载到容器里的配置和证书文件需要对这个
-UID/GID 可读；私钥建议使用 `0640` 并让 group 为 `65532`，或使用 Docker/Compose secret。
-发布的容器镜像不内置 Server 或 Agent 运行时配置，请显式挂载这些文件。
+Server 示例使用容器内非特权 UID/GID `65532:65532`。ICMP Agent 示例使用 UID 0，但丢弃除
+`NET_RAW` 外的全部 capability；原因是 Docker 不会把单独通过 `--cap-add NET_RAW` 添加的权限
+放入非 root 进程的 permitted/effective 集合。若 Agent 只使用 UDP/TCP ping，可以改回
+`65532:65532` 并移除 `--cap-add`。挂载的配置和证书需要对实际 UID/GID 可读；私钥建议使用
+`0640` 并匹配 group，或使用 Docker/Compose secret。发布镜像不内置运行配置，请显式挂载。
 
 ```sh
 docker network create mtr-net
@@ -504,7 +631,7 @@ docker run -d --name mtr-server \
 
 docker run -d --name mtr-agent \
   --network mtr-net \
-  --user 65532:65532 \
+  --user 0:0 \
   --cap-drop ALL \
   --cap-add NET_RAW \
   --security-opt no-new-privileges:true \
