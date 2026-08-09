@@ -37,7 +37,7 @@ const ProtocolAll = ProtocolIPv4 | ProtocolIPv6
 
 // MaxFanoutTargets bounds the work and aggregate result size created by one
 // unpinned request. Callers can narrow larger fleets with agent tags.
-const MaxFanoutTargets = 16
+const MaxFanoutTargets = 1024
 
 type JobStatus string
 
