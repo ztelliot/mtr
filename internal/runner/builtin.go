@@ -641,8 +641,13 @@ func runBuiltinMTRWithTimeout(ctx context.Context, job model.Job, sink StreamSin
 	result := newBuiltinResult(job, 0)
 	if final != nil {
 		result.IPVersion = final.IPVersion
-		result.ExitCode = final.ExitCode
 		copyErrorSummary(result, final)
+		// Not reaching the target is measurement data, not an execution
+		// failure. Only propagate the trace exit code when the MTR run was
+		// interrupted by a task-level or hard probe error.
+		if terminalErr != nil {
+			result.ExitCode = final.ExitCode
+		}
 	}
 	for i := 1; i <= observedMaxHop; i++ {
 		probes := acc[i]

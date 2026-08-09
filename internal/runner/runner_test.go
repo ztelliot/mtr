@@ -421,6 +421,35 @@ func TestRunBuiltinMTRKeepsConfiguredPortAcrossCycles(t *testing.T) {
 	}
 }
 
+func TestRunBuiltinMTRTreatsCompletedProbeTimeoutsAsSuccess(t *testing.T) {
+	originalTCP := routeTCPProbe
+	t.Cleanup(func() { routeTCPProbe = originalTCP })
+	calls := 0
+	routeTCPProbe = func(context.Context, net.IP, model.IPVersion, int, int, time.Duration) (time.Duration, net.IP, bool, error) {
+		calls++
+		return 0, nil, false, &net.DNSError{Err: "probe timeout", IsTimeout: true}
+	}
+
+	result, err := runBuiltinMTR(context.Background(), model.Job{
+		Tool:      model.ToolMTR,
+		Target:    "127.0.0.1",
+		Args:      map[string]string{"count": "10", "max_hops": "1", "protocol": "tcp", "port": "80"},
+		IPVersion: model.IPv4,
+	}, nil)
+	if err != nil {
+		t.Fatalf("completed MTR returned an error: %v", err)
+	}
+	if calls != 10 || result.ExitCode != 0 || result.Summary["cycles"] != 10 {
+		t.Fatalf("completed MTR was marked failed: calls=%d result=%#v", calls, result)
+	}
+	if len(result.Hops) != 1 || !result.Hops[0].Timeout || result.Hops[0].Sent == nil || *result.Hops[0].Sent != 10 || result.Hops[0].LossPct == nil || *result.Hops[0].LossPct != 100 {
+		t.Fatalf("probe timeouts were not preserved as measurement data: %#v", result.Hops)
+	}
+	if _, ok := result.Summary["status"]; ok {
+		t.Fatalf("completed MTR exposed an execution error: %#v", result.Summary)
+	}
+}
+
 func TestRunBuiltinMTRPropagatesLaterCycleError(t *testing.T) {
 	originalTCP := routeTCPProbe
 	t.Cleanup(func() { routeTCPProbe = originalTCP })
