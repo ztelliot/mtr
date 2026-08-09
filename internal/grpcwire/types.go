@@ -7,7 +7,10 @@ import (
 	"google.golang.org/grpc"
 )
 
-const ServiceName = "mtr.AgentControl"
+const (
+	ServiceName          = "mtr.AgentControl"
+	AgentProtocolVersion = 1
+)
 
 type AgentMessage struct {
 	Type      string       `json:"type"`
@@ -20,24 +23,26 @@ type ServerMessage struct {
 	Type   string   `json:"type"`
 	Job    *JobSpec `json:"job,omitempty"`
 	Cancel *Cancel  `json:"cancel,omitempty"`
-	Error  string   `json:"error,omitempty"`
 }
 
 type AgentHello struct {
-	ID           string             `json:"id"`
-	Country      string             `json:"country,omitempty"`
-	Region       string             `json:"region"`
-	Provider     string             `json:"provider,omitempty"`
-	ISP          string             `json:"isp,omitempty"`
-	Version      string             `json:"version,omitempty"`
-	Token        string             `json:"token"`
-	Capabilities []model.Tool       `json:"capabilities"`
-	Protocols    model.ProtocolMask `json:"protocols"`
+	ProtocolVersion   int                `json:"protocol_version"`
+	ID                string             `json:"id"`
+	Country           string             `json:"country,omitempty"`
+	Region            string             `json:"region"`
+	Provider          string             `json:"provider,omitempty"`
+	ISP               string             `json:"isp,omitempty"`
+	Version           string             `json:"version,omitempty"`
+	Token             string             `json:"token"`
+	Capabilities      []model.Tool       `json:"capabilities"`
+	Protocols         model.ProtocolMask `json:"protocols"`
+	MaxConcurrentJobs int                `json:"max_concurrent_jobs"`
 }
 
 type Heartbeat struct{}
 
 type JobSpec struct {
+	ProtocolVersion       int               `json:"protocol_version"`
 	ID                    string            `json:"id"`
 	Tool                  model.Tool        `json:"tool"`
 	Target                string            `json:"target"`

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +35,7 @@ const (
 	managedAgentBodyLimit     int64 = 64 << 10
 	geoIPUpstreamBodyLimit    int64 = 64 << 10
 	geoIPUpstreamBodyLimitPad int64 = 1 << 10
+	maxConcurrentJobStreams         = 256
 )
 
 type Server struct {
@@ -49,6 +53,7 @@ type Server struct {
 	clientIP      clientIPResolver
 	metrics       http.Handler
 	accessMetrics *httpAccessMetrics
+	streamSlots   chan struct{}
 }
 
 type dispatchTarget struct {
@@ -66,8 +71,9 @@ type Options struct {
 }
 
 var (
-	errAgentNotFound = errors.New("agent not found")
-	errAgentOffline  = errors.New("agent is offline")
+	errAgentNotFound     = errors.New("agent not found")
+	errAgentOffline      = errors.New("agent is offline")
+	errFanoutTargetLimit = errors.New("fanout target limit exceeded")
 )
 
 func New(st store.Store, policies policy.Set, limiter *abuse.Limiter, hub *scheduler.Hub, geoIPURL string, log *slog.Logger, tokenConfigs ...TokenConfig) http.Handler {
@@ -98,6 +104,7 @@ func NewWithOptions(st store.Store, policies policy.Set, limiter *abuse.Limiter,
 		geoIPURL:     strings.TrimSpace(geoIPURL),
 		log:          log,
 		clientIP:     resolver,
+		streamSlots:  make(chan struct{}, maxConcurrentJobStreams),
 	}
 	if s.rootCtx == nil {
 		s.rootCtx = context.Background()
@@ -183,9 +190,6 @@ func (s *Server) auth(next http.Handler) http.Handler {
 				return
 			}
 			if token == "" {
-				token = r.URL.Query().Get("access_token")
-			}
-			if token == "" {
 				setHTTPAccessAuthentication(r.Context(), accessAuthMissing, "")
 			}
 			scope, ok := tokens[token]
@@ -253,31 +257,40 @@ func (s *Server) labelConfigsSnapshot() map[string]config.LabelConfig {
 	return cloneLabelConfigs(s.labelConfigs)
 }
 
-func (s *Server) policiesForJob(ctx context.Context, req model.CreateJobRequest) policy.Set {
+func (s *Server) policiesForJob(ctx context.Context, req model.CreateJobRequest) (policy.Set, error) {
 	if req.AgentID != "" {
 		return s.policiesForAgent(ctx, req.AgentID)
 	}
-	return s.policiesForLabels([]string{model.AgentAllLabel})
+	return s.policiesForLabels([]string{model.AgentAllLabel}), nil
 }
 
-func (s *Server) policiesForAgent(ctx context.Context, agentID string) policy.Set {
-	labels := model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, nil)
-	if agents, err := s.agentsWithManagedLabels(ctx); err == nil {
-		for _, agent := range agents {
-			if agent.ID == agentID {
-				labels = agent.Labels
-				break
-			}
+func (s *Server) policiesForAgent(ctx context.Context, agentID string) (policy.Set, error) {
+	agents, err := s.agentsWithManagedLabels(ctx)
+	if err != nil {
+		return policy.Set{}, err
+	}
+	for _, agent := range agents {
+		if agent.ID == agentID {
+			return s.policiesForLabels(agent.Labels), nil
 		}
 	}
-	if len(labels) == 3 {
-		if node, err := s.store.GetHTTPAgent(ctx, agentID); err == nil {
-			labels = model.NormalizeAgentLabels(agentID, model.AgentTransportHTTP, node.Labels)
-		} else if cfg, err := s.store.GetAgentConfig(ctx, agentID); err == nil {
-			labels = model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, cfg.Labels)
-		}
+	node, err := s.store.GetOutboundAgent(ctx, agentID)
+	if err == nil {
+		labels := model.NormalizeAgentLabels(agentID, managedOutboundTransport(node.Transport), node.Labels)
+		return s.policiesForLabels(labels), nil
 	}
-	return s.policiesForLabels(labels)
+	if !errors.Is(err, store.ErrNotFound) {
+		return policy.Set{}, err
+	}
+	cfg, err := s.store.GetAgentConfig(ctx, agentID)
+	if err == nil {
+		labels := model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, cfg.Labels)
+		return s.policiesForLabels(labels), nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return policy.Set{}, err
+	}
+	return s.policiesForLabels(model.NormalizeAgentLabels(agentID, model.AgentTransportGRPC, nil)), nil
 }
 
 func (s *Server) policiesForLabels(labels []string) policy.Set {
@@ -323,8 +336,12 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return
 	}
-	req.AgentID = strings.TrimSpace(req.AgentID)
-	req.AgentTags = normalizeAgentTags(req.AgentTags)
+	if req.AgentID != "" {
+		if err := store.ValidateAgentID(req.AgentID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if err := validateAgentTags(req.AgentTags); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -333,14 +350,18 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent_tags cannot be used with agent_id")
 		return
 	}
-	policies := s.policiesForJob(r.Context(), req)
+	policies, err := s.policiesForJob(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	req.Args = policies.ServerArgs(req.Tool, req.Args)
-	_, err := policies.Validate(req)
+	_, err = policies.Validate(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.authorizeJob(r.Context(), req); err != nil {
+	if err := s.authorizeJobWithPolicies(r.Context(), req, policies); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -354,7 +375,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if req.AgentID == "" {
 		targets, err := s.fanoutDispatchTargets(r.Context(), req, options, scope)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, errFanoutTargetLimit) {
+				status = http.StatusBadRequest
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 		if len(targets) == 0 {
@@ -459,7 +484,11 @@ func (s *Server) fanoutDispatchTargets(ctx context.Context, req model.CreateJobR
 		if !scopeAllowsAgentRecord(scope, agent) {
 			continue
 		}
-		if s.agentDisabled(ctx, agent.ID) {
+		disabled, err := s.agentDisabled(ctx, agent.ID)
+		if err != nil {
+			return nil, err
+		}
+		if disabled {
 			continue
 		}
 		agentPolicies := s.policiesForLabels(agent.Labels)
@@ -467,6 +496,9 @@ func (s *Server) fanoutDispatchTargets(ctx context.Context, req model.CreateJobR
 			continue
 		}
 		if target, ok := selectDispatchTarget(agent, req.Tool, options, true); ok {
+			if len(targets) >= model.MaxFanoutTargets {
+				return nil, fmt.Errorf("%w: narrow agent_tags to at most %d agents", errFanoutTargetLimit, model.MaxFanoutTargets)
+			}
 			target.AgentID = agent.ID
 			targets = append(targets, target)
 		}
@@ -479,25 +511,16 @@ func withAgentID(req model.CreateJobRequest, agentID string) model.CreateJobRequ
 	return req
 }
 
-func normalizeAgentTags(tags []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" {
-			continue
+func validateAgentTags(tags []string) error {
+	seen := make(map[string]struct{}, len(tags))
+	for index, tag := range tags {
+		if tag == "" || tag != strings.TrimSpace(tag) {
+			return fmt.Errorf("agent_tags[%d] must be a non-empty canonical tag", index)
 		}
-		if _, ok := seen[tag]; ok {
-			continue
+		if _, duplicate := seen[tag]; duplicate {
+			return fmt.Errorf("agent_tags contains duplicate tag %q", tag)
 		}
 		seen[tag] = struct{}{}
-		out = append(out, tag)
-	}
-	return out
-}
-
-func validateAgentTags(tags []string) error {
-	for _, tag := range tags {
 		if strings.EqualFold(tag, model.AgentAllLabel) || strings.ContainsAny(tag, ":-") {
 			return fmt.Errorf("agent_tags contains reserved tag %q: tags must not be %q or contain ':' or '-'", tag, model.AgentAllLabel)
 		}
@@ -519,7 +542,11 @@ func (s *Server) pinnedDispatchTarget(ctx context.Context, agentID string, tool 
 		if agent.ID != agentID {
 			continue
 		}
-		if s.agentDisabled(ctx, agent.ID) {
+		disabled, err := s.agentDisabled(ctx, agent.ID)
+		if err != nil {
+			return dispatchTarget{}, "", err
+		}
+		if disabled {
 			return fallback, "", errAgentOffline
 		}
 		agentPolicies := s.policiesForLabels(agent.Labels)
@@ -547,6 +574,12 @@ func agentDispatchErrorStatus(err error) int {
 }
 
 func (s *Server) dispatchOptions(ctx context.Context, req model.CreateJobRequest, policies policy.Set) ([]dispatchTarget, error) {
+	// DNS probes query the requested record name through the system resolver;
+	// they never connect to an address returned by an A/AAAA lookup. Resolving
+	// here would reject valid MX/TXT-only names and does not add SSRF protection.
+	if req.Tool == model.ToolDNS {
+		return []dispatchTarget{{IPVersion: req.IPVersion}}, nil
+	}
 	literalVersion, literal, err := policy.LiteralIPVersion(req.Tool, req.Target)
 	if err != nil {
 		return nil, err
@@ -617,8 +650,8 @@ func selectDispatchTargetWithFailure(agent model.Agent, tool model.Tool, options
 		return dispatchTarget{}, false, model.JobErrorUnsupportedTool
 	}
 	protocols := agent.Protocols
-	if protocols == 0 {
-		protocols = model.ProtocolAll
+	if protocols == 0 || protocols&^model.ProtocolAll != 0 {
+		return dispatchTarget{}, false, model.JobErrorUnsupportedProtocol
 	}
 	for _, option := range options {
 		required := policy.RequiredProtocol(option.IPVersion)
@@ -691,15 +724,32 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
+	if err := s.authorizeJobRead(r.Context(), job); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errJobReadForbidden) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) listJobEvents(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	if _, err := s.store.GetJob(r.Context(), jobID); err != nil {
+	job, err := s.store.GetJob(r.Context(), jobID)
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
 			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if err := s.authorizeJobRead(r.Context(), job); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errJobReadForbidden) {
+			status = http.StatusForbidden
 		}
 		writeError(w, status, err.Error())
 		return
@@ -721,7 +771,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	scope := principalFromContext(r.Context()).scope
 	filtered := make([]model.AgentView, 0, len(agents))
 	for _, agent := range agents {
-		if s.agentDisabled(r.Context(), agent.ID) {
+		disabled, err := s.agentDisabled(r.Context(), agent.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if disabled {
 			continue
 		}
 		if !scopeAllowsAgentRecord(scope, agent) {
@@ -753,12 +808,22 @@ func agentView(agent model.Agent, tools map[model.Tool]ToolPermission) model.Age
 	}
 }
 
-func (s *Server) agentDisabled(ctx context.Context, id string) bool {
-	if node, err := s.store.GetHTTPAgent(ctx, id); err == nil {
-		return !node.Enabled
+func (s *Server) agentDisabled(ctx context.Context, id string) (bool, error) {
+	node, err := s.store.GetOutboundAgent(ctx, id)
+	if err == nil {
+		return !node.Enabled, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return true, err
 	}
 	cfg, err := s.store.GetAgentConfig(ctx, id)
-	return err == nil && cfg.Disabled
+	if err == nil {
+		return cfg.Disabled, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return true, err
 }
 
 func (s *Server) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, error) {
@@ -774,20 +839,20 @@ func (s *Server) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, er
 	for _, cfg := range configs {
 		grpcLabels[cfg.ID] = cfg.Labels
 	}
-	httpNodes, err := s.store.ListHTTPAgents(ctx)
+	outboundNodes, err := s.store.ListOutboundAgents(ctx)
 	if err != nil {
 		return nil, err
 	}
-	httpLabels := make(map[string][]string, len(httpNodes))
-	for _, node := range httpNodes {
-		httpLabels[node.ID] = node.Labels
+	outboundLabels := make(map[string]config.OutboundAgent, len(outboundNodes))
+	for _, node := range outboundNodes {
+		outboundLabels[node.ID] = node
 	}
 	for i := range agents {
 		labels := grpcLabels[agents[i].ID]
 		transport := model.AgentTransportGRPC
-		if httpNodeLabels, ok := httpLabels[agents[i].ID]; ok {
-			labels = httpNodeLabels
-			transport = model.AgentTransportHTTP
+		if node, ok := outboundLabels[agents[i].ID]; ok {
+			labels = node.Labels
+			transport = managedOutboundTransport(node.Transport)
 		}
 		agents[i].Labels = model.NormalizeAgentLabels(agents[i].ID, transport, labels)
 	}
@@ -796,9 +861,9 @@ func (s *Server) agentsWithManagedLabels(ctx context.Context) ([]model.Agent, er
 
 type ManagedAgent struct {
 	model.Agent
-	Transport string             `json:"transport"`
-	Config    config.AgentConfig `json:"config"`
-	HTTP      *config.HTTPAgent  `json:"http,omitempty"`
+	Transport string                `json:"transport"`
+	Config    config.AgentConfig    `json:"config"`
+	Outbound  *config.OutboundAgent `json:"outbound,omitempty"`
 }
 
 type managedAgentTransportPayload struct {
@@ -815,7 +880,7 @@ func (s *Server) listManagedAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	redactManagedAgentsSecretsForReadOnly(r.Context(), out)
+	redactManagedAgentsSecrets(r.Context(), out)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -825,6 +890,10 @@ func (s *Server) getManagedAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	if err := store.ValidateAgentID(id); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	agents, err := s.managedAgents(r.Context(), "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -832,7 +901,7 @@ func (s *Server) getManagedAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, agent := range agents {
 		if agent.ID == id {
-			redactManagedAgentSecretsForReadOnly(r.Context(), &agent)
+			redactManagedAgentSecrets(r.Context(), &agent)
 			writeJSON(w, http.StatusOK, agent)
 			return
 		}
@@ -841,18 +910,18 @@ func (s *Server) getManagedAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createManagedAgent(w http.ResponseWriter, r *http.Request) {
-	if !s.requireManageWrite(w, r, "manage.http_agent.create", "") {
+	if !s.requireManageWrite(w, r, "manage.outbound_agent.create", "") {
 		return
 	}
 	raw, transport, ok := readManagedAgentBody(w, r)
 	if !ok {
 		return
 	}
-	if transport != "http" {
-		writeError(w, http.StatusBadRequest, "transport must be http")
+	if transport != config.OutboundTransportHTTP && transport != config.OutboundTransportEvent {
+		writeError(w, http.StatusBadRequest, "transport must be http or event")
 		return
 	}
-	s.writeHTTPAgent(w, r, "", raw)
+	s.writeOutboundAgent(w, r, "", raw)
 }
 
 func (s *Server) updateManagedAgent(w http.ResponseWriter, r *http.Request) {
@@ -860,8 +929,8 @@ func (s *Server) updateManagedAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.manageWriteAllowed(r.Context()) {
 		action := "manage.agent.update"
 		if transport, err := s.managedAgentTransportForID(r.Context(), id); err == nil {
-			if transport == "http" {
-				action = "manage.http_agent.update"
+			if transport == config.OutboundTransportHTTP || transport == config.OutboundTransportEvent {
+				action = "manage.outbound_agent.update"
 			} else {
 				action = "manage.grpc_agent.update"
 			}
@@ -870,29 +939,26 @@ func (s *Server) updateManagedAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "manage write access is required")
 		return
 	}
+	if err := store.ValidateAgentID(id); err != nil {
+		s.auditManage(r.Context(), "manage.agent.update", id, "deny", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	raw, transport, ok := readManagedAgentBody(w, r)
 	if !ok {
 		return
 	}
 	if transport == "" {
-		var err error
-		transport, err = s.managedAgentTransportForID(r.Context(), id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, store.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err.Error())
-			return
-		}
+		writeError(w, http.StatusBadRequest, "transport is required")
+		return
 	}
 	switch transport {
-	case "http":
-		s.writeHTTPAgent(w, r, id, raw)
+	case config.OutboundTransportHTTP, config.OutboundTransportEvent:
+		s.writeOutboundAgent(w, r, id, raw)
 	case "grpc":
 		s.updateGRPCAgentConfig(w, r, raw)
 	default:
-		writeError(w, http.StatusBadRequest, "transport must be grpc or http")
+		writeError(w, http.StatusBadRequest, "transport must be grpc, http, or event")
 	}
 }
 
@@ -918,18 +984,12 @@ func managedAgentTransport(raw []byte) (string, error) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return "", err
 	}
-	transport := strings.ToLower(strings.TrimSpace(payload.Transport))
-	switch transport {
-	case "", "grpc", "http":
-		return transport, nil
-	default:
-		return transport, nil
-	}
+	return payload.Transport, nil
 }
 
 func (s *Server) managedAgentTransportForID(ctx context.Context, id string) (string, error) {
-	if _, err := s.store.GetHTTPAgent(ctx, id); err == nil {
-		return "http", nil
+	if node, err := s.store.GetOutboundAgent(ctx, id); err == nil {
+		return node.Transport, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
@@ -954,27 +1014,57 @@ func (s *Server) managedAgentTransportForID(ctx context.Context, id string) (str
 	return "", store.ErrNotFound
 }
 
+func managedOutboundTransport(transport string) model.AgentTransport {
+	if transport == config.OutboundTransportEvent {
+		return model.AgentTransportEvent
+	}
+	return model.AgentTransportHTTP
+}
+
 func (s *Server) updateGRPCAgentConfig(w http.ResponseWriter, r *http.Request, raw []byte) {
 	if !s.manageWriteAllowed(r.Context()) {
 		s.auditManage(r.Context(), "manage.grpc_agent.update", chi.URLParam(r, "id"), "deny", "manage write access is required")
 		writeError(w, http.StatusForbidden, "manage write access is required")
 		return
 	}
-	var cfg config.AgentConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var payload struct {
+		ID        string   `json:"id,omitempty"`
+		Transport string   `json:"transport"`
+		Disabled  bool     `json:"disabled"`
+		Labels    []string `json:"labels,omitempty"`
+	}
+	if err := decodeStrictJSON(bytes.NewReader(raw), &payload); err != nil || payload.Transport != "grpc" {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	cfg.ID = chi.URLParam(r, "id")
-	if _, err := s.store.GetHTTPAgent(r.Context(), cfg.ID); err == nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("agent id %q is already used by an http agent", cfg.ID))
-		return
-	} else if !errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	id := chi.URLParam(r, "id")
+	if err := store.ValidateAgentID(id); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.store.UpsertAgentConfig(r.Context(), cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if payload.ID != "" && payload.ID != id {
+		writeError(w, http.StatusBadRequest, "agent id does not match request path")
+		return
+	}
+	cfg := config.AgentConfig{ID: id, Disabled: payload.Disabled, Labels: payload.Labels}
+	mutationStatus := http.StatusBadRequest
+	mutate := func() error {
+		if _, err := s.store.GetOutboundAgent(r.Context(), cfg.ID); err == nil {
+			return fmt.Errorf("agent id %q is already used by an outbound agent", cfg.ID)
+		} else if !errors.Is(err, store.ErrNotFound) {
+			mutationStatus = http.StatusInternalServerError
+			return err
+		}
+		return s.store.UpsertAgentConfig(r.Context(), cfg)
+	}
+	var err error
+	if s.hub != nil {
+		err = s.hub.MutateAgentRegistry(cfg.ID, mutate)
+	} else {
+		err = mutate()
+	}
+	if err != nil {
+		writeError(w, mutationStatus, err.Error())
 		return
 	}
 	saved, err := s.store.GetAgentConfig(r.Context(), cfg.ID)
@@ -995,22 +1085,28 @@ func (s *Server) updateManagedAgentLabels(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	grpcUpdates, httpUpdates, status, err := s.prepareManagedAgentLabelUpdates(r.Context(), payload.Agents)
-	if err != nil {
-		writeError(w, status, err.Error())
-		return
+	status := 0
+	mutate := func() error {
+		grpcUpdates, outboundUpdates, prepareStatus, err := s.prepareManagedAgentLabelUpdates(r.Context(), payload.Agents)
+		if err != nil {
+			status = prepareStatus
+			return err
+		}
+		settings, err := s.store.GetManagedSettings(r.Context())
+		if err != nil {
+			status = http.StatusInternalServerError
+			return err
+		}
+		_, updateErr := s.store.UpdateManagedSettingsAndAgentLabels(r.Context(), settings, grpcUpdates, outboundUpdates)
+		return updateErr
 	}
-	settings, err := s.store.GetManagedSettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if _, err := s.store.UpdateManagedSettingsAndAgentLabels(r.Context(), settings, grpcUpdates, httpUpdates); err != nil {
+	if err := s.mutateOutboundAgentState(managedAgentPatchIDs(payload.Agents), mutate); err != nil {
+		if status != 0 {
+			writeError(w, status, err.Error())
+			return
+		}
 		writeManagedSettingsError(w, err)
 		return
-	}
-	if len(httpUpdates) > 0 && s.hub != nil {
-		s.hub.ReloadHTTPAgents(s.rootCtx)
 	}
 	agents, err := s.managedAgents(r.Context(), "")
 	if err != nil {
@@ -1021,14 +1117,14 @@ func (s *Server) updateManagedAgentLabels(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, agents)
 }
 
-func (s *Server) prepareManagedAgentLabelUpdates(ctx context.Context, patches []managedAgentLabelPatch) ([]config.AgentConfig, []config.HTTPAgent, int, error) {
-	httpNodes, err := s.store.ListHTTPAgents(ctx)
+func (s *Server) prepareManagedAgentLabelUpdates(ctx context.Context, patches []managedAgentLabelPatch) ([]config.AgentConfig, []config.OutboundAgent, int, error) {
+	outboundNodes, err := s.store.ListOutboundAgents(ctx)
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
-	httpByID := make(map[string]config.HTTPAgent, len(httpNodes))
-	for _, node := range httpNodes {
-		httpByID[node.ID] = node
+	outboundByID := make(map[string]config.OutboundAgent, len(outboundNodes))
+	for _, node := range outboundNodes {
+		outboundByID[node.ID] = node
 	}
 	configs, err := s.store.ListAgentConfigs(ctx)
 	if err != nil {
@@ -1049,22 +1145,25 @@ func (s *Server) prepareManagedAgentLabelUpdates(ctx context.Context, patches []
 
 	seen := map[string]struct{}{}
 	grpcUpdates := make([]config.AgentConfig, 0, len(patches))
-	httpUpdates := make([]config.HTTPAgent, 0, len(patches))
+	outboundUpdates := make([]config.OutboundAgent, 0, len(patches))
 	for index, item := range patches {
-		id := strings.TrimSpace(item.ID)
-		if id == "" {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("agents[%d].id is required", index)
+		if err := store.ValidateAgentLabels(item.Labels); err != nil {
+			return nil, nil, http.StatusBadRequest, fmt.Errorf("agents[%d].labels: %w", index, err)
+		}
+		id := item.ID
+		if err := store.ValidateAgentID(id); err != nil {
+			return nil, nil, http.StatusBadRequest, fmt.Errorf("agents[%d].id: %w", index, err)
 		}
 		if _, ok := seen[id]; ok {
 			return nil, nil, http.StatusBadRequest, fmt.Errorf("agents[%d].id is duplicated", index)
 		}
 		seen[id] = struct{}{}
-		if node, ok := httpByID[id]; ok {
+		if node, ok := outboundByID[id]; ok {
 			if _, conflict := configByID[id]; conflict {
 				return nil, nil, http.StatusBadRequest, fmt.Errorf("agent id %q is ambiguous", id)
 			}
 			node.Labels = item.Labels
-			httpUpdates = append(httpUpdates, node)
+			outboundUpdates = append(outboundUpdates, node)
 			continue
 		}
 		cfg, hasConfig := configByID[id]
@@ -1077,18 +1176,18 @@ func (s *Server) prepareManagedAgentLabelUpdates(ctx context.Context, patches []
 		cfg.Labels = item.Labels
 		grpcUpdates = append(grpcUpdates, cfg)
 	}
-	return grpcUpdates, httpUpdates, http.StatusOK, nil
+	return grpcUpdates, outboundUpdates, http.StatusOK, nil
 }
 
-func (s *Server) ensureHTTPAgentIDAvailable(ctx context.Context, id string, allowExistingHTTP bool) (int, error) {
-	httpNodes, err := s.store.ListHTTPAgents(ctx)
+func (s *Server) ensureOutboundAgentIDAvailable(ctx context.Context, id string, allowExistingOutbound bool) (int, error) {
+	outboundNodes, err := s.store.ListOutboundAgents(ctx)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
-	for _, node := range httpNodes {
+	for _, node := range outboundNodes {
 		if node.ID == id {
-			if !allowExistingHTTP {
-				return http.StatusBadRequest, fmt.Errorf("agent id %q is already used by an http agent", id)
+			if !allowExistingOutbound {
+				return http.StatusBadRequest, fmt.Errorf("agent id %q is already used by an outbound agent", id)
 			}
 			return http.StatusOK, nil
 		}
@@ -1116,7 +1215,51 @@ func (s *Server) ensureHTTPAgentIDAvailable(ctx context.Context, id string, allo
 
 func (s *Server) deleteManagedAgent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	transport, err := s.managedAgentTransportForID(r.Context(), id)
+	if !s.requireManageWrite(w, r, "manage.agent.delete", id) {
+		return
+	}
+	if err := store.ValidateAgentID(id); err != nil {
+		s.auditManage(r.Context(), "manage.agent.delete", id, "deny", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	action := "manage.grpc_agent.delete"
+	var cleanupErr error
+	mutate := func() error {
+		transport, err := s.managedAgentTransportForID(r.Context(), id)
+		if err != nil {
+			return err
+		}
+		if transport == config.OutboundTransportHTTP || transport == config.OutboundTransportEvent {
+			action = "manage.outbound_agent.delete"
+			if err := s.store.DeleteOutboundAgent(r.Context(), id); err != nil {
+				return err
+			}
+			if err := s.store.DeleteAgent(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
+				cleanupErr = err
+			}
+			return nil
+		}
+		if err := s.store.DeleteAgent(r.Context(), id); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if err := s.store.DeleteAgentConfig(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			return nil
+		}
+		if err := s.store.DeleteAgentConfig(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	var err error
+	if s.hub != nil {
+		err = s.hub.DeleteManagedAgent(s.rootCtx, id, mutate)
+	} else {
+		err = mutate()
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
@@ -1125,51 +1268,8 @@ func (s *Server) deleteManagedAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	action := "manage.grpc_agent.delete"
-	if transport == "http" {
-		action = "manage.http_agent.delete"
-	}
-	if !s.requireManageWrite(w, r, action, id) {
-		return
-	}
-	if transport == "http" {
-		if err := s.store.DeleteHTTPAgent(r.Context(), id); err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, store.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err.Error())
-			return
-		}
-		if s.hub != nil {
-			s.hub.ReloadHTTPAgents(s.rootCtx)
-		}
-		// HTTP agents also have a runtime record in the shared agents store.
-		// Remove it with the managed configuration so it cannot be mistaken for
-		// a disconnected gRPC agent after the HTTP configuration is gone.
-		if err := s.store.DeleteAgent(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		s.auditManage(r.Context(), action, id, "allow", "")
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if err := s.store.DeleteAgent(r.Context(), id); err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, store.ErrNotFound) {
-			if cfgErr := s.store.DeleteAgentConfig(r.Context(), id); cfgErr == nil {
-				s.auditManage(r.Context(), action, id, "allow", "")
-				w.WriteHeader(http.StatusNoContent)
-				return
-			} else if errors.Is(cfgErr, store.ErrNotFound) {
-				status = http.StatusNotFound
-			} else {
-				writeError(w, status, cfgErr.Error())
-				return
-			}
-		}
-		writeError(w, status, err.Error())
+	if cleanupErr != nil {
+		writeError(w, http.StatusInternalServerError, cleanupErr.Error())
 		return
 	}
 	s.auditManage(r.Context(), action, id, "allow", "")
@@ -1185,13 +1285,13 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 	for _, cfg := range configs {
 		byID[cfg.ID] = cfg
 	}
-	httpNodes, err := s.store.ListHTTPAgents(ctx)
+	outboundNodes, err := s.store.ListOutboundAgents(ctx)
 	if err != nil {
 		return nil, err
 	}
-	httpByID := map[string]config.HTTPAgent{}
-	for _, node := range httpNodes {
-		httpByID[node.ID] = node
+	outboundByID := map[string]config.OutboundAgent{}
+	for _, node := range outboundNodes {
+		outboundByID[node.ID] = node
 	}
 	out := []ManagedAgent{}
 	if transport == "" || transport == "grpc" {
@@ -1201,7 +1301,7 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 		}
 		seen := map[string]struct{}{}
 		for _, agent := range agents {
-			if _, ok := httpByID[agent.ID]; ok {
+			if _, ok := outboundByID[agent.ID]; ok {
 				continue
 			}
 			seen[agent.ID] = struct{}{}
@@ -1211,7 +1311,7 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 			if _, ok := seen[cfg.ID]; ok {
 				continue
 			}
-			if _, ok := httpByID[cfg.ID]; ok {
+			if _, ok := outboundByID[cfg.ID]; ok {
 				continue
 			}
 			createdAt := parseManagedTime(cfg.CreatedAt)
@@ -1229,7 +1329,7 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 			})
 		}
 	}
-	if transport == "" || transport == "http" {
+	if transport == "" || transport == config.OutboundTransportHTTP || transport == config.OutboundTransportEvent {
 		agents, err := s.agentsWithManagedLabels(ctx)
 		if err != nil {
 			return nil, err
@@ -1238,7 +1338,10 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 		for _, agent := range agents {
 			agentByID[agent.ID] = agent
 		}
-		for _, node := range httpNodes {
+		for _, node := range outboundNodes {
+			if transport != "" && node.Transport != transport {
+				continue
+			}
 			createdAt := parseManagedTime(node.CreatedAt)
 			updatedAt := parseManagedTime(node.UpdatedAt)
 			agent := model.Agent{
@@ -1251,10 +1354,11 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 			if live, ok := agentByID[node.ID]; ok {
 				agent = live
 			}
-			agent.Labels = model.NormalizeAgentLabels(node.ID, model.AgentTransportHTTP, node.Labels)
+			agent.Labels = model.NormalizeAgentLabels(node.ID, managedOutboundTransport(node.Transport), node.Labels)
+			node.Auth.Secret = ""
 			out = append(out, ManagedAgent{
 				Agent:     agent,
-				Transport: "http",
+				Transport: node.Transport,
 				Config: config.AgentConfig{
 					ID:        node.ID,
 					Disabled:  !node.Enabled,
@@ -1262,30 +1366,25 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 					CreatedAt: node.CreatedAt,
 					UpdatedAt: node.UpdatedAt,
 				},
-				HTTP: &node,
+				Outbound: &node,
 			})
 		}
 	}
 	return out, nil
 }
 
-func redactManagedAgentSecretsForReadOnly(ctx context.Context, agents ...*ManagedAgent) {
-	if effectiveManageAccess(principalFromContext(ctx).scope) == ScheduleAccessWrite {
-		return
-	}
+func redactManagedAgentSecrets(ctx context.Context, agents ...*ManagedAgent) {
+	_ = ctx
 	for index := range agents {
-		if agents[index] != nil && agents[index].HTTP != nil {
-			agents[index].HTTP.HTTPToken = ""
+		if agents[index] != nil && agents[index].Outbound != nil {
+			agents[index].Outbound.Auth.Secret = ""
 		}
 	}
 }
 
-func redactManagedAgentsSecretsForReadOnly(ctx context.Context, agents []ManagedAgent) {
-	if effectiveManageAccess(principalFromContext(ctx).scope) == ScheduleAccessWrite {
-		return
-	}
+func redactManagedAgentsSecrets(ctx context.Context, agents []ManagedAgent) {
 	for index := range agents {
-		redactManagedAgentSecretsForReadOnly(ctx, &agents[index])
+		redactManagedAgentSecrets(ctx, &agents[index])
 	}
 }
 
@@ -1479,39 +1578,48 @@ func (s *Server) updateManagedLabelState(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	current, err := s.store.GetManagedSettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	var saved config.ManagedSettings
+	var runtime managedRuntime
+	status := 0
+	mutate := func() error {
+		current, err := s.store.GetManagedSettings(r.Context())
+		if err != nil {
+			status = http.StatusInternalServerError
+			return err
+		}
+		next := current
+		if payload.Revision > 0 {
+			next.Revision = payload.Revision
+		}
+		next.LabelConfigs = payload.LabelConfigs
+		if err := store.ValidateAndNormalizeManagedSettings(&next); err != nil {
+			status = http.StatusBadRequest
+			return err
+		}
+		var runtimeErr error
+		runtime, runtimeErr = buildManagedRuntime(next)
+		if runtimeErr != nil {
+			status = http.StatusBadRequest
+			return runtimeErr
+		}
+		grpcUpdates, outboundUpdates, prepareStatus, err := s.prepareManagedAgentLabelUpdates(r.Context(), payload.Agents)
+		if err != nil {
+			status = prepareStatus
+			return err
+		}
+		var updateErr error
+		saved, updateErr = s.store.UpdateManagedSettingsAndAgentLabels(r.Context(), next, grpcUpdates, outboundUpdates)
+		return updateErr
 	}
-	next := current
-	if payload.Revision > 0 {
-		next.Revision = payload.Revision
-	}
-	next.LabelConfigs = payload.LabelConfigs
-	if err := config.NormalizeManagedSettings(&next); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	runtime, err := buildManagedRuntime(next)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	grpcUpdates, httpUpdates, status, err := s.prepareManagedAgentLabelUpdates(r.Context(), payload.Agents)
-	if err != nil {
-		writeError(w, status, err.Error())
-		return
-	}
-	saved, err := s.store.UpdateManagedSettingsAndAgentLabels(r.Context(), next, grpcUpdates, httpUpdates)
-	if err != nil {
+	if err := s.mutateOutboundAgentState(managedAgentPatchIDs(payload.Agents), mutate); err != nil {
+		if status != 0 {
+			writeError(w, status, err.Error())
+			return
+		}
 		writeManagedSettingsError(w, err)
 		return
 	}
 	s.applyManagedRuntime(saved, runtime)
-	if len(httpUpdates) > 0 && s.hub != nil {
-		s.hub.ReloadHTTPAgents(s.rootCtx)
-	}
 	agents, err := s.managedAgents(r.Context(), "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1894,7 +2002,7 @@ func redactRegisterToken(token config.RegisterToken, reveal bool) config.Registe
 }
 
 func (s *Server) saveManagedSettings(ctx context.Context, settings config.ManagedSettings) (config.ManagedSettings, int, error) {
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+	if err := store.ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, http.StatusBadRequest, err
 	}
 	runtime, err := buildManagedRuntime(settings)
@@ -2052,42 +2160,122 @@ func AbuseToolLimits(in map[string]config.ToolLimitSpec) map[string]abuse.ToolLi
 	return out
 }
 
-func (s *Server) writeHTTPAgent(w http.ResponseWriter, r *http.Request, id string, raw []byte) {
-	action := "manage.http_agent.create"
+func (s *Server) writeOutboundAgent(w http.ResponseWriter, r *http.Request, id string, raw []byte) {
+	action := "manage.outbound_agent.create"
 	if id != "" {
-		action = "manage.http_agent.update"
+		action = "manage.outbound_agent.update"
 	}
 	if !s.manageWriteAllowed(r.Context()) {
 		s.auditManage(r.Context(), action, id, "deny", "manage write access is required")
 		writeError(w, http.StatusForbidden, "manage write access is required")
 		return
 	}
-	var node config.HTTPAgent
-	if err := json.Unmarshal(raw, &node); err != nil {
+	var node config.OutboundAgent
+	if err := decodeStrictJSON(bytes.NewReader(raw), &node); err != nil {
+		s.auditManage(r.Context(), action, id, "deny", "invalid json")
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if id != "" {
-		node.ID = id
+		if node.ID != id {
+			s.auditManage(r.Context(), action, id, "deny", "agent id does not match request path")
+			writeError(w, http.StatusBadRequest, "agent id does not match request path")
+			return
+		}
 	}
-	if status, err := s.ensureHTTPAgentIDAvailable(r.Context(), node.ID, id != ""); err != nil {
-		writeError(w, status, err.Error())
+	mutationStatus := http.StatusBadRequest
+	mutate := func() error {
+		if id != "" {
+			existing, err := s.store.GetOutboundAgent(r.Context(), id)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					mutationStatus = http.StatusNotFound
+				} else {
+					mutationStatus = http.StatusInternalServerError
+				}
+				return err
+			}
+			if node.Auth.Type == existing.Auth.Type && node.Auth.Type != config.OutboundAuthNone && node.Auth.Secret == "" && outboundCredentialScopeEqual(existing, node) {
+				node.Auth.Secret = existing.Auth.Secret
+			}
+		}
+		if err := store.ValidateOutboundAgent(node); err != nil {
+			mutationStatus = http.StatusBadRequest
+			return err
+		}
+		status, err := s.ensureOutboundAgentIDAvailable(r.Context(), node.ID, id != "")
+		if err != nil {
+			mutationStatus = status
+			return err
+		}
+		if node.Enabled {
+			if _, err := scheduler.NewOutboundAgentHTTPClient(scheduler.OutboundAgentTLS{
+				CAFiles: node.TLS.CAFiles, CertFile: node.TLS.CertFile,
+				KeyFile: node.TLS.KeyFile, ServerName: node.TLS.ServerName,
+			}); err != nil {
+				mutationStatus = http.StatusBadRequest
+				return errors.New("invalid outbound agent TLS configuration")
+			}
+		}
+		mutationStatus = http.StatusInternalServerError
+		return s.store.UpsertOutboundAgent(r.Context(), node)
+	}
+	if err := s.mutateOutboundAgentState([]string{node.ID}, mutate); err != nil {
+		reason := err.Error()
+		if mutationStatus >= http.StatusInternalServerError {
+			reason = "internal server error"
+		}
+		s.auditManage(r.Context(), action, node.ID, "deny", reason)
+		writeError(w, mutationStatus, reason)
 		return
 	}
-	if err := s.store.UpsertHTTPAgent(r.Context(), node); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if s.hub != nil {
-		s.hub.ReloadHTTPAgents(s.rootCtx)
-	}
-	saved, err := s.store.GetHTTPAgent(r.Context(), node.ID)
+	saved, err := s.store.GetOutboundAgent(r.Context(), node.ID)
 	if err != nil {
+		s.auditManage(r.Context(), action, node.ID, "deny", "internal server error")
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	saved.Auth.Secret = ""
 	s.auditManage(r.Context(), action, saved.ID, "allow", "")
 	writeJSON(w, http.StatusOK, saved)
+}
+
+func outboundCredentialScopeEqual(current, next config.OutboundAgent) bool {
+	return current.Transport == next.Transport &&
+		current.URL == next.URL &&
+		current.Auth.Type == next.Auth.Type &&
+		current.Auth.Header == next.Auth.Header &&
+		current.Auth.AccessKey == next.Auth.AccessKey &&
+		current.Auth.ProjectID == next.Auth.ProjectID &&
+		maps.Equal(current.Headers, next.Headers) &&
+		current.TLS.Enabled == next.TLS.Enabled &&
+		slices.Equal(current.TLS.CAFiles, next.TLS.CAFiles) &&
+		current.TLS.CertFile == next.TLS.CertFile &&
+		current.TLS.KeyFile == next.TLS.KeyFile &&
+		current.TLS.ServerName == next.TLS.ServerName
+}
+
+func (s *Server) mutateOutboundAgentState(agentIDs []string, mutate func() error) error {
+	if s.hub == nil || len(agentIDs) == 0 {
+		return mutate()
+	}
+	return s.hub.MutateOutboundAgents(s.rootCtx, agentIDs, mutate)
+}
+
+func outboundAgentIDs(nodes []config.OutboundAgent) []string {
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	return ids
+}
+
+func managedAgentPatchIDs(patches []managedAgentLabelPatch) []string {
+	ids := make([]string, 0, len(patches))
+	for _, patch := range patches {
+		ids = append(ids, patch.ID)
+	}
+	return ids
 }
 
 func (s *Server) requireManageWrite(w http.ResponseWriter, r *http.Request, action, target string) bool {
@@ -2201,15 +2389,15 @@ func parseTrustedProxy(raw string) (netip.Prefix, error) {
 }
 
 func (r clientIPResolver) Resolve(req *http.Request) string {
-	if ip, ok := r.configuredHeaderClientIP(req.Header); ok {
-		return ip.String()
-	}
 	remote, ok := requestRemoteIP(req.RemoteAddr)
 	if !ok {
 		return req.RemoteAddr
 	}
 	if !r.isTrustedProxy(remote) {
 		return remote.String()
+	}
+	if ip, ok := r.configuredHeaderClientIP(req.Header); ok {
+		return ip.String()
 	}
 	if ip, ok := r.forwardedForClientIP(req.Header.Values("X-Forwarded-For")); ok {
 		return ip.String()
@@ -2323,8 +2511,8 @@ func minRuntime(base config.Runtime, next config.Runtime) config.Runtime {
 	base.HTTPTimeoutSec = minPositive(base.HTTPTimeoutSec, next.HTTPTimeoutSec)
 	base.DNSTimeoutSec = minPositive(base.DNSTimeoutSec, next.DNSTimeoutSec)
 	base.ResolveTimeoutSec = minPositive(base.ResolveTimeoutSec, next.ResolveTimeoutSec)
-	base.HTTPInvokeAttempts = minPositive(base.HTTPInvokeAttempts, next.HTTPInvokeAttempts)
-	base.HTTPMaxHealthIntervalSec = minPositive(base.HTTPMaxHealthIntervalSec, next.HTTPMaxHealthIntervalSec)
+	base.OutboundInvokeAttempts = minPositive(base.OutboundInvokeAttempts, next.OutboundInvokeAttempts)
+	base.OutboundMaxHealthIntervalSec = minPositive(base.OutboundMaxHealthIntervalSec, next.OutboundMaxHealthIntervalSec)
 	return base
 }
 

@@ -57,6 +57,8 @@ type principalContextKey struct{}
 
 var allTokenScope = TokenScope{All: true, ScheduleAccess: ScheduleAccessWrite, ManageAccess: ScheduleAccessWrite, Agents: []string{"*"}}
 
+var errJobReadForbidden = errors.New("job read access is not allowed")
+
 func normalizeTokenScope(scope TokenScope) TokenScope {
 	if scope.All {
 		scope.ScheduleAccess = ScheduleAccessWrite
@@ -90,6 +92,14 @@ func principalFromContext(ctx context.Context) principal {
 }
 
 func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) error {
+	policies, err := s.policiesForJob(ctx, req)
+	if err != nil {
+		return err
+	}
+	return s.authorizeJobWithPolicies(ctx, req, policies)
+}
+
+func (s *Server) authorizeJobWithPolicies(ctx context.Context, req model.CreateJobRequest, policies policy.Set) error {
 	scope := principalFromContext(ctx).scope
 	if scope.All {
 		return nil
@@ -98,7 +108,6 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 	if !ok {
 		return fmt.Errorf("tool %q is not allowed", req.Tool)
 	}
-	policies := s.policiesForJob(ctx, req)
 	toolPolicy, ok := policies.Get(req.Tool)
 	if !ok {
 		return fmt.Errorf("tool %q is not allowed", req.Tool)
@@ -127,23 +136,57 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 	}
 	if toolScope.AllowedArgs != nil {
 		allowedArgs := policy.IntersectAllowedArgs(toolPolicy.AllowedArgs, toolScope.AllowedArgs)
-		for key, value := range effectiveArgs(req) {
-			pattern, ok := allowedArgs[key]
-			if !ok {
-				return fmt.Errorf("argument %q is not allowed for %s", key, req.Tool)
-			}
-			if key == "port" {
-				if err := policy.ValidatePortAllowed(pattern, value); err != nil {
-					if errors.Is(err, policy.ErrInvalidPortRangeRule) {
-						return fmt.Errorf("argument %q has invalid permission pattern", key)
-					}
-					return fmt.Errorf("argument %q is invalid", key)
-				}
-				continue
-			}
-			if pattern != "" && !policy.AllowedArgContains(pattern, value) {
-				return fmt.Errorf("argument %q is invalid", key)
-			}
+		if err := policy.ValidateAllowedArgs(req.Tool, req.Args, allowedArgs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// authorizeJobRead applies the current token's tool and Agent scope to an
+// existing job. Fanout parent events can contain results from every child, so
+// the parent is readable only when every child is readable. This deliberately
+// fails closed for malformed parents and for Agents that no longer have a
+// record whose current managed labels can be evaluated.
+func (s *Server) authorizeJobRead(ctx context.Context, job model.Job) error {
+	scope := principalFromContext(ctx).scope
+	if scope.All {
+		return nil
+	}
+	if _, ok := scope.Tools[job.Tool]; !ok {
+		return errJobReadForbidden
+	}
+
+	jobs := []model.Job{job}
+	if job.AgentID == "" {
+		children, err := s.store.ListChildJobs(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		if len(children) == 0 {
+			return errJobReadForbidden
+		}
+		jobs = children
+	}
+
+	agents, err := s.agentsWithManagedLabels(ctx)
+	if err != nil {
+		return err
+	}
+	agentsByID := make(map[string]model.Agent, len(agents))
+	for _, agent := range agents {
+		agentsByID[agent.ID] = agent
+	}
+	for _, candidate := range jobs {
+		if candidate.AgentID == "" || candidate.Tool != job.Tool {
+			return errJobReadForbidden
+		}
+		if _, ok := scope.Tools[candidate.Tool]; !ok {
+			return errJobReadForbidden
+		}
+		agent, ok := agentsByID[candidate.AgentID]
+		if !ok || !scopeAllowsAgentRecord(scope, agent) {
+			return errJobReadForbidden
 		}
 	}
 	return nil
@@ -164,7 +207,8 @@ func (s *Server) agentToolPermissions(agent model.Agent, scope TokenScope) map[m
 	if !scope.All {
 		agentScope.Tools = allowedAgentToolsScope(s.policiesForLabels([]string{model.AgentAllLabel}), scope)
 	}
-	tools := permissionsForPolicies(s.policiesForLabels(agent.Labels), agentScope)
+	compatiblePolicies := s.policiesForLabels(agent.Labels)
+	tools := permissionsForPolicies(compatiblePolicies, agentScope)
 	for tool, permission := range tools {
 		if !agentSupportsToolCapability(agent, tool) || permission.AllowedArgs == nil || len(permission.AllowedArgs) == 0 || len(permission.IPVersions) == 0 {
 			delete(tools, tool)
@@ -233,8 +277,8 @@ func agentSupportsToolCapability(agent model.Agent, tool model.Tool) bool {
 
 func permissionIPVersionsForAgent(versions []model.IPVersion, agent model.Agent) []model.IPVersion {
 	protocols := agent.Protocols
-	if protocols == 0 {
-		protocols = model.ProtocolAll
+	if protocols == 0 || protocols&^model.ProtocolAll != 0 {
+		return nil
 	}
 	out := make([]model.IPVersion, 0, len(versions))
 	for _, version := range versions {
@@ -361,35 +405,6 @@ func permissionIPVersions(toolScope ToolScope, all bool) []model.IPVersion {
 	out := append([]model.IPVersion(nil), toolScope.IPVersions...)
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
-}
-
-func effectiveArgs(req model.CreateJobRequest) map[string]string {
-	out := map[string]string{}
-	for key, value := range req.Args {
-		if isServerOwnedArg(key) {
-			continue
-		}
-		out[key] = value
-	}
-	switch req.Tool {
-	case model.ToolPing, model.ToolTraceroute, model.ToolMTR:
-		if out["protocol"] == "" {
-			out["protocol"] = "icmp"
-		}
-	case model.ToolHTTP:
-		if out["method"] == "" {
-			out["method"] = "GET"
-		}
-	case model.ToolDNS:
-		if out["type"] == "" {
-			out["type"] = "A"
-		}
-	}
-	return out
-}
-
-func isServerOwnedArg(key string) bool {
-	return key == "count" || key == "max_hops" || key == "max_hop"
 }
 
 func containsIPVersion(versions []model.IPVersion, version model.IPVersion) bool {

@@ -44,79 +44,75 @@ data:
       printf '%s\n' "[render-agent-config] $*" >&2
     }
 
-    api_server="${MTR_KUBERNETES_API_SERVER}"
+    if [ -n "${MTR_KUBERNETES_API_SERVER:-}" ]; then
+      api_server="${MTR_KUBERNETES_API_SERVER}"
+    else
+      api_host="${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST is required}"
+      api_port="${KUBERNETES_SERVICE_PORT_HTTPS:-443}"
+      case "${api_host}" in
+        *:*) api_host="[${api_host}]" ;;
+      esac
+      api_server="https://${api_host}:${api_port}"
+    fi
     token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
     ca_file="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-    get_node_annotations() {
+    get_node_annotation() {
+      key="$1"
       kubectl \
         --server="${api_server}" \
         --certificate-authority="${ca_file}" \
         --token="${token}" \
         get node "${MTR_NODE_NAME}" \
-        -o 'go-template={{range $key, $value := .metadata.annotations}}{{printf "%s=%s\n" $key $value}}{{end}}'
-    }
-
-    read_node_annotations() {
-      max_attempts="${MTR_KUBERNETES_API_RETRIES:-5}"
-      retry_delay="${MTR_KUBERNETES_API_RETRY_SECONDS:-2}"
-      attempt=1
-      err_file="/tmp/node-annotations.err"
-
-      while :; do
-        if annotations="$(get_node_annotations 2>"${err_file}")"; then
-          rm -f "${err_file}"
-          printf '%s' "${annotations}"
-          return 0
-        fi
-
-        err="$(cat "${err_file}")"
-        if [ "${attempt}" -ge "${max_attempts}" ]; then
-          log "failed to read node annotations after ${attempt} attempt(s): ${err}"
-          rm -f "${err_file}"
-          return 1
-        fi
-
-        log "failed to read node annotations on attempt ${attempt}/${max_attempts}: ${err}"
-        log "retrying in ${retry_delay}s"
-        sleep "${retry_delay}"
-        attempt=$((attempt + 1))
-      done
-    }
-
-    log_matching_annotations() {
-      log "matching node annotations:"
-      matching="$(printf '%s\n' "${node_annotations}" | grep '^mtr\.ztelliot\.dev/' || true)"
-      if [ -n "${matching}" ]; then
-        printf '%s\n' "${matching}" | while IFS= read -r line; do
-          log "  ${line}"
-        done
-      else
-        log "  no mtr.ztelliot.dev/* annotations found on node"
-      fi
+        -o "go-template={{with index .metadata.annotations \"${key}\"}}{{.}}{{end}}"
     }
 
     read_annotation() {
       key="$1"
       name="$2"
-      value=""
-      while IFS= read -r line; do
-        case "${line}" in
-          "${key}="*)
-            value="${line#*=}"
-            break
-            ;;
-        esac
-      done <<EOF_ANNOTATIONS
-    ${node_annotations}
-    EOF_ANNOTATIONS
-
-      if [ -n "${value}" ]; then
-        log "${name}: read ${key}=${value}"
-      else
-        log "${name}: annotation ${key} is not set"
+      max_attempts="${MTR_KUBERNETES_API_RETRIES:-5}"
+      retry_delay="${MTR_KUBERNETES_API_RETRY_SECONDS:-2}"
+      case "${max_attempts}" in
+        *[!0-9]*|"") log "MTR_KUBERNETES_API_RETRIES must be an integer from 1 to 100"; return 1 ;;
+      esac
+      case "${retry_delay}" in
+        *[!0-9]*|"") log "MTR_KUBERNETES_API_RETRY_SECONDS must be an integer from 0 to 60"; return 1 ;;
+      esac
+      if [ "${#max_attempts}" -gt 3 ] || [ "${max_attempts}" -lt 1 ] || [ "${max_attempts}" -gt 100 ]; then
+        log "MTR_KUBERNETES_API_RETRIES must be an integer from 1 to 100"
+        return 1
       fi
-      printf '%s' "${value}"
+      if [ "${#retry_delay}" -gt 2 ] || [ "${retry_delay}" -gt 60 ]; then
+        log "MTR_KUBERNETES_API_RETRY_SECONDS must be an integer from 0 to 60"
+        return 1
+      fi
+      attempt=1
+      err_file="/tmp/node-annotation-${name}.err"
+
+      while :; do
+        if value="$(get_node_annotation "${key}" 2>"${err_file}")"; then
+          rm -f "${err_file}"
+          if [ -n "${value}" ]; then
+            log "${name}: annotation ${key} is set"
+          else
+            log "${name}: annotation ${key} is not set"
+          fi
+          printf '%s' "${value}"
+          return 0
+        fi
+
+        err="$(cat "${err_file}")"
+        if [ "${attempt}" -ge "${max_attempts}" ]; then
+          log "failed to read ${key} after ${attempt} attempt(s): ${err}"
+          rm -f "${err_file}"
+          return 1
+        fi
+
+        log "failed to read ${key} on attempt ${attempt}/${max_attempts}: ${err}"
+        log "retrying in ${retry_delay}s"
+        sleep "${retry_delay}"
+        attempt=$((attempt + 1))
+      done
     }
 
     value_or_default() {
@@ -132,19 +128,87 @@ data:
       fi
     }
 
+    validate_metadata() {
+      name="$1"
+      value="$2"
+      if [ -z "${value}" ]; then
+        return 0
+      fi
+      if [ "$(printf '%s' "${value}" | wc -l)" -ne 0 ] || \
+         [ "${#value}" -gt 128 ] || \
+         ! printf '%s' "${value}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/+ -]*$'; then
+        log "${name}: annotation contains unsupported characters or is too long"
+        return 1
+      fi
+    }
+
+    validate_protocols() {
+      case "$1" in
+        ""|1|2|3) return 0 ;;
+        *) log "protocols: annotation must be 1, 2, or 3"; return 1 ;;
+      esac
+    }
+
+    validate_hide_first_hops() {
+      value="$1"
+      case "${value}" in
+        "") return 0 ;;
+        *[!0-9]*) log "hide_first_hops: annotation must be an integer from 0 to 255"; return 1 ;;
+      esac
+      if [ "${#value}" -gt 3 ] || [ "${value}" -gt 255 ]; then
+        log "hide_first_hops: annotation must be an integer from 0 to 255"
+        return 1
+      fi
+    }
+
+    validate_capabilities() {
+      value="$1"
+      if [ -z "${value}" ]; then
+        return 0
+      fi
+      case "${value}" in
+        ,*|*,|*,,*) log "capabilities: annotation must be a comma-separated list without empty entries"; return 1 ;;
+      esac
+      if [ "${#value}" -gt 128 ] || [ "$(printf '%s' "${value}" | wc -l)" -ne 0 ]; then
+        log "capabilities: annotation must be at most 128 characters and contain no line breaks"
+        return 1
+      fi
+      count=0
+      old_ifs="${IFS}"
+      IFS=","
+      for capability in ${value}; do
+        capability="$(printf '%s' "${capability}" | xargs)"
+        case "${capability}" in
+          ping|traceroute|mtr|http|dns|port) count=$((count + 1)) ;;
+          *) log "capabilities: unsupported capability in annotation"; return 1 ;;
+        esac
+      done
+      IFS="${old_ifs}"
+      if [ "${count}" -eq 0 ]; then
+        log "capabilities: annotation must enable at least one capability"
+        return 1
+      fi
+    }
+
     log "rendering agent config"
     log "node=${MTR_NODE_NAME}"
     log "api_server=${api_server}"
-    node_annotations="$(read_node_annotations)"
-    log_matching_annotations
 
-    country="$(read_annotation mtr.ztelliot.dev/country country || true)"
-    region="$(read_annotation mtr.ztelliot.dev/region region || true)"
-    provider="$(read_annotation mtr.ztelliot.dev/provider provider || true)"
-    isp="$(read_annotation mtr.ztelliot.dev/isp isp || true)"
-    protocols="$(read_annotation mtr.ztelliot.dev/protocols protocols || true)"
-    hide_first_hops="$(read_annotation mtr.ztelliot.dev/hide-first-hops hide_first_hops || true)"
-    capabilities="$(read_annotation mtr.ztelliot.dev/capabilities capabilities || true)"
+    country="$(read_annotation mtr.ztelliot.dev/country country)"
+    region="$(read_annotation mtr.ztelliot.dev/region region)"
+    provider="$(read_annotation mtr.ztelliot.dev/provider provider)"
+    isp="$(read_annotation mtr.ztelliot.dev/isp isp)"
+    protocols="$(read_annotation mtr.ztelliot.dev/protocols protocols)"
+    hide_first_hops="$(read_annotation mtr.ztelliot.dev/hide-first-hops hide_first_hops)"
+    capabilities="$(read_annotation mtr.ztelliot.dev/capabilities capabilities)"
+
+    validate_metadata country "${country}"
+    validate_metadata region "${region}"
+    validate_metadata provider "${provider}"
+    validate_metadata isp "${isp}"
+    validate_protocols "${protocols}"
+    validate_hide_first_hops "${hide_first_hops}"
+    validate_capabilities "${capabilities}"
 
     country="$(value_or_default country "${country}" CN)"
     region="$(value_or_default region "${region}" k8s)"
@@ -153,7 +217,7 @@ data:
     protocols="$(value_or_default protocols "${protocols}" 3)"
     hide_first_hops="$(value_or_default hide_first_hops "${hide_first_hops}" 0)"
     if [ -n "${capabilities}" ]; then
-      log "capabilities: using node annotation value ${capabilities}"
+      log "capabilities: using node annotation"
     else
       log "capabilities: node annotation missing, using fallback ping,traceroute,mtr,http,dns,port"
     fi
@@ -164,9 +228,17 @@ data:
         IFS=","
         for capability in ${capabilities}; do
           capability="$(printf '%s' "${capability}" | xargs)"
-          if [ -n "${capability}" ]; then
-            printf '  - %s\n' "${capability}"
-          fi
+          case "${capability}" in
+            ping|traceroute|mtr|http|dns|port)
+              printf '  - %s\n' "${capability}"
+              ;;
+            "")
+              ;;
+            *)
+              log "capabilities: unsupported capability in annotation"
+              return 1
+              ;;
+          esac
         done
         IFS="${old_ifs}"
       else
@@ -222,7 +294,7 @@ spec:
       serviceAccountName: mtr-agent
       automountServiceAccountToken: false
       enableServiceLinks: false
-      dnsPolicy: Default
+      dnsPolicy: ClusterFirst
       hostNetwork: false
       hostPID: false
       hostIPC: false
@@ -247,8 +319,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: MTR_KUBERNETES_API_SERVER
-              value: https://10.96.0.1:443
             - name: HOME
               value: /tmp
           securityContext:
@@ -296,11 +366,13 @@ spec:
               cpu: "1"
               memory: 512Mi
           securityContext:
+            # ICMP probes need NET_RAW in the effective set. Keep UID 0 here;
+            # the image itself defaults to an unprivileged user for UDP/TCP-only use.
             runAsNonRoot: false
             runAsUser: 0
             runAsGroup: 0
             privileged: false
-            allowPrivilegeEscalation: true
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop:
@@ -326,6 +398,7 @@ spec:
           emptyDir: {}
         - name: kube-api-access
           projected:
+            defaultMode: 0440
             sources:
               - serviceAccountToken:
                   path: token
@@ -335,13 +408,9 @@ spec:
                   items:
                     - key: ca.crt
                       path: ca.crt
-              - downwardAPI:
-                  items:
-                    - path: namespace
-                      fieldRef:
-                        fieldPath: metadata.namespace
         - name: tls
           secret:
             secretName: mtr-agent-tls
+            defaultMode: 0440
         - name: tmp
           emptyDir: {}

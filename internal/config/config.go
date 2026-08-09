@@ -1,13 +1,18 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
+	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,24 +20,20 @@ const (
 	AgentAllLabel      = "agent"
 	AgentGRPCLabel     = "agent:grpc"
 	AgentHTTPLabel     = "agent:http"
+	AgentEventLabel    = "agent:event"
 	AgentIDLabelPrefix = "id:"
 )
 
 type Server struct {
-	HTTPAddr        string   `yaml:"http_addr"`
-	GRPCAddr        string   `yaml:"grpc_addr"`
-	LogLevel        string   `yaml:"log_level"`
-	DatabaseURL     string   `yaml:"database_url"`
-	GeoIPURL        string   `yaml:"geoip_url"`
-	TrustedProxies  []string `yaml:"trusted_proxies"`
-	ClientIPHeaders []string `yaml:"client_ip_headers"`
-	TLS             TLS      `yaml:"tls"`
-}
-
-type HTTPPeer struct {
-	ID        string `yaml:"id"`
-	BaseURL   string `yaml:"base_url"`
-	HTTPToken string `yaml:"http_token"`
+	HTTPAddr                string   `yaml:"http_addr"`
+	GRPCAddr                string   `yaml:"grpc_addr"`
+	LogLevel                string   `yaml:"log_level"`
+	DatabaseURL             string   `yaml:"database_url"`
+	BootstrapAdminTokenFile string   `yaml:"bootstrap_admin_token_file"`
+	GeoIPURL                string   `yaml:"geoip_url"`
+	TrustedProxies          []string `yaml:"trusted_proxies"`
+	ClientIPHeaders         []string `yaml:"client_ip_headers"`
+	TLS                     TLS      `yaml:"tls"`
 }
 
 type Agent struct {
@@ -45,7 +46,7 @@ type Agent struct {
 	ISP            string    `yaml:"isp"`
 	ServerAddr     string    `yaml:"server_addr"`
 	RegisterToken  string    `yaml:"register_token"`
-	HTTPToken      string    `yaml:"http_token"`
+	HTTPAuth       HTTPAuth  `yaml:"http_auth"`
 	HTTPAddr       string    `yaml:"http_addr"`
 	HTTPPathPrefix string    `yaml:"http_path_prefix"`
 	Capabilities   []string  `yaml:"capabilities"`
@@ -65,11 +66,24 @@ type Speedtest struct {
 	IPBurst                 int   `yaml:"ip_burst"`
 }
 
+const (
+	HTTPAuthNone   = "none"
+	HTTPAuthBearer = "bearer"
+	HTTPAuthHeader = "header"
+)
+
+type HTTPAuth struct {
+	Type   string `yaml:"type"`
+	Header string `yaml:"header,omitempty"`
+	Secret string `yaml:"secret,omitempty"`
+}
+
 type TLS struct {
-	Enabled  bool     `yaml:"enabled"`
-	CAFiles  []string `yaml:"ca_files"`
-	CertFile string   `yaml:"cert_file"`
-	KeyFile  string   `yaml:"key_file"`
+	Enabled    bool     `yaml:"enabled" json:"enabled"`
+	CAFiles    []string `yaml:"ca_files" json:"ca_files"`
+	CertFile   string   `yaml:"cert_file" json:"cert_file"`
+	KeyFile    string   `yaml:"key_file" json:"key_file"`
+	ServerName string   `yaml:"server_name" json:"server_name"`
 }
 
 type RateLimit struct {
@@ -100,15 +114,15 @@ type ToolLimitSpec struct {
 }
 
 type Runtime struct {
-	Count                    int `yaml:"count" json:"count"`
-	MaxHops                  int `yaml:"max_hops" json:"max_hops"`
-	ProbeStepTimeoutSec      int `yaml:"probe_step_timeout_sec" json:"probe_step_timeout_sec"`
-	MaxToolTimeoutSec        int `yaml:"max_tool_timeout_sec" json:"max_tool_timeout_sec"`
-	HTTPTimeoutSec           int `yaml:"http_timeout_sec" json:"http_timeout_sec"`
-	DNSTimeoutSec            int `yaml:"dns_timeout_sec" json:"dns_timeout_sec"`
-	ResolveTimeoutSec        int `yaml:"resolve_timeout_sec" json:"resolve_timeout_sec"`
-	HTTPInvokeAttempts       int `yaml:"http_invoke_attempts" json:"http_invoke_attempts"`
-	HTTPMaxHealthIntervalSec int `yaml:"http_max_health_interval_sec" json:"http_max_health_interval_sec"`
+	Count                        int `yaml:"count" json:"count"`
+	MaxHops                      int `yaml:"max_hops" json:"max_hops"`
+	ProbeStepTimeoutSec          int `yaml:"probe_step_timeout_sec" json:"probe_step_timeout_sec"`
+	MaxToolTimeoutSec            int `yaml:"max_tool_timeout_sec" json:"max_tool_timeout_sec"`
+	HTTPTimeoutSec               int `yaml:"http_timeout_sec" json:"http_timeout_sec"`
+	DNSTimeoutSec                int `yaml:"dns_timeout_sec" json:"dns_timeout_sec"`
+	ResolveTimeoutSec            int `yaml:"resolve_timeout_sec" json:"resolve_timeout_sec"`
+	OutboundInvokeAttempts       int `yaml:"outbound_invoke_attempts" json:"outbound_invoke_attempts"`
+	OutboundMaxHealthIntervalSec int `yaml:"outbound_max_health_interval_sec" json:"outbound_max_health_interval_sec"`
 }
 
 type Scheduler struct {
@@ -167,15 +181,39 @@ type LabelConfig struct {
 	ToolPolicies map[string]Policy `yaml:"tool_policies,omitempty" json:"tool_policies,omitempty"`
 }
 
-type HTTPAgent struct {
-	ID        string   `json:"id" yaml:"id"`
-	Enabled   bool     `json:"enabled" yaml:"enabled"`
-	BaseURL   string   `json:"base_url" yaml:"base_url"`
-	HTTPToken string   `json:"http_token,omitempty" yaml:"http_token"`
-	Labels    []string `json:"labels,omitempty" yaml:"labels"`
-	TLS       TLS      `json:"tls" yaml:"tls"`
-	CreatedAt string   `json:"created_at,omitempty" yaml:"-"`
-	UpdatedAt string   `json:"updated_at,omitempty" yaml:"-"`
+const (
+	OutboundTransportHTTP  = "http"
+	OutboundTransportEvent = "event"
+
+	OutboundAuthNone            = "none"
+	OutboundAuthBearer          = "bearer"
+	OutboundAuthHeader          = "header"
+	OutboundAuthHuaweiCloudAKSK = "huaweicloud_aksk"
+
+	EventResponseDirect      = "direct"
+	EventResponseResultField = "result_field"
+)
+
+type OutboundAgentAuth struct {
+	Type      string `json:"type" yaml:"type"`
+	Header    string `json:"header,omitempty" yaml:"header,omitempty"`
+	AccessKey string `json:"access_key,omitempty" yaml:"access_key,omitempty"`
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty"`
+	Secret    string `json:"secret,omitempty" yaml:"secret,omitempty"`
+}
+
+type OutboundAgent struct {
+	ID            string            `json:"id" yaml:"id"`
+	Transport     string            `json:"transport" yaml:"transport"`
+	Enabled       bool              `json:"enabled" yaml:"enabled"`
+	URL           string            `json:"url" yaml:"url"`
+	Headers       map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Auth          OutboundAgentAuth `json:"auth" yaml:"auth"`
+	EventResponse string            `json:"event_response,omitempty" yaml:"event_response,omitempty"`
+	Labels        []string          `json:"labels,omitempty" yaml:"labels"`
+	TLS           TLS               `json:"tls" yaml:"tls"`
+	CreatedAt     string            `json:"created_at,omitempty" yaml:"-"`
+	UpdatedAt     string            `json:"updated_at,omitempty" yaml:"-"`
 }
 
 type AgentConfig struct {
@@ -207,6 +245,9 @@ func NormalizeManagedSettings(settings *ManagedSettings) error {
 	DefaultRateLimit(&settings.RateLimit)
 	settings.LabelConfigs = NormalizeLabelConfigs(settings.LabelConfigs)
 	EnsureAgentLabelConfig(settings)
+	if err := validateManagedRuntimeBounds(settings.LabelConfigs); err != nil {
+		return err
+	}
 	if err := NormalizeAPITokenPermissions(settings.APITokens); err != nil {
 		return err
 	}
@@ -216,6 +257,48 @@ func NormalizeManagedSettings(settings *ManagedSettings) error {
 		return err
 	}
 	ClearManagedSettingsRotateFlags(settings)
+	return nil
+}
+
+func validateManagedRuntimeBounds(configs map[string]LabelConfig) error {
+	for label, cfg := range configs {
+		if cfg.Runtime != nil {
+			checks := []struct {
+				name                    string
+				value, minimum, maximum int
+			}{
+				{name: "count", value: cfg.Runtime.Count, minimum: 1, maximum: 10},
+				{name: "max_hops", value: cfg.Runtime.MaxHops, minimum: 1, maximum: 30},
+				{name: "probe_step_timeout_sec", value: cfg.Runtime.ProbeStepTimeoutSec, minimum: 1, maximum: 1},
+				{name: "max_tool_timeout_sec", value: cfg.Runtime.MaxToolTimeoutSec, minimum: 1, maximum: 300},
+				{name: "http_timeout_sec", value: cfg.Runtime.HTTPTimeoutSec, minimum: 1, maximum: 5},
+				{name: "dns_timeout_sec", value: cfg.Runtime.DNSTimeoutSec, minimum: 1, maximum: 5},
+				{name: "resolve_timeout_sec", value: cfg.Runtime.ResolveTimeoutSec, minimum: 1, maximum: 3},
+				{name: "outbound_invoke_attempts", value: cfg.Runtime.OutboundInvokeAttempts, minimum: 1, maximum: 3},
+				{name: "outbound_max_health_interval_sec", value: cfg.Runtime.OutboundMaxHealthIntervalSec, minimum: 1, maximum: 300},
+			}
+			for _, check := range checks {
+				if check.value < check.minimum || check.value > check.maximum {
+					return fmt.Errorf("label_configs[%q].runtime.%s must be between %d and %d", label, check.name, check.minimum, check.maximum)
+				}
+			}
+		}
+		if cfg.Scheduler != nil {
+			checks := []struct {
+				name                    string
+				value, minimum, maximum int
+			}{
+				{name: "agent_offline_after_sec", value: cfg.Scheduler.AgentOfflineAfterSec, minimum: 1, maximum: 90},
+				{name: "max_inflight_per_agent", value: cfg.Scheduler.MaxInflightPerAgent, minimum: 1, maximum: 4},
+				{name: "poll_interval_sec", value: cfg.Scheduler.PollIntervalSec, minimum: 1, maximum: 2},
+			}
+			for _, check := range checks {
+				if check.value < check.minimum || check.value > check.maximum {
+					return fmt.Errorf("label_configs[%q].scheduler.%s must be between %d and %d", label, check.name, check.minimum, check.maximum)
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -231,15 +314,20 @@ func ClearManagedSettingsRotateFlags(settings *ManagedSettings) {
 func DefaultManagedSettings() ManagedSettings {
 	settings := ManagedSettings{}
 	_ = NormalizeManagedSettings(&settings)
-	settings.APITokens = []APITokenPermission{DefaultAdminAPIToken()}
+	return settings
+}
+
+func ManagedSettingsWithAdminToken(secret string) ManagedSettings {
+	settings := DefaultManagedSettings()
+	settings.APITokens = []APITokenPermission{DefaultAdminAPIToken(secret)}
 	_ = NormalizeManagedSettings(&settings)
 	return settings
 }
 
-func DefaultAdminAPIToken() APITokenPermission {
+func DefaultAdminAPIToken(secret string) APITokenPermission {
 	return APITokenPermission{
 		Name:           "admin",
-		Secret:         uuid.NewString(),
+		Secret:         secret,
 		All:            true,
 		ScheduleAccess: "write",
 		ManageAccess:   "write",
@@ -488,7 +576,11 @@ func NormalizeRegisterTokens(tokens []RegisterToken) ([]RegisterToken, error) {
 		}
 		seenIDs[item.ID] = struct{}{}
 		item.Name = strings.TrimSpace(item.Name)
-		item.AllowedAgentIDs = normalizeRegisterTokenAgentIDs(item.AllowedAgentIDs)
+		var err error
+		item.AllowedAgentIDs, err = validateRegisterTokenAgentIDs(i, item.AllowedAgentIDs)
+		if err != nil {
+			return nil, err
+		}
 		if item.RemainingUses < 0 {
 			return nil, fmt.Errorf("register_tokens[%d].remaining_uses must be non-negative", i)
 		}
@@ -505,24 +597,50 @@ func NormalizeRegisterTokens(tokens []RegisterToken) ([]RegisterToken, error) {
 	return out, nil
 }
 
-func normalizeRegisterTokenAgentIDs(values []string) []string {
+func validateRegisterTokenAgentIDs(tokenIndex int, values []string) ([]string, error) {
 	if values == nil {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
+	for valueIndex, value := range values {
+		if err := ValidateAgentID(value); err != nil {
+			return nil, fmt.Errorf("register_tokens[%d].allowed_agent_ids[%d]: %w", tokenIndex, valueIndex, err)
 		}
 		if _, ok := seen[value]; ok {
-			continue
+			return nil, fmt.Errorf("register_tokens[%d].allowed_agent_ids contains duplicate agent id %q", tokenIndex, value)
 		}
 		seen[value] = struct{}{}
 		out = append(out, value)
 	}
-	return out
+	return out, nil
+}
+
+// ValidateAgentID enforces the canonical identifier shared by configuration,
+// persistence, and the Agent wire protocol.
+func ValidateAgentID(id string) error {
+	if id == "" {
+		return fmt.Errorf("agent id is required")
+	}
+	if len(id) > 128 {
+		return fmt.Errorf("agent id exceeds 128 bytes")
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("agent id %q is reserved", id)
+	}
+	if !isASCIIAlphaNumeric(id[0]) {
+		return fmt.Errorf("agent id must start with an ASCII letter or digit")
+	}
+	for i := 1; i < len(id); i++ {
+		if !isASCIIAlphaNumeric(id[i]) && id[i] != '.' && id[i] != '_' && id[i] != '-' {
+			return fmt.Errorf("agent id may only contain ASCII letters, digits, '.', '_', or '-'")
+		}
+	}
+	return nil
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
 func DefaultRuntime() Runtime {
@@ -553,11 +671,11 @@ func DefaultRuntimeValues(cfg *Runtime) {
 	if cfg.ResolveTimeoutSec == 0 {
 		cfg.ResolveTimeoutSec = 3
 	}
-	if cfg.HTTPInvokeAttempts == 0 {
-		cfg.HTTPInvokeAttempts = 3
+	if cfg.OutboundInvokeAttempts == 0 {
+		cfg.OutboundInvokeAttempts = 3
 	}
-	if cfg.HTTPMaxHealthIntervalSec == 0 {
-		cfg.HTTPMaxHealthIntervalSec = 300
+	if cfg.OutboundMaxHealthIntervalSec == 0 {
+		cfg.OutboundMaxHealthIntervalSec = 300
 	}
 }
 
@@ -616,11 +734,153 @@ func LoadAgent(path string) (Agent, error) {
 	}
 	defaultAgent(&cfg)
 	var err error
+	cfg.HTTPAuth, err = NormalizeAgentHTTPAuth(cfg.Mode, cfg.HTTPAuth)
+	if err != nil {
+		return cfg, fmt.Errorf("http_auth: %w", err)
+	}
+	if err := ValidateAgentID(cfg.ID); err != nil {
+		return cfg, fmt.Errorf("id: %w", err)
+	}
+	cfg.Capabilities, err = normalizeAgentCapabilities(cfg.Capabilities)
+	if err != nil {
+		return cfg, err
+	}
+	if len(cfg.Capabilities) == 0 {
+		return cfg, fmt.Errorf("capabilities must contain at least one tool")
+	}
+	if cfg.Protocols == 0 {
+		return cfg, fmt.Errorf("protocols must explicitly enable IPv4, IPv6, or both")
+	}
+	if unsupported := cfg.Protocols &^ uint8(3); unsupported != 0 {
+		return cfg, fmt.Errorf("protocols contains unsupported bits: 0x%x", unsupported)
+	}
 	cfg.HTTPPathPrefix, err = NormalizePathPrefix(cfg.HTTPPathPrefix)
 	if err != nil {
 		return cfg, fmt.Errorf("http_path_prefix: %w", err)
 	}
 	return cfg, nil
+}
+
+func NormalizeAgentHTTPAuth(mode string, auth HTTPAuth) (HTTPAuth, error) {
+	var hasHTTP, hasEvent bool
+	for _, part := range strings.Split(mode, ",") {
+		switch part {
+		case "http":
+			hasHTTP = true
+		case "event":
+			hasEvent = true
+		}
+	}
+	if auth.Type != strings.TrimSpace(auth.Type) {
+		return auth, fmt.Errorf("type must not have surrounding whitespace")
+	}
+	if auth.Header != strings.TrimSpace(auth.Header) {
+		return auth, fmt.Errorf("header must not have surrounding whitespace")
+	}
+	if auth.Secret != strings.TrimSpace(auth.Secret) {
+		return auth, fmt.Errorf("secret must not have surrounding whitespace")
+	}
+	if auth.Type == "" {
+		if auth.Header != "" || auth.Secret != "" {
+			return auth, fmt.Errorf("type is required when header or secret is configured")
+		}
+		if hasHTTP || hasEvent {
+			return auth, fmt.Errorf("type must be explicitly configured for http or event mode")
+		}
+		return auth, nil
+	}
+
+	switch auth.Type {
+	case HTTPAuthNone:
+		if auth.Header != "" || auth.Secret != "" {
+			return auth, fmt.Errorf("none auth must not include header or secret")
+		}
+	case HTTPAuthBearer:
+		if auth.Header != "" {
+			return auth, fmt.Errorf("bearer auth must not include header")
+		}
+		if auth.Secret == "" {
+			return auth, fmt.Errorf("bearer auth secret is required")
+		}
+		if !httpguts.ValidHeaderFieldValue(auth.Secret) {
+			return auth, fmt.Errorf("bearer auth secret is not a valid header value")
+		}
+	case HTTPAuthHeader:
+		if auth.Header == "" || !httpguts.ValidHeaderFieldName(auth.Header) {
+			return auth, fmt.Errorf("header auth header is invalid")
+		}
+		auth.Header = http.CanonicalHeaderKey(auth.Header)
+		if ReservedHTTPAuthHeader(auth.Header) {
+			return auth, fmt.Errorf("header auth header %q is reserved", auth.Header)
+		}
+		if auth.Secret == "" {
+			return auth, fmt.Errorf("header auth secret is required")
+		}
+		if !httpguts.ValidHeaderFieldValue(auth.Secret) {
+			return auth, fmt.Errorf("header auth secret is not a valid header value")
+		}
+	default:
+		return auth, fmt.Errorf("type must be none, bearer, or header")
+	}
+
+	if hasHTTP && auth.Type != HTTPAuthBearer && auth.Type != HTTPAuthHeader {
+		return auth, fmt.Errorf("mode containing http requires bearer or header auth")
+	}
+	if !hasHTTP && !hasEvent {
+		return auth, fmt.Errorf("grpc-only mode requires http_auth to be omitted")
+	}
+	return auth, nil
+}
+
+func ReservedHTTPAuthHeader(header string) bool {
+	header = strings.ToLower(header)
+	if header == "x-forwarded" || strings.HasPrefix(header, "x-forwarded-") {
+		return true
+	}
+	switch header {
+	case "accept", "authorization", "connection", "content-length", "content-type", "host", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+		"forwarded", "x-real-ip", "via", "true-client-ip", "cf-connecting-ip", "x-client-ip", "x-envoy-external-address",
+		"x-sdk-date", "x-sdk-content-sha256", "x-project-id", "x-security-token":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidHuaweiCloudAccessKey reports whether an access key can be embedded in
+// the unquoted Access component of an SDK-HMAC-SHA256 Authorization header.
+func ValidHuaweiCloudAccessKey(accessKey string) bool {
+	return accessKey != "" &&
+		httpguts.ValidHeaderFieldValue(accessKey) &&
+		!strings.ContainsRune(accessKey, ',') &&
+		strings.IndexFunc(accessKey, unicode.IsSpace) < 0
+}
+
+func normalizeAgentCapabilities(capabilities []string) ([]string, error) {
+	known := map[string]struct{}{
+		"ping":       {},
+		"traceroute": {},
+		"mtr":        {},
+		"http":       {},
+		"dns":        {},
+		"port":       {},
+	}
+	out := make([]string, 0, len(capabilities))
+	seen := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		if capability == "" || capability != strings.TrimSpace(capability) {
+			return nil, fmt.Errorf("agent capability %q is not canonical", capability)
+		}
+		if _, ok := known[capability]; !ok {
+			return nil, fmt.Errorf("unknown agent capability %q", capability)
+		}
+		if _, ok := seen[capability]; ok {
+			return nil, fmt.Errorf("agent capability %q is duplicated", capability)
+		}
+		seen[capability] = struct{}{}
+		out = append(out, capability)
+	}
+	return out, nil
 }
 
 func NormalizePathPrefix(raw string) (string, error) {
@@ -646,12 +906,6 @@ func defaultAgent(cfg *Agent) {
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = defaultAgentHTTPAddr(cfg.Mode)
-	}
-	if cfg.Protocols == 0 {
-		cfg.Protocols = 3
-	}
-	if len(cfg.Capabilities) == 0 {
-		cfg.Capabilities = []string{"ping", "traceroute", "mtr", "http", "dns", "port"}
 	}
 	defaultSpeedtest(&cfg.Speedtest)
 }
@@ -694,7 +948,38 @@ func applyEnv(out any) error {
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("config env target must be pointer to struct")
 	}
+	allowed := make(map[string]struct{})
+	collectEnvNames(v.Elem().Type(), nil, allowed)
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		if !strings.HasPrefix(name, "MTR_") {
+			continue
+		}
+		if _, ok := allowed[name]; !ok {
+			return fmt.Errorf("unknown config environment variable %s", name)
+		}
+	}
 	return applyEnvValue(v.Elem(), nil)
+}
+
+func collectEnvNames(t reflect.Type, path []string, out map[string]struct{}) {
+	if len(path) > 0 {
+		out[envName(path)] = struct{}{}
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		name := yamlFieldName(field)
+		if name == "" || name == "-" {
+			continue
+		}
+		collectEnvNames(field.Type, append(path, name), out)
+	}
 }
 
 func applyEnvValue(v reflect.Value, path []string) error {
@@ -772,7 +1057,16 @@ func setEnvValue(v reflect.Value, raw string) error {
 
 func unmarshalEnvYAML(v reflect.Value, raw string) error {
 	holder := reflect.New(v.Type())
-	if err := yaml.Unmarshal([]byte(raw), holder.Interface()); err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(holder.Interface()); err != nil {
+		return err
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("environment config must contain exactly one document")
+		}
 		return err
 	}
 	v.Set(holder.Elem())
@@ -827,15 +1121,31 @@ func loadYAML(path string, out any) error {
 	if err := yaml.Unmarshal(b, &root); err != nil {
 		return err
 	}
+	document := yamlDocumentValue(&root)
+	if document == nil || document.Kind == 0 || document.Kind == yaml.ScalarNode && (document.Tag == "!!null" || strings.TrimSpace(document.Value) == "") {
+		return nil
+	}
+	if document.Kind != yaml.MappingNode {
+		return fmt.Errorf("config yaml document must be a mapping")
+	}
 	v := reflect.ValueOf(out)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("config yaml target must be pointer to struct")
 	}
 	fileValue := reflect.New(v.Elem().Type())
-	if err := yaml.Unmarshal(b, fileValue.Interface()); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(b))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(fileValue.Interface()); err != nil {
 		return err
 	}
-	mergeYAMLValue(v.Elem(), fileValue.Elem(), yamlDocumentValue(&root))
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("config yaml must contain exactly one document")
+		}
+		return err
+	}
+	mergeYAMLValue(v.Elem(), fileValue.Elem(), document)
 	return nil
 }
 

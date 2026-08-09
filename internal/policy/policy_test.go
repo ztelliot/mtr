@@ -3,12 +3,54 @@ package policy
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 )
+
+func TestPublicNetworkAddressAllowedRejectsIPv6SpecialUseAndEmbeddedPrivateIPv4(t *testing.T) {
+	blocked := []string{
+		"100::1", "2001::1", "2001:2::1", "2001:db8::1", "2002:0a00:0001::1",
+		"64:ff9b::a00:1", "64:ff9b:1:0:a00:1::",
+	}
+	for _, raw := range blocked {
+		if PublicNetworkAddressAllowed(netip.MustParseAddr(raw)) {
+			t.Fatalf("special-use address %s was allowed", raw)
+		}
+	}
+	for _, raw := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		if !PublicNetworkAddressAllowed(netip.MustParseAddr(raw)) {
+			t.Fatalf("public address %s was blocked", raw)
+		}
+	}
+}
+
+func TestManagedAgentEndpointAddressAllowed(t *testing.T) {
+	if ManagedAgentEndpointAddressAllowed(netip.Addr{}) {
+		t.Fatal("invalid managed Agent endpoint address was allowed")
+	}
+	for _, raw := range []string{
+		"10.0.0.1", "172.16.0.1", "192.168.1.1", "fd12:3456:789a::1",
+		"1.1.1.1", "2606:4700:4700::1111", "64:ff9b::a00:1",
+	} {
+		if !ManagedAgentEndpointAddressAllowed(netip.MustParseAddr(raw)) {
+			t.Fatalf("managed Agent endpoint address %s was blocked", raw)
+		}
+	}
+	for _, raw := range []string{
+		"0.0.0.0", "127.0.0.1", "169.254.169.254", "224.0.0.1",
+		"::", "::1", "fe80::1", "ff02::1", "100.100.100.200", "fd00:ec2::254", "fd00:ec2::254%eth0",
+		"::ffff:127.0.0.1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::6464:64c8",
+		"2002:7f00:0001::1",
+	} {
+		if ManagedAgentEndpointAddressAllowed(netip.MustParseAddr(raw)) {
+			t.Fatalf("forbidden managed Agent endpoint address %s was allowed", raw)
+		}
+	}
+}
 
 func TestValidateRejectsShellCharacters(t *testing.T) {
 	_, err := DefaultPolicies().Validate(model.CreateJobRequest{Tool: model.ToolPing, Target: "1.1.1.1;rm -rf /"})
@@ -40,6 +82,25 @@ func TestValidateResolvedTargetRejectsPrivateAndMulticast(t *testing.T) {
 func TestValidateResolvedTargetAllowsPublicIP(t *testing.T) {
 	if err := ValidateResolvedTarget(context.Background(), model.ToolPing, "1.1.1.1", model.IPAny); err != nil {
 		t.Fatalf("expected public IP to be allowed: %v", err)
+	}
+}
+
+func TestValidateResolvedTargetRejectsPrivateIPv4EmbeddedInNAT64(t *testing.T) {
+	for _, target := range []string{
+		"64:ff9b::c0a8:101",
+		"64:ff9b:1:c0a8:1:100::",
+	} {
+		if err := ValidateResolvedTarget(context.Background(), model.ToolPing, target, model.IPAny); err == nil {
+			t.Fatalf("expected NAT64 target %s embedding a private IPv4 address to be blocked", target)
+		}
+	}
+	for _, target := range []string{
+		"64:ff9b::101:101",
+		"64:ff9b:1:101:1:100::",
+	} {
+		if err := ValidateResolvedTarget(context.Background(), model.ToolPing, target, model.IPAny); err != nil {
+			t.Fatalf("expected NAT64 target %s embedding a public IPv4 address to be allowed: %v", target, err)
+		}
 	}
 }
 
@@ -146,6 +207,16 @@ func TestValidatePortRangeRule(t *testing.T) {
 	if err := ValidatePortRangeRule("3000-1"); err == nil {
 		t.Fatal("expected reversed range to be rejected")
 	}
+	for _, rule := range []string{"", "80,,443", "80,", ",80", "+80", "080", "80-080", "80 -443"} {
+		if err := ValidatePortRangeRule(rule); err == nil {
+			t.Fatalf("expected non-canonical port rule %q to be rejected", rule)
+		}
+	}
+	for _, value := range []string{"+80", "080", " 80", "80 "} {
+		if err := ValidatePortAllowed("1-65535", value); err == nil {
+			t.Fatalf("expected non-canonical port value %q to be rejected", value)
+		}
+	}
 }
 
 func TestPolicyIntersectionsUseMostRestrictiveArgs(t *testing.T) {
@@ -158,6 +229,32 @@ func TestPolicyIntersectionsUseMostRestrictiveArgs(t *testing.T) {
 	}
 	if args["port"] != "1000-3000,6000-7000" {
 		t.Fatalf("port intersection = %q", args["port"])
+	}
+}
+
+func TestPolicyIntersectionDoesNotInferMissingHTTPVersion(t *testing.T) {
+	args := IntersectAllowedArgs(
+		map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2,1.1"},
+		map[string]string{"method": "HEAD"},
+	)
+	if args["method"] != "HEAD" {
+		t.Fatalf("HTTP method intersection = %#v, want HEAD", args)
+	}
+	if _, ok := args["http_version"]; ok {
+		t.Fatalf("missing HTTP version must remain unauthorized: %#v", args)
+	}
+}
+
+func TestCurrentPoliciesSupportAllAdvertisedProtocols(t *testing.T) {
+	compatible := DefaultPolicies()
+	for _, request := range []model.CreateJobRequest{
+		{Tool: model.ToolTraceroute, Target: "1.1.1.1", AgentID: "new", Args: map[string]string{"protocol": "udp"}},
+		{Tool: model.ToolMTR, Target: "1.1.1.1", AgentID: "new", Args: map[string]string{"protocol": "auto"}},
+		{Tool: model.ToolHTTP, Target: "https://example.com", AgentID: "new", Args: map[string]string{"http_version": "auto"}},
+	} {
+		if _, err := compatible.Validate(request); err != nil {
+			t.Fatalf("negotiated request %#v rejected: %v", request, err)
+		}
 	}
 }
 
@@ -207,6 +304,19 @@ func TestTimeoutForJobUsesServerPresetFormula(t *testing.T) {
 	}
 }
 
+func TestTimeoutForJobWithRuntimeDoesNotOverflow(t *testing.T) {
+	maximumInt := int(^uint(0) >> 1)
+	runtime := config.Runtime{
+		Count:               maximumInt,
+		MaxHops:             maximumInt,
+		ProbeStepTimeoutSec: maximumInt,
+		MaxToolTimeoutSec:   maximumInt,
+	}
+	if got := TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime); got <= 0 {
+		t.Fatalf("overflow produced invalid timeout: %v", got)
+	}
+}
+
 func TestServerArgsOwnsCountAndMaxHops(t *testing.T) {
 	args := ServerArgs(model.ToolMTR, map[string]string{
 		"count":    "99",
@@ -248,21 +358,135 @@ func TestRuntimeConfigControlsServerOwnedArgsAndTimeouts(t *testing.T) {
 	}
 }
 
-func TestPingAllowsUDPAndAutoProtocols(t *testing.T) {
-	for _, protocol := range []string{"udp", "auto"} {
-		if _, err := DefaultPolicies().Validate(model.CreateJobRequest{
-			Tool:   model.ToolPing,
-			Target: "1.1.1.1",
-			Args:   map[string]string{"protocol": protocol},
-		}); err != nil {
-			t.Fatalf("expected ping protocol %q to be allowed: %v", protocol, err)
+func TestNetworkToolsAllowUDPAndAutoProtocols(t *testing.T) {
+	for _, tool := range []model.Tool{model.ToolPing, model.ToolTraceroute, model.ToolMTR} {
+		for _, protocol := range []string{"udp", "auto"} {
+			request := model.CreateJobRequest{
+				Tool:   tool,
+				Target: "1.1.1.1",
+				Args:   map[string]string{"protocol": protocol},
+			}
+			if tool == model.ToolTraceroute || tool == model.ToolMTR {
+				request.AgentID = "edge-1"
+			}
+			if _, err := DefaultPolicies().Validate(request); err != nil {
+				t.Fatalf("expected %s protocol %q to be allowed: %v", tool, protocol, err)
+			}
 		}
 	}
-	if _, err := DefaultPolicies().Validate(model.CreateJobRequest{
-		Tool:   model.ToolTraceroute,
+}
+
+func TestNetworkProtocolDefaultsAndAutoAreValidatedAgainstPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		protocol    string
+		allowedPort string
+		wantErr     bool
+	}{
+		{name: "tcp default allowed", protocol: "tcp", allowedPort: DefaultTCPProbePort},
+		{name: "tcp default denied", protocol: "tcp", allowedPort: "443", wantErr: true},
+		{name: "udp default allowed", protocol: "udp", allowedPort: DefaultUDPProbePort},
+		{name: "udp default denied", protocol: "udp", allowedPort: "53", wantErr: true},
+		{name: "auto requires both defaults", protocol: "auto", allowedPort: DefaultUDPProbePort, wantErr: true},
+		{name: "auto defaults allowed", protocol: "auto", allowedPort: DefaultTCPProbePort + "," + DefaultUDPProbePort},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policies := FromConfig(map[string]config.Policy{
+				string(model.ToolPing): {
+					Enabled:     true,
+					AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": tt.allowedPort},
+				},
+			}, config.DefaultRuntime())
+			_, err := policies.Validate(model.CreateJobRequest{
+				Tool:   model.ToolPing,
+				Target: "1.1.1.1",
+				Args:   map[string]string{"protocol": tt.protocol},
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAutoRequiresEveryConcreteCandidate(t *testing.T) {
+	policies := FromConfig(map[string]config.Policy{
+		string(model.ToolPing): {
+			Enabled:     true,
+			AllowedArgs: map[string]string{"protocol": "auto,icmp,udp", "port": DefaultPortRange},
+		},
+		string(model.ToolHTTP): {
+			Enabled:     true,
+			AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2"},
+		},
+	}, config.DefaultRuntime())
+	if _, err := policies.Validate(model.CreateJobRequest{
+		Tool:   model.ToolPing,
 		Target: "1.1.1.1",
-		Args:   map[string]string{"protocol": "udp"},
+		Args:   map[string]string{"protocol": "auto", "port": "443"},
 	}); err == nil {
-		t.Fatal("expected traceroute udp protocol to remain rejected")
+		t.Fatal("expected protocol auto without every concrete protocol to be rejected")
+	}
+	if _, err := policies.Validate(model.CreateJobRequest{
+		Tool:   model.ToolHTTP,
+		Target: "https://example.com",
+		Args:   map[string]string{"method": "HEAD", "http_version": "auto"},
+	}); err == nil {
+		t.Fatal("expected HTTP auto without every concrete version to be rejected")
+	}
+}
+
+func TestHTTPAllowsExplicitAndAutoVersions(t *testing.T) {
+	for _, version := range []string{"auto", "3", "2", "1.1"} {
+		if _, err := DefaultPolicies().Validate(model.CreateJobRequest{
+			Tool:   model.ToolHTTP,
+			Target: "https://example.com",
+			Args:   map[string]string{"method": "HEAD", "http_version": version},
+		}); err != nil {
+			t.Fatalf("expected HTTP version %q to be allowed: %v", version, err)
+		}
+	}
+}
+
+func TestHTTPPolicyWithoutVersionDoesNotAuthorizeImplicitDefault(t *testing.T) {
+	policies := FromConfig(map[string]config.Policy{
+		string(model.ToolHTTP): {
+			Enabled:     true,
+			AllowedArgs: map[string]string{"method": "GET,HEAD"},
+		},
+	}, config.DefaultRuntime())
+	p, ok := policies.Get(model.ToolHTTP)
+	if !ok {
+		t.Fatal("HTTP policy missing")
+	}
+	if _, ok := p.AllowedArgs["http_version"]; ok {
+		t.Fatalf("HTTP version must not be inferred: %#v", p)
+	}
+	if _, err := policies.Validate(model.CreateJobRequest{
+		Tool:   model.ToolHTTP,
+		Target: "https://example.com",
+	}); err == nil {
+		t.Fatal("implicit HTTP/1.1 must remain unauthorized")
+	}
+	if _, err := policies.Validate(model.CreateJobRequest{
+		Tool:   model.ToolHTTP,
+		Target: "https://example.com",
+		Args:   map[string]string{"method": "GET", "http_version": "2"},
+	}); err == nil {
+		t.Fatal("expected method-only policy to reject HTTP/2")
+	}
+
+	http3Only := FromConfig(map[string]config.Policy{
+		string(model.ToolHTTP): {
+			Enabled:     true,
+			AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "3"},
+		},
+	}, config.DefaultRuntime())
+	if _, err := http3Only.Validate(model.CreateJobRequest{
+		Tool:   model.ToolHTTP,
+		Target: "https://example.com",
+	}); err == nil {
+		t.Fatal("expected an omitted HTTP version to be rejected by an HTTP/3-only policy")
 	}
 }

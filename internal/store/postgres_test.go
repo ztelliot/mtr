@@ -2,10 +2,30 @@ package store
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/ztelliot/mtr/internal/config"
 )
+
+type postgresTestRow []any
+
+func (r postgresTestRow) Scan(dest ...any) error {
+	if len(dest) != len(r) {
+		return fmt.Errorf("scan destination count = %d, want %d", len(dest), len(r))
+	}
+	for i := range dest {
+		target := reflect.ValueOf(dest[i])
+		if target.Kind() != reflect.Pointer || target.IsNil() {
+			return fmt.Errorf("scan destination %d is not a non-nil pointer", i)
+		}
+		target.Elem().Set(reflect.ValueOf(r[i]))
+	}
+	return nil
+}
 
 func TestPostgresMaintenanceDatabases(t *testing.T) {
 	tests := []struct {
@@ -42,5 +62,29 @@ func TestIsPostgresCode(t *testing.T) {
 	}
 	if isPostgresCode(errors.New("boom"), "3D000") {
 		t.Fatal("plain error should not match postgres code")
+	}
+}
+
+func TestPostgresOutboundAgentHuaweiCloudAKSKJSONRoundTrip(t *testing.T) {
+	auth := config.OutboundAgentAuth{
+		Type: config.OutboundAuthHuaweiCloudAKSK, AccessKey: "test-access-key",
+		ProjectID: "test-project-id", Secret: "test-secret-key",
+	}
+	authRaw, err := marshalJSONBytes(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	row := postgresTestRow{
+		"functiongraph-edge", config.OutboundTransportEvent, true,
+		"https://functiongraph.example/invoke", []byte(`{}`), authRaw,
+		config.EventResponseResultField, []byte(`[]`), []byte(`{}`), now, now,
+	}
+	got, err := scanOutboundAgent(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Auth, auth) {
+		t.Fatalf("auth round trip = %#v, want %#v", got.Auth, auth)
 	}
 }

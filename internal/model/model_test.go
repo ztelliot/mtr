@@ -177,15 +177,20 @@ func TestJobJSONExposesOnlyFailureType(t *testing.T) {
 	}
 }
 
-func TestPublicJobErrorTypeMapsRawErrorsToGenericType(t *testing.T) {
+func TestPublicJobErrorTypeRequiresCanonicalTypes(t *testing.T) {
 	if got := PublicJobErrorType("lookup failed"); got != JobErrorFailed {
 		t.Fatalf("raw error type = %q, want %q", got, JobErrorFailed)
 	}
-	if got := PublicJobErrorType("agent disconnected"); got != JobErrorAgentDisconnected {
-		t.Fatalf("agent disconnect type = %q, want %q", got, JobErrorAgentDisconnected)
+	if got := PublicJobErrorType(JobErrorAgentDisconnected); got != JobErrorAgentDisconnected {
+		t.Fatalf("canonical agent disconnect type = %q, want %q", got, JobErrorAgentDisconnected)
 	}
-	if got := PublicJobErrorType("job timed out"); got != JobErrorTimeout {
-		t.Fatalf("job timeout type = %q, want %q", got, JobErrorTimeout)
+	if got := PublicJobErrorType(JobErrorTimeout); got != JobErrorTimeout {
+		t.Fatalf("canonical job timeout type = %q, want %q", got, JobErrorTimeout)
+	}
+	for _, legacy := range []string{"agent disconnected", "job timed out", "timeout", "agent tool failed", "one or more fanout jobs failed"} {
+		if got := PublicJobErrorType(legacy); got != JobErrorFailed {
+			t.Fatalf("legacy error %q mapped to %q, want %q", legacy, got, JobErrorFailed)
+		}
 	}
 }
 

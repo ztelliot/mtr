@@ -11,6 +11,7 @@ User=mtr
 Group=mtr
 WorkingDirectory=/var/lib/mtr
 StateDirectory=mtr
+Environment=MTR_BOOTSTRAP_ADMIN_TOKEN_FILE=/etc/mtr/bootstrap/admin-token
 UMask=0077
 
 NoNewPrivileges=true

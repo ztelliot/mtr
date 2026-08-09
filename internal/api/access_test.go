@@ -17,10 +17,11 @@ func TestHTTPAccessLogIsStructuredAndDoesNotLeakQuerySecrets(t *testing.T) {
 	const token = "sensitive-access-token"
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	handler := New(store.NewMemory(), policy.DefaultPolicies(), nil, nil, "", logger,
+	handler := New(store.NewTestMemory(), policy.DefaultPolicies(), nil, nil, "", logger,
 		TokenConfig{Token: token, Scope: TokenScope{All: true}},
 	)
 	req := httptest.NewRequest(http.MethodGet, "/v1/permissions?access_token="+token+"&secret=do-not-log", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Request-ID", "external-request-123")
 	req.Header.Set("User-Agent", "mtr-access-test/1.0")
 	req.RemoteAddr = "203.0.113.8:4321"
@@ -58,7 +59,7 @@ func TestHTTPAccessLogIsStructuredAndDoesNotLeakQuerySecrets(t *testing.T) {
 
 func TestHTTPAccessMetricsIncludeTrafficAuthenticationAndRuntime(t *testing.T) {
 	const token = "metrics-reader"
-	handler := New(store.NewMemory(), policy.DefaultPolicies(), nil, nil, "", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	handler := New(store.NewTestMemory(), policy.DefaultPolicies(), nil, nil, "", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		TokenConfig{Token: token, Scope: TokenScope{All: true}},
 	)
 
@@ -107,7 +108,7 @@ func TestHTTPAccessMetricsIncludeTrafficAuthenticationAndRuntime(t *testing.T) {
 }
 
 func TestHTTPAccessMetricsCollapseUnknownMethodsAndRoutes(t *testing.T) {
-	handler := New(store.NewMemory(), policy.DefaultPolicies(), nil, nil, "", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	handler := New(store.NewTestMemory(), policy.DefaultPolicies(), nil, nil, "", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest("CUSTOM", "/unknown/resource/123", nil))
 	if rec.Code != http.StatusMethodNotAllowed {

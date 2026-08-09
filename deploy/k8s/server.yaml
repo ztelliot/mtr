@@ -15,7 +15,13 @@ data:
     http_addr: ":8080"
     grpc_addr: ":8443"
     log_level: "info"
-    trusted_proxies: []
+    # Broad peer ranges are safe here only together with mtr-server-ingress,
+    # which admits port 8080 solely from the mtr-web Pod.
+    trusted_proxies:
+      - "0.0.0.0/0"
+      - "::/0"
+    # Trusted only because the baseline NetworkPolicy permits HTTP ingress
+    # from the mtr-web Pod and Caddy overwrites this header from RemoteAddr.
     client_ip_headers: []
     tls:
       enabled: true
@@ -42,6 +48,7 @@ spec:
       serviceAccountName: mtr-server
       automountServiceAccountToken: false
       enableServiceLinks: false
+      dnsPolicy: ClusterFirst
       hostNetwork: false
       hostPID: false
       hostIPC: false
@@ -66,16 +73,26 @@ spec:
                 secretKeyRef:
                   name: mtr-server-env
                   key: database-url
+            - name: MTR_BOOTSTRAP_ADMIN_TOKEN_FILE
+              value: /var/run/mtr/bootstrap/admin-token
           ports:
             - name: http
               containerPort: 8080
             - name: grpc
               containerPort: 8443
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
           resources:
             requests:
@@ -99,6 +116,12 @@ spec:
             - name: tls
               mountPath: /var/run/mtr/tls
               readOnly: true
+            - name: postgres-ca
+              mountPath: /var/run/mtr/postgres
+              readOnly: true
+            - name: bootstrap-admin-token
+              mountPath: /var/run/mtr/bootstrap
+              readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -108,6 +131,19 @@ spec:
         - name: tls
           secret:
             secretName: mtr-server-tls
+            defaultMode: 0440
+        - name: postgres-ca
+          secret:
+            secretName: mtr-server-postgres-ca
+            defaultMode: 0440
+        - name: bootstrap-admin-token
+          secret:
+            secretName: mtr-server-bootstrap
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: admin-token
+                path: admin-token
         - name: tmp
           emptyDir: {}
 ---

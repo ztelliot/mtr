@@ -2,7 +2,9 @@
   "env": {
     "MTR_MODE": "http",
     "MTR_LOG_LEVEL": "info",
-    "MTR_HTTP_TOKEN": "<http-token>",
+    "MTR_HTTP_AUTH_TYPE": "header",
+    "MTR_HTTP_AUTH_HEADER": "X-MTR-Agent-Token",
+    "MTR_HTTP_AUTH_SECRET": "<http-auth-secret>",
     "MTR_HTTP_ADDR": ":9000",
     "MTR_HTTP_PATH_PREFIX": "/<path-prefix>",
     "MTR_PROTOCOLS": "1",

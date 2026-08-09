@@ -15,7 +15,19 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-var geoIPHTTPClient = http.DefaultClient
+var geoIPHTTPClient = newGeoIPHTTPClient()
+
+func newGeoIPHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.MaxResponseHeaderBytes = 64 << 10
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 type geoIPUpstreamResponse struct {
 	ASN struct {
@@ -106,8 +118,9 @@ func (s *Server) geoIPURLForIP(ip string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return "", errors.New("geoip_url must be an absolute HTTP URL without credentials, query, or fragment")
+	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/" + url.PathEscape(ip)
-	base.RawQuery = ""
-	base.Fragment = ""
 	return base.String(), nil
 }

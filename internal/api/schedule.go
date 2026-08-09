@@ -19,6 +19,8 @@ import (
 	"github.com/ztelliot/mtr/internal/store"
 )
 
+var errScheduleFanoutTargetLimit = errors.New("schedule fanout target limit exceeded")
+
 func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if !s.scheduleWriteAllowed(r.Context()) {
 		writeError(w, http.StatusForbidden, "schedule write access is not allowed")
@@ -196,13 +198,17 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusTooManyRequests, "tool rate limit exceeded")
 		return scheduleRequestDetails{}, false
 	}
-	policies := s.policiesForJob(r.Context(), createReq)
+	policies, err := s.policiesForJob(r.Context(), createReq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return scheduleRequestDetails{}, false
+	}
 	createReq.Args = policies.ServerArgs(createReq.Tool, createReq.Args)
 	if _, err := policies.ValidateSchedule(createReq); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false
 	}
-	if err := s.authorizeJob(r.Context(), createReq); err != nil {
+	if err := s.authorizeJobWithPolicies(r.Context(), createReq, policies); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return scheduleRequestDetails{}, false
 	}
@@ -223,7 +229,11 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 	}
 	scheduleTargets, err = s.authorizeScheduleTargets(r.Context(), createReq, scheduleVersion, scheduleTargets)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
+		status := http.StatusForbidden
+		if errors.Is(err, errScheduleFanoutTargetLimit) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err.Error())
 		return scheduleRequestDetails{}, false
 	}
 	enabled := defaultEnabled
@@ -248,6 +258,7 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJ
 		return nil, err
 	}
 	out := make([]model.ScheduleTarget, 0, len(targets))
+	matchedAgentIDs := make(map[string]struct{})
 	for _, target := range targets {
 		matched := false
 		target.AgentScope = agentScope
@@ -268,6 +279,12 @@ func (s *Server) authorizeScheduleTargets(ctx context.Context, req model.CreateJ
 				continue
 			}
 			matched = true
+			if _, exists := matchedAgentIDs[agent.ID]; !exists {
+				if len(matchedAgentIDs) >= model.MaxFanoutTargets {
+					return nil, fmt.Errorf("%w: narrow schedule targets to at most %d agents", errScheduleFanoutTargetLimit, model.MaxFanoutTargets)
+				}
+				matchedAgentIDs[agent.ID] = struct{}{}
+			}
 		}
 		if !matched {
 			return nil, fmt.Errorf("schedule target %q has no allowed online agents for %s", target.Label, req.Tool)
@@ -312,9 +329,8 @@ func normalizedScheduleScopeValues(values []string, excludeWildcard bool) []stri
 }
 
 func scheduleTargetMatchesAgent(label string, agent model.Agent) bool {
-	label = strings.TrimSpace(label)
 	for _, item := range agent.Labels {
-		if strings.TrimSpace(item) == label {
+		if item == label {
 			return true
 		}
 	}
@@ -335,12 +351,18 @@ func scheduleTargetsFromRequest(req model.CreateScheduledJobRequest) ([]model.Sc
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("schedule_targets is required")
 	}
+	if len(targets) > model.MaxFanoutTargets {
+		return nil, fmt.Errorf("schedule_targets must contain at most %d selectors", model.MaxFanoutTargets)
+	}
 	out := make([]model.ScheduleTarget, 0, len(targets))
 	seen := map[string]struct{}{}
 	for i, target := range targets {
 		label := strings.TrimSpace(target.Label)
 		if label == "" {
 			return nil, fmt.Errorf("schedule_targets[%d].label is required", i)
+		}
+		if label != target.Label {
+			return nil, fmt.Errorf("schedule_targets[%d].label must not have surrounding whitespace", i)
 		}
 		if _, ok := seen[label]; ok {
 			return nil, fmt.Errorf("duplicate schedule target %q", label)

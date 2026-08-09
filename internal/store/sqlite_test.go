@@ -2,15 +2,106 @@ package store
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 )
 
+func newTestSQLite(ctx context.Context, dsn string) (*SQLite, error) {
+	store, _, err := NewSQLite(ctx, dsn, "test-admin-token")
+	return store, err
+}
+
+func TestSQLiteBootstrapAdminToken(t *testing.T) {
+	ctx := context.Background()
+	dsn := "sqlite://" + t.TempDir() + "/bootstrap.db"
+
+	if store, initialization, err := NewSQLite(ctx, dsn, ""); !errors.Is(err, ErrBootstrapAdminTokenRequired) {
+		if store != nil {
+			store.Close()
+		}
+		t.Fatalf("new store without bootstrap token: initialization=%#v err=%v", initialization, err)
+	}
+
+	store, initialization, err := NewSQLite(ctx, dsn, "  explicit-admin-token  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initialization.Seeded {
+		store.Close()
+		t.Fatal("new store was not reported as seeded")
+	}
+	settings, err := store.GetManagedSettings(ctx)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if len(settings.APITokens) != 1 || settings.APITokens[0].Secret != "explicit-admin-token" {
+		store.Close()
+		t.Fatalf("unexpected seeded settings: %#v", settings.APITokens)
+	}
+	store.Close()
+
+	reopened, initialization, err := NewSQLite(ctx, dsn, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if initialization.Seeded {
+		t.Fatal("existing store was incorrectly reported as seeded")
+	}
+	settings, err = reopened.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.APITokens) != 1 || settings.APITokens[0].Secret != "explicit-admin-token" {
+		t.Fatalf("reopened store lost bootstrap token: %#v", settings.APITokens)
+	}
+}
+
+func TestSQLiteOutboundAgentHuaweiCloudAKSKRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dsn := "sqlite://" + t.TempDir() + "/outbound-auth.db"
+	st, err := newTestSQLite(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := config.OutboundAgent{
+		ID: "functiongraph-edge", Transport: config.OutboundTransportEvent, Enabled: true,
+		URL: "https://functiongraph.example/invoke",
+		Auth: config.OutboundAgentAuth{
+			Type: config.OutboundAuthHuaweiCloudAKSK, AccessKey: "test-access-key",
+			ProjectID: "test-project-id", Secret: "test-secret-key",
+		},
+		EventResponse: config.EventResponseResultField,
+	}
+	if err := st.UpsertOutboundAgent(ctx, node); err != nil {
+		st.Close()
+		t.Fatal(err)
+	}
+	st.Close()
+
+	reopened, _, err := NewSQLite(ctx, dsn, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.GetOutboundAgent(ctx, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Auth, node.Auth) {
+		t.Fatalf("auth round trip = %#v, want %#v", got.Auth, node.Auth)
+	}
+}
+
 func TestSQLiteRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	st, err := NewSQLite(ctx, "sqlite://:memory:")
+	st, err := newTestSQLite(ctx, "sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +259,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 
 func TestSQLiteScheduledJobHistory(t *testing.T) {
 	ctx := context.Background()
-	st, err := NewSQLite(ctx, "sqlite://:memory:")
+	st, err := newTestSQLite(ctx, "sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +382,7 @@ func TestSQLiteScheduledJobHistory(t *testing.T) {
 }
 
 func TestMemoryRejectsOrphanJobEvent(t *testing.T) {
-	st := NewMemory()
+	st := NewTestMemory()
 	err := st.AddJobEvent(context.Background(), model.JobEvent{
 		ID:    "event-1",
 		JobID: "missing-job",

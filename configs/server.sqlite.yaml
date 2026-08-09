@@ -5,8 +5,8 @@ database_url: "sqlite://./mtr.db"
 geoip_url: "http://geoip:8080"
 # Reverse proxy IPs/CIDRs allowed to supply client IP headers.
 trusted_proxies: []
-# Custom single-IP headers accepted unconditionally before proxy headers.
-# X-Real-IP is handled separately and only trusted from trusted_proxies.
+# Custom single-IP headers accepted only when the direct peer matches
+# trusted_proxies. X-Real-IP is handled separately under the same trust rule.
 client_ip_headers: []
 tls:
   enabled: false

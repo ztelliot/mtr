@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,7 +25,7 @@ import (
 )
 
 func TestStreamJobEventsSendsHistoryAndLive(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -104,6 +105,27 @@ func TestStreamJobEventsSendsHistoryAndLive(t *testing.T) {
 	}
 	if livePayload["agent_id"] != "edge-1" {
 		t.Fatalf("agent-level SSE event should include agent_id: %#v", livePayload)
+	}
+}
+
+func TestStreamJobEventsRejectsWhenCapacityIsExhausted(t *testing.T) {
+	server := &Server{streamSlots: make(chan struct{}, 1)}
+	server.streamSlots <- struct{}{}
+	recorder := httptest.NewRecorder()
+	server.streamJobEvents(recorder, httptest.NewRequest(http.MethodGet, "/v1/jobs/job-1/stream", nil))
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGeoIPHTTPClientDisablesProxyAndRedirects(t *testing.T) {
+	client := newGeoIPHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatalf("unexpected GeoIP transport: %#v", client.Transport)
+	}
+	if err := client.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("redirect policy error = %v", err)
 	}
 }
 
@@ -201,7 +223,7 @@ func TestJobEventJSONUsesUnifiedEventEnvelope(t *testing.T) {
 }
 
 func TestHealthIncludesVersion(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -287,7 +309,7 @@ func TestWriteErrorDoesNotExposeInternalDetails(t *testing.T) {
 }
 
 func TestAuthFailureCountsAgainstRequestLimit(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1, Burst: 1},
@@ -313,7 +335,7 @@ func TestAuthFailureCountsAgainstRequestLimit(t *testing.T) {
 }
 
 func TestAuthorizationHeaderRequiresBearerScheme(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -338,8 +360,8 @@ func TestAuthorizationHeaderRequiresBearerScheme(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/v1/permissions?access_token=secret", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("query access token status = %d, body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("query access token must be rejected, status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -400,7 +422,7 @@ func TestClientIPUsesXRealIPFromTrustedProxy(t *testing.T) {
 	}
 }
 
-func TestClientIPUsesConfiguredHeaderFromUntrustedPeer(t *testing.T) {
+func TestClientIPIgnoresConfiguredHeaderFromUntrustedPeer(t *testing.T) {
 	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"}, []string{"Eo-Connecting-Ip"})
 	if err != nil {
 		t.Fatal(err)
@@ -409,8 +431,8 @@ func TestClientIPUsesConfiguredHeaderFromUntrustedPeer(t *testing.T) {
 	req.RemoteAddr = "203.0.113.10:1234"
 	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
 
-	if got := resolver.Resolve(req); got != "198.51.100.22" {
-		t.Fatalf("client ip = %q, want configured header client", got)
+	if got := resolver.Resolve(req); got != "203.0.113.10" {
+		t.Fatalf("client ip = %q, want untrusted remote peer", got)
 	}
 }
 
@@ -420,7 +442,7 @@ func TestClientIPUsesConfiguredSingleIPHeaderOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "203.0.113.10:1234"
+	req.RemoteAddr = "10.0.0.2:1234"
 	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
 	req.Header.Set("Cf-Connecting-Ip", "198.51.100.23")
 
@@ -435,7 +457,7 @@ func TestClientIPHeadersExcludeXRealIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "203.0.113.10:1234"
+	req.RemoteAddr = "10.0.0.2:1234"
 	req.Header.Set("X-Real-IP", "198.51.100.21")
 	req.Header.Set("Eo-Connecting-Ip", "198.51.100.22")
 
@@ -445,7 +467,7 @@ func TestClientIPHeadersExcludeXRealIP(t *testing.T) {
 }
 
 func TestNewWithOptionsRejectsInvalidTrustedProxy(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	_, err := NewWithOptions(st, policy.DefaultPolicies(), nil, nil, "", slog.Default(), Options{
 		TrustedProxies: []string{"not-an-ip"},
 	})
@@ -456,7 +478,7 @@ func TestNewWithOptionsRejectsInvalidTrustedProxy(t *testing.T) {
 
 func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing, model.ToolHTTP, model.ToolPort}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -592,13 +614,13 @@ func TestTokenPermissionsRestrictToolsArgsAgentsAndSchedules(t *testing.T) {
 
 func TestPermissionsResponseShowsEffectiveAllowedArgsForInheritedTokenScope(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{ID: "edge-1", Capabilities: []model.Tool{model.ToolHTTP}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	policies := policy.FromConfig(map[string]config.Policy{
-		"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET"}},
+		"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET", "http_version": "1.1"}},
 	}, config.DefaultRuntime())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -623,7 +645,7 @@ func TestPermissionsResponseShowsEffectiveAllowedArgsForInheritedTokenScope(t *t
 	if err := json.Unmarshal(rec.Body.Bytes(), &perms); err != nil {
 		t.Fatal(err)
 	}
-	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "GET" {
+	if perms.Tools[model.ToolHTTP].AllowedArgs["method"] != "GET" || perms.Tools[model.ToolHTTP].AllowedArgs["http_version"] != "1.1" {
 		t.Fatalf("inherited allowed args should show effective policy, got %#v", perms.Tools[model.ToolHTTP].AllowedArgs)
 	}
 
@@ -648,7 +670,7 @@ func TestPermissionsResponseShowsEffectiveAllowedArgsForInheritedTokenScope(t *t
 
 func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	now := time.Now().UTC()
 	sched := model.ScheduledJob{
@@ -760,7 +782,7 @@ func TestScheduleReadPermissionCanReadHistoryButNotCreate(t *testing.T) {
 
 func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -819,7 +841,7 @@ func TestCreateScheduleScopesGroupTargetToAllowedAgents(t *testing.T) {
 
 func TestCreateSchedulePersistsDynamicTagAndDenyScope(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-1", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -875,7 +897,7 @@ func TestCreateSchedulePersistsDynamicTagAndDenyScope(t *testing.T) {
 
 func TestServerManagedLabelsGrantTokenScope(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{
 		ID:           "edge-spoof",
@@ -919,8 +941,8 @@ func TestServerManagedLabelsGrantTokenScope(t *testing.T) {
 
 func TestCreateScheduleAndHistory(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
-	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
+	st := store.NewTestMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", nil)
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1052,8 +1074,8 @@ func TestCreateScheduleAndHistory(t *testing.T) {
 
 func TestUpdateAndDeleteSchedule(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
-	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
+	st := store.NewTestMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", nil)
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1108,8 +1130,8 @@ func TestUpdateAndDeleteSchedule(t *testing.T) {
 
 func TestUpdateScheduleCronRefreshesNextRunWithoutBumpingRevision(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
-	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent"})
+	st := store.NewTestMemory()
+	upsertTestAgent(t, ctx, st, "edge-1", nil)
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1151,7 +1173,7 @@ func TestUpdateScheduleCronRefreshesNextRunWithoutBumpingRevision(t *testing.T) 
 
 func TestCreateScheduleAcceptsMultipleLabelTargetsWithOneCron(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	upsertTestAgent(t, ctx, st, "edge-blue", []string{"blue"})
 	upsertTestAgent(t, ctx, st, "edge-red", []string{"red"})
 	policies := policy.DefaultPolicies()
@@ -1180,7 +1202,7 @@ func TestCreateScheduleAcceptsMultipleLabelTargetsWithOneCron(t *testing.T) {
 }
 
 func TestCreateScheduleRejectsMissingTargets(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1202,8 +1224,46 @@ func TestCreateScheduleRejectsMissingTargets(t *testing.T) {
 	}
 }
 
+func TestScheduleTargetsRequireCanonicalBoundedSelectors(t *testing.T) {
+	if _, err := scheduleTargetsFromRequest(model.CreateScheduledJobRequest{
+		ScheduleTargets: []model.ScheduleTargetRequest{{Label: " blue "}},
+	}); err == nil || !strings.Contains(err.Error(), "surrounding whitespace") {
+		t.Fatalf("padded label error = %v", err)
+	}
+	targets := make([]model.ScheduleTargetRequest, model.MaxFanoutTargets+1)
+	for index := range targets {
+		targets[index].Label = fmt.Sprintf("label-%02d", index)
+	}
+	if _, err := scheduleTargetsFromRequest(model.CreateScheduledJobRequest{ScheduleTargets: targets}); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("selector limit error = %v", err)
+	}
+}
+
+func TestCreateScheduleRejectsAggregateFanoutBeyondHardLimit(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	for index := 0; index <= model.MaxFanoutTargets; index++ {
+		label := "blue"
+		if index >= model.MaxFanoutTargets/2 {
+			label = "green"
+		}
+		upsertTestAgent(t, ctx, st, fmt.Sprintf("schedule-edge-%02d", index), []string{label})
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default())
+	body := `{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true,"cron_expression":"* * * * *","schedule_targets":[{"label":"blue"},{"label":"green"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "schedule fanout target limit exceeded") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateScheduleRejectsInvalidCronExpression(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1225,7 +1285,7 @@ func TestCreateScheduleRejectsInvalidCronExpression(t *testing.T) {
 }
 
 func TestCreateJobNormalizesServerOwnedArgsAndResolveLocation(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	ctx := context.Background()
 	now := time.Now().UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{
@@ -1288,7 +1348,7 @@ func TestCreateJobNormalizesServerOwnedArgsAndResolveLocation(t *testing.T) {
 }
 
 func TestCreateJobRequiresPinnedAgentForRouteTools(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -1314,7 +1374,7 @@ func TestCreateJobRequiresPinnedAgentForRouteTools(t *testing.T) {
 
 func TestCreateJobRejectsUnknownOrOfflinePinnedAgent(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{
 		ID:           "edge-offline",
@@ -1361,7 +1421,7 @@ func TestCreateJobRejectsUnknownOrOfflinePinnedAgent(t *testing.T) {
 
 func TestCreateJobWithEmptyAgentIDFansOutToMatchingAgents(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-v4", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolIPv4, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -1436,7 +1496,7 @@ func TestCreateJobWithEmptyAgentIDFansOutToMatchingAgents(t *testing.T) {
 
 func TestCreateJobFiltersFanoutByAgentTags(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	upsertTestAgent(t, ctx, st, "edge-blue", []string{"blue", "shared"})
 	upsertTestAgent(t, ctx, st, "edge-green", []string{"green", "shared"})
 	upsertTestAgent(t, ctx, st, "edge-red", []string{"red"})
@@ -1447,7 +1507,7 @@ func TestCreateJobFiltersFanoutByAgentTags(t *testing.T) {
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 	}), hub, "", slog.Default())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","agent_tags":[" blue ","green","blue"],"resolve_on_agent":true}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","agent_tags":["blue","green"],"resolve_on_agent":true}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -1495,11 +1555,59 @@ func TestCreateJobFiltersFanoutByAgentTags(t *testing.T) {
 			}
 		})
 	}
+	for name, tags := range map[string][]string{
+		"empty":      {""},
+		"whitespace": {" blue "},
+		"duplicate":  {"blue", "blue"},
+	} {
+		t.Run("rejects noncanonical tags "+name, func(t *testing.T) {
+			body, err := json.Marshal(model.CreateJobRequest{
+				Tool: model.ToolPing, Target: "1.1.1.1", AgentTags: tags, ResolveOnAgent: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("tags %#v status = %d, body = %s", tags, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateJobRejectsFanoutBeyondHardLimit(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	for index := 0; index <= model.MaxFanoutTargets; index++ {
+		upsertTestAgent(t, ctx, st, fmt.Sprintf("edge-%02d", index), nil)
+	}
+	policies := policy.DefaultPolicies()
+	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
+	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), hub, "", slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"tool":"ping","target":"1.1.1.1","resolve_on_agent":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "fanout target limit exceeded") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	jobs, err := st.ListActiveJobs(ctx, model.MaxFanoutTargets+2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("over-limit fanout created jobs: %#v", jobs)
+	}
 }
 
 func TestCreateJobWithAgentResolveAutoDomainDoesNotFilterProtocols(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-v4", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolIPv4, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -1542,7 +1650,7 @@ func TestCreateJobWithAgentResolveAutoDomainDoesNotFilterProtocols(t *testing.T)
 
 func TestCreateJobWithAgentResolveTypedDomainFiltersProtocols(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-v4", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolIPv4, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -1599,7 +1707,7 @@ func TestSelectDispatchTargetChoosesSupportedResolvedAddress(t *testing.T) {
 
 func TestCreateJobWithPinnedIncompatibleAgentReportsFailureType(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{
 		ID:           "edge-v4",
@@ -1693,7 +1801,7 @@ func TestGeoIPProxyReturnsCompactPayload(t *testing.T) {
 	})}
 	defer func() { geoIPHTTPClient = oldGeoIPHTTPClient }()
 
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1739,7 +1847,7 @@ func TestGeoIPProxyAcceptsEscapedIPv6(t *testing.T) {
 	})}
 	defer func() { geoIPHTTPClient = oldGeoIPHTTPClient }()
 
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1756,7 +1864,7 @@ func TestGeoIPProxyAcceptsEscapedIPv6(t *testing.T) {
 }
 
 func TestGeoIPProxyIsDisabledWhenURLIsEmpty(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1773,7 +1881,7 @@ func TestGeoIPProxyIsDisabledWhenURLIsEmpty(t *testing.T) {
 }
 
 func TestGeoIPProxyRejectsInvalidIP(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1800,7 +1908,7 @@ func TestGeoIPProxyUsesDedicatedGlobalRateLimit(t *testing.T) {
 	})}
 	defer func() { geoIPHTTPClient = oldGeoIPHTTPClient }()
 
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1, Burst: 1},
 		IP:     abuse.Limit{RequestsPerMinute: 1, Burst: 1},
@@ -1832,7 +1940,7 @@ func TestGeoIPProxyUsesDedicatedGlobalRateLimit(t *testing.T) {
 }
 
 func TestManagedRuntimeSettingsApplyToNewJobs(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -1888,7 +1996,7 @@ func TestManagedRuntimeSettingsApplyToNewJobs(t *testing.T) {
 
 func TestLabelRuntimeSettingsApplyToPinnedJob(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1932,7 +2040,7 @@ func TestLabelRuntimeSettingsApplyToPinnedJob(t *testing.T) {
 
 func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1979,7 +2087,7 @@ func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
 
 func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1987,7 +2095,7 @@ func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 	settings.LabelConfigs = map[string]config.LabelConfig{
 		"head-only": {
 			ToolPolicies: map[string]config.Policy{
-				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD"}},
+				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD", "http_version": "1.1"}},
 			},
 		},
 	}
@@ -2063,7 +2171,7 @@ func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 
 func TestScheduleTargetsRespectPerAgentLabelPolicies(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2096,7 +2204,7 @@ func TestScheduleTargetsRespectPerAgentLabelPolicies(t *testing.T) {
 
 func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2109,7 +2217,7 @@ func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 		},
 		"get-ok": {
 			ToolPolicies: map[string]config.Policy{
-				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET"}},
+				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET", "http_version": "1.1"}},
 			},
 		},
 	}
@@ -2173,7 +2281,7 @@ func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 }
 
 func TestManagedRateLimitEndpointUsesLowercaseJSONAndDoesNotPersistInvalidConfig(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2232,8 +2340,93 @@ func TestManagedRateLimitEndpointUsesLowercaseJSONAndDoesNotPersistInvalidConfig
 	}
 }
 
+func TestManagedSettingsEndpointsRejectFailOpenSemantics(t *testing.T) {
+	newHandler := func(t *testing.T) (*store.Memory, http.Handler) {
+		t.Helper()
+		st := store.NewTestMemory()
+		handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+			Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+			IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+		return st, handler
+	}
+
+	t.Run("negative rate", func(t *testing.T) {
+		st, handler := newHandler(t)
+		before, err := st.GetManagedSettings(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rateLimit := before.RateLimit
+		rateLimit.Global.RequestsPerMinute = -1
+		body, err := json.Marshal(managedRateLimitPayload{Revision: before.Revision, RateLimit: rateLimit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v1/manage/rate-limit", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		after, err := st.GetManagedSettings(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Revision != before.Revision {
+			t.Fatalf("invalid rate update changed revision from %d to %d", before.Revision, after.Revision)
+		}
+	})
+
+	labelTests := []struct {
+		name    string
+		configs map[string]config.LabelConfig
+	}{
+		{
+			name: "unknown tool",
+			configs: map[string]config.LabelConfig{"edge": {ToolPolicies: map[string]config.Policy{
+				"speedtest": {Enabled: true},
+			}}},
+		},
+		{
+			name: "invalid HTTP version",
+			configs: map[string]config.LabelConfig{"edge": {ToolPolicies: map[string]config.Policy{
+				"http": {Enabled: true, AllowedArgs: map[string]string{"http_version": "h2"}},
+			}}},
+		},
+	}
+	for _, tt := range labelTests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, handler := newHandler(t)
+			before, err := st.GetManagedSettings(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(managedLabelsPayload{Revision: before.Revision, LabelConfigs: tt.configs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer admin")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			after, err := st.GetManagedSettings(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Revision != before.Revision {
+				t.Fatalf("invalid label update changed revision from %d to %d", before.Revision, after.Revision)
+			}
+		})
+	}
+}
+
 func TestRequiredAuthRejectsRequestsWhenTokenSetIsEmpty(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler, err := NewWithOptions(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2251,7 +2444,7 @@ func TestRequiredAuthRejectsRequestsWhenTokenSetIsEmpty(t *testing.T) {
 }
 
 func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2337,6 +2530,19 @@ func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
 		t.Fatalf("api token create with client secret status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
+	for _, invalidBody := range [][]byte{
+		[]byte(`{"name":"bad-agent","agents":[" edge-1"]}`),
+		[]byte(`{"name":"bad-deny","denied_agents":["edge-1","edge-1"]}`),
+	} {
+		req = httptest.NewRequest(http.MethodPost, "/v1/manage/tokens", bytes.NewReader(invalidBody))
+		req.Header.Set("Authorization", "Bearer "+writeToken)
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid API token Agent ID scope status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+
 	body = []byte(`{"name":"ops","all":true,"schedule_access":"write","manage_access":"write","agents":["*"]}`)
 	req = httptest.NewRequest(http.MethodPost, "/v1/manage/tokens", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+writeToken)
@@ -2376,6 +2582,15 @@ func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+writeToken)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-canonical register token Agent IDs status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = []byte(`{"name":"edge","allowed_agent_ids":["edge-1","edge-2"]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/register-tokens", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+writeToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("generated register token status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -2388,7 +2603,7 @@ func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
 		t.Fatalf("register token was not generated: %#v", savedRegister)
 	}
 	if len(savedRegister.AllowedAgentIDs) != 2 || savedRegister.AllowedAgentIDs[0] != "edge-1" || savedRegister.AllowedAgentIDs[1] != "edge-2" {
-		t.Fatalf("register token allowed agent ids were not normalized: %#v", savedRegister)
+		t.Fatalf("register token allowed Agent IDs changed: %#v", savedRegister)
 	}
 
 	oldRegisterToken := savedRegister.Token
@@ -2496,7 +2711,7 @@ func TestManagedTokenResourcesOnlyRevealValuesOnCreateAndRotate(t *testing.T) {
 }
 
 func TestManagedTokenPayloadsAreSizeLimited(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2513,7 +2728,7 @@ func TestManagedTokenPayloadsAreSizeLimited(t *testing.T) {
 }
 
 func TestManagedLabelsEndpointKeepsAgentRuntimeAndRemovesSettingsRoute(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2561,12 +2776,12 @@ func TestManagedLabelsEndpointKeepsAgentRuntimeAndRemovesSettingsRoute(t *testin
 
 func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	upsertTestAgent(t, ctx, st, "edge-grpc", []string{"old"})
 	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Disabled: true, Labels: []string{"old"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: false, BaseURL: "http://agent.local", HTTPToken: "secret", Labels: []string{"old-http"}}); err != nil {
+	if err := st.UpsertOutboundAgent(ctx, config.OutboundAgent{ID: "edge-http", Transport: config.OutboundTransportHTTP, Enabled: false, URL: "https://agent.local", Auth: config.OutboundAgentAuth{Type: config.OutboundAuthBearer, Secret: "secret"}, Labels: []string{"old-http"}}); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -2575,8 +2790,8 @@ func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testi
 	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
 
 	body, _ := json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{
-		{ID: "edge-grpc", Labels: []string{"new", config.AgentAllLabel, config.AgentGRPCLabel, "id:edge-grpc"}},
-		{ID: "edge-http", Labels: []string{"new-http", config.AgentHTTPLabel, "id:edge-http"}},
+		{ID: "edge-grpc", Labels: []string{"new"}},
+		{ID: "edge-http", Labels: []string{"new-http"}},
 	}})
 	req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -2593,12 +2808,45 @@ func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testi
 	if cfg.Disabled != true || !reflect.DeepEqual(cfg.Labels, []string{"new"}) {
 		t.Fatalf("grpc cfg = %#v", cfg)
 	}
-	node, err := st.GetHTTPAgent(ctx, "edge-http")
+	node, err := st.GetOutboundAgent(ctx, "edge-http")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Enabled != false || node.BaseURL != "http://agent.local" || node.HTTPToken != "secret" || !reflect.DeepEqual(node.Labels, []string{"new-http"}) {
+	if node.Enabled != false || node.URL != "https://agent.local" || node.Auth.Secret != "secret" || !reflect.DeepEqual(node.Labels, []string{"new-http"}) {
 		t.Fatalf("http node = %#v", node)
+	}
+
+	invalidLabels := []struct {
+		name   string
+		labels []string
+	}{
+		{name: "empty", labels: []string{""}},
+		{name: "whitespace", labels: []string{" new "}},
+		{name: "duplicate", labels: []string{"new", "new"}},
+		{name: "reserved", labels: []string{config.AgentGRPCLabel}},
+		{name: "reserved id", labels: []string{"id:edge-grpc"}},
+	}
+	for _, tt := range invalidLabels {
+		t.Run("rejects "+tt.name+" label", func(t *testing.T) {
+			body, err := json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{{ID: "edge-grpc", Labels: tt.labels}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer admin")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			cfg, err := st.GetAgentConfig(ctx, "edge-grpc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Labels, []string{"new"}) {
+				t.Fatalf("invalid labels mutated config: %#v", cfg.Labels)
+			}
+		})
 	}
 
 	body, _ = json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{
@@ -2612,11 +2860,22 @@ func TestManagedAgentLabelsBatchUpdatesWithoutTransportAndRejectsBadIDs(t *testi
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate id status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	body, err = json.Marshal(managedAgentLabelsPayload{Agents: []managedAgentLabelPatch{{ID: " edge-grpc ", Labels: []string{"new"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/agents/labels", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-canonical agent id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestManagedLabelsAndAgentLabelsUpdateAtomically(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	upsertTestAgent(t, ctx, st, "edge-grpc", []string{"old"})
 	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Labels: []string{"old"}}); err != nil {
 		t.Fatal(err)
@@ -2673,7 +2932,7 @@ func TestManagedLabelsAndAgentLabelsUpdateAtomically(t *testing.T) {
 
 func TestManagedLabelStateRejectsStaleRevision(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	upsertTestAgent(t, ctx, st, "edge-1", nil)
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2705,14 +2964,14 @@ func TestManagedLabelStateRejectsStaleRevision(t *testing.T) {
 	}
 }
 
-func TestCreateHTTPAgentRejectsDuplicateID(t *testing.T) {
-	st := store.NewMemory()
+func TestCreateOutboundAgentRejectsDuplicateID(t *testing.T) {
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
 
-	body := []byte(`{"id":"edge-http","transport":"http","enabled":true,"base_url":"http://one.local","http_token":"secret"}`)
+	body := []byte(`{"id":"edge-http","transport":"http","enabled":true,"url":"http://one.local","auth":{"type":"none"},"tls":{}}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
@@ -2721,7 +2980,7 @@ func TestCreateHTTPAgentRejectsDuplicateID(t *testing.T) {
 		t.Fatalf("create http agent status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	body = []byte(`{"id":"edge-http","transport":"http","enabled":true,"base_url":"http://two.local","http_token":"secret"}`)
+	body = []byte(`{"id":"edge-http","transport":"http","enabled":true,"url":"http://two.local","auth":{"type":"none"},"tls":{}}`)
 	req = httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec = httptest.NewRecorder()
@@ -2729,18 +2988,391 @@ func TestCreateHTTPAgentRejectsDuplicateID(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate http agent status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	node, err := st.GetHTTPAgent(context.Background(), "edge-http")
+	node, err := st.GetOutboundAgent(context.Background(), "edge-http")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.BaseURL != "http://one.local" {
+	if node.URL != "http://one.local" {
 		t.Fatalf("duplicate create should not overwrite existing http agent: %#v", node)
+	}
+
+	body = []byte(`{"id":" edge-http ","transport":"http","enabled":true,"url":"http://attacker.local","auth":{"type":"none"},"tls":{}}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-canonical id status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	node, err = st.GetOutboundAgent(context.Background(), "edge-http")
+	if err != nil || node.URL != "http://one.local" {
+		t.Fatalf("non-canonical id overwrote canonical record: node=%#v err=%v", node, err)
+	}
+}
+
+func TestCreateOutboundAgentRejectsRemovedPrivateNetworkOverride(t *testing.T) {
+	st := store.NewTestMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := []byte(`{"id":"edge-http","transport":"http","enabled":false,"url":"http://agent.internal","allow_private_network":true,"auth":{"type":"none"},"tls":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("removed field status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.GetOutboundAgent(context.Background(), "edge-http"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("request containing removed field was persisted: %v", err)
+	}
+}
+
+func TestCreateOutboundAgentAllowsPreconfiguredCredentialsOverHTTPAndRedactsResponse(t *testing.T) {
+	st := store.NewTestMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := []byte(`{"id":"edge-http-auth","transport":"http","enabled":false,"url":"http://agent.example","headers":{"X-Provider-Version":"v1"},"auth":{"type":"bearer","secret":"managed-secret"},"tls":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response config.OutboundAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Auth.Secret != "" || response.Headers["X-Provider-Version"] != "v1" {
+		t.Fatalf("response was not correctly redacted: %#v", response)
+	}
+	stored, err := st.GetOutboundAgent(context.Background(), "edge-http-auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Auth.Secret != "managed-secret" || stored.URL != "http://agent.example" {
+		t.Fatalf("stored managed credentials = %#v", stored)
+	}
+}
+
+func TestCreateOutboundAgentAcceptsHuaweiCloudAKSKAndRedactsSecretKey(t *testing.T) {
+	st := store.NewTestMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := []byte(`{"id":"functiongraph-edge","transport":"event","enabled":false,"url":"https://functiongraph.example/invoke","headers":{"X-CFF-Request-Version":"v1"},"auth":{"type":"huaweicloud_aksk","access_key":"test-access-key","project_id":"test-project-id","secret":"test-secret-key"},"event_response":"result_field","tls":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "test-secret-key") {
+		t.Fatalf("create response leaked secret key: %s", rec.Body.String())
+	}
+	var response config.OutboundAgent
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Auth.Secret != "" || response.Auth.AccessKey != "test-access-key" || response.Auth.ProjectID != "test-project-id" {
+		t.Fatalf("response auth = %#v", response.Auth)
+	}
+	stored, err := st.GetOutboundAgent(context.Background(), "functiongraph-edge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Auth.Secret != "test-secret-key" || stored.Auth.AccessKey != "test-access-key" || stored.Auth.ProjectID != "test-project-id" {
+		t.Fatalf("stored auth = %#v", stored.Auth)
+	}
+}
+
+func TestCreateOutboundAgentRejectsUnsupportedHuaweiCloudSecurityToken(t *testing.T) {
+	st := store.NewTestMemory()
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	body := []byte(`{"id":"functiongraph-edge","transport":"event","enabled":false,"url":"https://functiongraph.example/invoke","auth":{"type":"huaweicloud_aksk","access_key":"test-access-key","project_id":"test-project-id","secret":"test-secret-key","security_token":"unsupported"},"event_response":"result_field","tls":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.GetOutboundAgent(context.Background(), "functiongraph-edge"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unsupported temporary credential was persisted: %v", err)
+	}
+}
+
+func TestCreateOutboundAgentRejectsInvalidHuaweiCloudAccessKeySyntax(t *testing.T) {
+	for name, accessKey := range map[string]string{
+		"space": "access key",
+		"tab":   "access\tkey",
+		"comma": "access,key",
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := store.NewTestMemory()
+			handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+				Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+				IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+			}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+			node := config.OutboundAgent{
+				ID: "functiongraph-edge", Transport: config.OutboundTransportEvent, Enabled: false,
+				URL: "https://functiongraph.example/invoke",
+				Auth: config.OutboundAgentAuth{
+					Type: config.OutboundAuthHuaweiCloudAKSK, AccessKey: accessKey,
+					ProjectID: "test-project-id", Secret: "test-secret-key",
+				},
+				EventResponse: config.EventResponseResultField,
+			}
+			body, err := json.Marshal(node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer admin")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if _, err := st.GetOutboundAgent(context.Background(), node.ID); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("invalid access key was persisted: %v", err)
+			}
+		})
+	}
+}
+
+type upsertOutboundAgentErrorStore struct {
+	store.Store
+	err error
+}
+
+func (s *upsertOutboundAgentErrorStore) UpsertOutboundAgent(context.Context, config.OutboundAgent) error {
+	return s.err
+}
+
+func TestWriteOutboundAgentRejectsInvalidTLSAndMasksStoreErrors(t *testing.T) {
+	newHandler := func(st store.Store) http.Handler {
+		return New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+			Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+			IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+	}
+
+	t.Run("invalid TLS material", func(t *testing.T) {
+		st := store.NewTestMemory()
+		body := []byte(`{"id":"edge-tls","transport":"http","enabled":true,"url":"https://agent.example","auth":{"type":"none"},"tls":{"enabled":true,"ca_files":["/missing/mtr-ca.pem"]}}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		rec := httptest.NewRecorder()
+		newHandler(st).ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid outbound agent TLS configuration") || strings.Contains(rec.Body.String(), "/missing/") {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if _, err := st.GetOutboundAgent(context.Background(), "edge-tls"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("invalid TLS configuration was persisted: %v", err)
+		}
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		base := store.NewTestMemory()
+		st := &upsertOutboundAgentErrorStore{Store: base, err: errors.New("database secret detail")}
+		body := []byte(`{"id":"edge-store-error","transport":"http","enabled":false,"url":"http://agent.example","auth":{"type":"none"},"tls":{}}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/manage/agents", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		rec := httptest.NewRecorder()
+		newHandler(st).ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "database secret detail") || !strings.Contains(rec.Body.String(), "internal server error") {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		events := base.AuditEvents()
+		if len(events) != 1 || events[0].Decision != "deny" || events[0].Reason != "internal server error" {
+			t.Fatalf("audit events = %#v", events)
+		}
+	})
+}
+
+func TestUpdateOutboundAgentOnlyPreservesSecretForUnchangedCredentialScope(t *testing.T) {
+	ctx := context.Background()
+	newHandler := func(st store.Store) http.Handler {
+		return New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+			Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+			IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+	}
+	base := config.OutboundAgent{
+		ID: "edge-http", Transport: config.OutboundTransportHTTP, URL: "https://agent.example/invoke",
+		Auth: config.OutboundAgentAuth{Type: config.OutboundAuthBearer, Secret: "existing-secret"},
+	}
+
+	t.Run("unchanged scope", func(t *testing.T) {
+		st := store.NewTestMemory()
+		if err := st.UpsertOutboundAgent(ctx, base); err != nil {
+			t.Fatal(err)
+		}
+		update := base
+		update.Auth.Secret = ""
+		update.Labels = []string{"blue"}
+		body, _ := json.Marshal(update)
+		req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/edge-http", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		rec := httptest.NewRecorder()
+		newHandler(st).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		saved, err := st.GetOutboundAgent(ctx, base.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Auth.Secret != "existing-secret" || !reflect.DeepEqual(saved.Labels, []string{"blue"}) {
+			t.Fatalf("saved = %#v", saved)
+		}
+	})
+
+	changes := map[string]func(*config.OutboundAgent){
+		"url": func(node *config.OutboundAgent) { node.URL = "https://other.example/invoke" },
+		"transport": func(node *config.OutboundAgent) {
+			node.Transport = config.OutboundTransportEvent
+			node.EventResponse = config.EventResponseDirect
+		},
+		"request headers": func(node *config.OutboundAgent) { node.Headers = map[string]string{"X-Provider-Version": "2"} },
+		"tls identity":    func(node *config.OutboundAgent) { node.TLS = config.TLS{Enabled: true, ServerName: "other.example"} },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			st := store.NewTestMemory()
+			if err := st.UpsertOutboundAgent(ctx, base); err != nil {
+				t.Fatal(err)
+			}
+			update := base
+			update.Auth.Secret = ""
+			change(&update)
+			body, _ := json.Marshal(update)
+			req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/edge-http", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer admin")
+			rec := httptest.NewRecorder()
+			newHandler(st).ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			saved, err := st.GetOutboundAgent(ctx, base.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.URL != base.URL || saved.Transport != base.Transport || saved.Auth.Secret != "existing-secret" {
+				t.Fatalf("rejected update changed stored credentials: %#v", saved)
+			}
+		})
+	}
+}
+
+func TestUpdateOutboundAgentOnlyPreservesHuaweiCloudSecretKeyForUnchangedCredentials(t *testing.T) {
+	ctx := context.Background()
+	newHandler := func(st store.Store) http.Handler {
+		return New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+			Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+			IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+	}
+	base := config.OutboundAgent{
+		ID: "functiongraph-edge", Transport: config.OutboundTransportEvent,
+		URL:     "https://functiongraph.example/invoke",
+		Headers: map[string]string{"X-Cff-Request-Version": "v1"},
+		Auth: config.OutboundAgentAuth{
+			Type: config.OutboundAuthHuaweiCloudAKSK, AccessKey: "existing-access-key",
+			ProjectID: "existing-project-id", Secret: "existing-secret-key",
+		},
+		EventResponse: config.EventResponseResultField,
+	}
+
+	t.Run("unchanged credentials", func(t *testing.T) {
+		st := store.NewTestMemory()
+		if err := st.UpsertOutboundAgent(ctx, base); err != nil {
+			t.Fatal(err)
+		}
+		update := base
+		update.Auth.Secret = ""
+		update.Labels = []string{"blue"}
+		body, _ := json.Marshal(update)
+		req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/functiongraph-edge", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		rec := httptest.NewRecorder()
+		newHandler(st).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "existing-secret-key") {
+			t.Fatalf("update response leaked secret key: %s", rec.Body.String())
+		}
+		saved, err := st.GetOutboundAgent(ctx, base.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Auth.Secret != "existing-secret-key" || !reflect.DeepEqual(saved.Labels, []string{"blue"}) {
+			t.Fatalf("saved = %#v", saved)
+		}
+	})
+
+	changes := map[string]func(*config.OutboundAgent){
+		"auth type": func(node *config.OutboundAgent) {
+			node.Auth = config.OutboundAgentAuth{Type: config.OutboundAuthBearer}
+		},
+		"access key": func(node *config.OutboundAgent) { node.Auth.AccessKey = "other-access-key" },
+		"project id": func(node *config.OutboundAgent) { node.Auth.ProjectID = "other-project-id" },
+		"url":        func(node *config.OutboundAgent) { node.URL = "https://other-functiongraph.example/invoke" },
+		"transport": func(node *config.OutboundAgent) {
+			node.Transport = config.OutboundTransportHTTP
+			node.EventResponse = ""
+		},
+		"request headers": func(node *config.OutboundAgent) {
+			node.Headers = map[string]string{"X-Cff-Request-Version": "v2"}
+		},
+		"tls": func(node *config.OutboundAgent) { node.TLS = config.TLS{Enabled: true} },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			st := store.NewTestMemory()
+			if err := st.UpsertOutboundAgent(ctx, base); err != nil {
+				t.Fatal(err)
+			}
+			update := base
+			update.Auth.Secret = ""
+			change(&update)
+			body, _ := json.Marshal(update)
+			req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/functiongraph-edge", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer admin")
+			rec := httptest.NewRecorder()
+			newHandler(st).ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			saved, err := st.GetOutboundAgent(ctx, base.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(saved.Auth, base.Auth) {
+				t.Fatalf("rejected update changed stored credentials: %#v", saved.Auth)
+			}
+		})
 	}
 }
 
 func TestDeleteManagedAgentRemovesConfigOnlyGRPCAgent(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-config", Labels: []string{"blue"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -2782,15 +3414,54 @@ func TestDeleteManagedAgentRemovesConfigOnlyGRPCAgent(t *testing.T) {
 	}
 }
 
-func TestDeleteManagedHTTPAgentRemovesRuntimeAgent(t *testing.T) {
+func TestDeleteManagedGRPCAgentPropagatesConfigDeleteFailure(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	base := store.NewTestMemory()
 	now := time.Now().UTC()
-	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{
+	if err := base.UpsertAgent(ctx, model.Agent{ID: "edge-delete-error", Status: model.AgentOffline, LastSeenAt: now, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-delete-error", Labels: []string{"blue"}}); err != nil {
+		t.Fatal(err)
+	}
+	deleteErr := errors.New("delete agent config failed")
+	st := &deleteAgentConfigErrorStore{Store: base, err: deleteErr}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/manage/agents/edge-delete-error", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := base.GetAgentConfig(ctx, "edge-delete-error"); err != nil {
+		t.Fatalf("failed config deletion should leave retryable config: %v", err)
+	}
+}
+
+type deleteAgentConfigErrorStore struct {
+	store.Store
+	err error
+}
+
+func (s *deleteAgentConfigErrorStore) DeleteAgentConfig(context.Context, string) error {
+	return s.err
+}
+
+func TestDeleteManagedOutboundAgentRemovesRuntimeAgent(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	now := time.Now().UTC()
+	if err := st.UpsertOutboundAgent(ctx, config.OutboundAgent{
 		ID:        "edge-http",
+		Transport: config.OutboundTransportHTTP,
 		Enabled:   true,
-		BaseURL:   "http://agent.local",
-		HTTPToken: "secret",
+		URL:       "http://agent.local",
+		Auth:      config.OutboundAgentAuth{Type: config.OutboundAuthNone},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2816,7 +3487,7 @@ func TestDeleteManagedHTTPAgentRemovesRuntimeAgent(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete http agent status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if _, err := st.GetHTTPAgent(ctx, "edge-http"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.GetOutboundAgent(ctx, "edge-http"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("http agent configuration still exists: %v", err)
 	}
 	agents, err := st.ListAgents(ctx)
@@ -2846,8 +3517,8 @@ func TestDeleteManagedHTTPAgentRemovesRuntimeAgent(t *testing.T) {
 	}
 }
 
-func TestUpdateMissingManagedAgentWithoutTransportReturnsNotFound(t *testing.T) {
-	st := store.NewMemory()
+func TestUpdateManagedAgentRequiresExplicitTransport(t *testing.T) {
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2857,13 +3528,42 @@ func TestUpdateMissingManagedAgentWithoutTransportReturnsNotFound(t *testing.T) 
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("missing agent update status = %d, body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing transport update status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateGRPCAgentRejectsNonCanonicalPathID(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	if err := st.UpsertOutboundAgent(ctx, config.OutboundAgent{
+		ID: "edge", Transport: config.OutboundTransportHTTP, URL: "http://agent.example",
+		Auth: config.OutboundAgentAuth{Type: config.OutboundAuthNone},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
+		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
+	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/manage/agents/%20edge%20", strings.NewReader(`{"id":" edge ","transport":"grpc","disabled":false,"labels":[]}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if configs, err := st.ListAgentConfigs(ctx); err != nil || len(configs) != 0 {
+		t.Fatalf("non-canonical path created grpc config: configs=%#v err=%v", configs, err)
+	}
+	if node, err := st.GetOutboundAgent(ctx, "edge"); err != nil || node.URL != "http://agent.example" {
+		t.Fatalf("canonical outbound agent changed: node=%#v err=%v", node, err)
 	}
 }
 
 func TestManageWriteAuditsAllowedAndDeniedActions(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
 		IP:     abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2902,7 +3602,7 @@ func TestManageWriteAuditsAllowedAndDeniedActions(t *testing.T) {
 
 func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	settings, err := st.GetManagedSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2928,7 +3628,13 @@ func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: true, BaseURL: "http://agent.local", HTTPToken: "http-secret"}); err != nil {
+	if err := st.UpsertOutboundAgent(ctx, config.OutboundAgent{
+		ID: "edge-http", Transport: config.OutboundTransportHTTP, Enabled: true, URL: "https://agent.local",
+		Auth: config.OutboundAgentAuth{
+			Type: config.OutboundAuthHuaweiCloudAKSK, AccessKey: "test-access-key",
+			ProjectID: "test-project-id", Secret: "test-secret-key",
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(st, policy.DefaultPolicies(), abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
@@ -2955,8 +3661,10 @@ func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents) != 1 || agents[0].HTTP == nil || agents[0].HTTP.HTTPToken != "" {
-		t.Fatalf("read-only agents leaked http token: %#v", agents)
+	if len(agents) != 1 || agents[0].Outbound == nil || agents[0].Outbound.Auth.Secret != "" ||
+		agents[0].Outbound.Auth.AccessKey != "test-access-key" || agents[0].Outbound.Auth.ProjectID != "test-project-id" ||
+		strings.Contains(rec.Body.String(), "test-secret-key") {
+		t.Fatalf("read-only agents leaked secret key or lost public credential fields: %#v", agents)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/manage/agents/edge-http", nil)
@@ -2970,14 +3678,16 @@ func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &agent); err != nil {
 		t.Fatal(err)
 	}
-	if agent.HTTP == nil || agent.HTTP.HTTPToken != "" {
-		t.Fatalf("read-only agent detail leaked http token: %#v", agent)
+	if agent.Outbound == nil || agent.Outbound.Auth.Secret != "" ||
+		agent.Outbound.Auth.AccessKey != "test-access-key" || agent.Outbound.Auth.ProjectID != "test-project-id" ||
+		strings.Contains(rec.Body.String(), "test-secret-key") {
+		t.Fatalf("read-only agent detail leaked secret key or lost public credential fields: %#v", agent)
 	}
 }
 
 func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	now := time.Now().UTC()
 	for _, agent := range []model.Agent{
 		{ID: "edge-grpc", Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll, Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now},
@@ -2987,7 +3697,7 @@ func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := st.UpsertHTTPAgent(ctx, config.HTTPAgent{ID: "edge-http", Enabled: true, BaseURL: "http://agent.local", HTTPToken: "secret", Labels: []string{"configured"}}); err != nil {
+	if err := st.UpsertOutboundAgent(ctx, config.OutboundAgent{ID: "edge-http", Transport: config.OutboundTransportHTTP, Enabled: true, URL: "https://agent.local", Auth: config.OutboundAgentAuth{Type: config.OutboundAuthBearer, Secret: "secret"}, Labels: []string{"configured"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-grpc", Labels: []string{"configured-grpc"}}); err != nil {
@@ -3029,15 +3739,31 @@ func TestManagedAgentsSeparateHTTPAndGRPCTransports(t *testing.T) {
 	if !reflect.DeepEqual(grpcAgents[0].Labels, []string{"agent", "agent:grpc", "id:edge-grpc", "configured-grpc"}) {
 		t.Fatalf("grpc managed labels should come from server config: %#v", grpcAgents[0].Labels)
 	}
-	httpAgents := byTransport["http"]
-	if len(httpAgents) != 1 || httpAgents[0].ID != "edge-http" || httpAgents[0].Transport != "http" {
-		t.Fatalf("http agents = %#v", httpAgents)
+	outboundAgents := byTransport["http"]
+	if len(outboundAgents) != 1 || outboundAgents[0].ID != "edge-http" || outboundAgents[0].Transport != "http" {
+		t.Fatalf("http agents = %#v", outboundAgents)
 	}
-	if !reflect.DeepEqual(httpAgents[0].Labels, []string{"agent", "agent:http", "id:edge-http", "configured"}) {
-		t.Fatalf("http labels = %#v", httpAgents[0].Labels)
+	if !reflect.DeepEqual(outboundAgents[0].Labels, []string{"agent", "agent:http", "id:edge-http", "configured"}) {
+		t.Fatalf("http labels = %#v", outboundAgents[0].Labels)
 	}
-	if httpAgents[0].HTTP == nil || !reflect.DeepEqual(httpAgents[0].HTTP.Labels, []string{"configured"}) {
-		t.Fatalf("http config = %#v", httpAgents[0].HTTP)
+	if outboundAgents[0].Outbound == nil || !reflect.DeepEqual(outboundAgents[0].Outbound.Labels, []string{"configured"}) || outboundAgents[0].Outbound.Auth.Secret != "" {
+		t.Fatalf("http config = %#v", outboundAgents[0].Outbound)
+	}
+}
+
+func TestDNSDispatchDoesNotRequireAddressResolution(t *testing.T) {
+	server := &Server{}
+	options, err := server.dispatchOptions(context.Background(), model.CreateJobRequest{
+		Tool:      model.ToolDNS,
+		Target:    "mx-only.invalid",
+		Args:      map[string]string{"type": "MX"},
+		IPVersion: model.IPAny,
+	}, policy.DefaultPolicies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options) != 1 || options[0].ResolvedTarget != "" || options[0].IPVersion != model.IPAny {
+		t.Fatalf("DNS dispatch options = %#v", options)
 	}
 }
 

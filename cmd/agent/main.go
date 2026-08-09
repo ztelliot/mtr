@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -34,8 +36,23 @@ import (
 )
 
 const (
-	defaultSystemAgentConfig = "/etc/mtr/agent.yaml"
-	defaultLocalAgentConfig  = "configs/agent.yaml"
+	defaultSystemAgentConfig     = "/etc/mtr/agent.yaml"
+	defaultLocalAgentConfig      = "configs/agent.yaml"
+	agentMaxConcurrentJobs       = 4
+	agentMaxConcurrentEventReads = 8
+	agentMaxConcurrentSpeedtests = 4
+	agentMaxEventResultEvents    = 1024
+	agentMaxEventResultBytes     = 4 << 20
+	agentEventEnvelopeReserve    = 4 << 10
+	agentMaxJobIDLength          = 128
+	agentHTTPWriteTimeout        = 10 * time.Second
+	agentGRPCSendQueueSize       = 128
+	agentGRPCSendTimeout         = 10 * time.Second
+)
+
+var (
+	agentNetworkHealthOnce sync.Once
+	agentNetworkHealth     map[string]any
 )
 
 func main() {
@@ -73,12 +90,13 @@ func main() {
 	log.Info("agent linux privileges", procStatusLogAttrs()...)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	jobSlots := make(chan struct{}, agentMaxConcurrentJobs)
 	errCh := make(chan error, 2)
 	var stopHTTP func()
 	var httpErr <-chan error
 	if modes.http {
 		var err error
-		stopHTTP, httpErr, err = startHTTPAgentServer(ctx, cfg.HTTPAddr, cfg, log)
+		stopHTTP, httpErr, err = startHTTPAgentServer(ctx, cfg.HTTPAddr, cfg, log, jobSlots)
 		if err != nil {
 			log.Error("start http agent", "err", err)
 			os.Exit(1)
@@ -87,7 +105,7 @@ func main() {
 	}
 	if modes.event {
 		var err error
-		stopHTTP, httpErr, err = startEventAgentServer(ctx, cfg.HTTPAddr, cfg, log)
+		stopHTTP, httpErr, err = startEventAgentServer(ctx, cfg.HTTPAddr, cfg, log, jobSlots)
 		if err != nil {
 			log.Error("start event agent", "err", err)
 			os.Exit(1)
@@ -96,7 +114,7 @@ func main() {
 	}
 	if modes.grpc {
 		go func() {
-			errCh <- run(ctx, cfg, log)
+			errCh <- run(ctx, cfg, log, jobSlots)
 		}()
 	}
 	if !modes.grpc {
@@ -178,17 +196,22 @@ type agentModes struct {
 func parseAgentModes(raw string) (agentModes, bool) {
 	var modes agentModes
 	for _, part := range strings.Split(raw, ",") {
-		switch strings.ToLower(strings.TrimSpace(part)) {
+		switch part {
 		case "grpc":
+			if modes.grpc {
+				return agentModes{}, false
+			}
 			modes.grpc = true
 		case "http":
+			if modes.http {
+				return agentModes{}, false
+			}
 			modes.http = true
 		case "event":
+			if modes.event {
+				return agentModes{}, false
+			}
 			modes.event = true
-		case "both", "all":
-			modes.grpc = true
-			modes.http = true
-		case "":
 		default:
 			return agentModes{}, false
 		}
@@ -202,34 +225,37 @@ func parseAgentModes(raw string) (agentModes, bool) {
 func agentCapabilities(in []string) []model.Tool {
 	out := make([]model.Tool, 0, len(in))
 	for _, item := range in {
-		if item != "" {
-			out = append(out, model.Tool(item))
-		}
+		out = append(out, model.Tool(item))
 	}
 	return out
 }
 
-func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger) (func(), <-chan error, error) {
-	if strings.TrimSpace(cfg.HTTPToken) == "" {
-		return nil, nil, fmt.Errorf("http_token is required when agent mode includes http")
+func startHTTPAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger, jobSlots chan struct{}) (func(), <-chan error, error) {
+	httpAuth, err := config.NormalizeAgentHTTPAuth("http", cfg.HTTPAuth)
+	if err != nil {
+		return nil, nil, fmt.Errorf("http_auth: %w", err)
 	}
-	cfg.ID = defaultHTTPAgentID(cfg.ID)
+	cfg.HTTPAuth = httpAuth
 	tlsConfig, err := tlsutil.ServerTLSConfig(cfg.HTTPTLS.CAFiles, cfg.HTTPTLS.CertFile, cfg.HTTPTLS.KeyFile, cfg.HTTPTLS.Enabled)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http_tls: %w", err)
 	}
-	return startAgentHTTPServer(ctx, listen, newHTTPAgentHandler(cfg, log), tlsConfig, "http agent listening", cfg.ID, log)
+	return startAgentHTTPServer(ctx, listen, newHTTPAgentHandlerWithJobSlots(cfg, log, jobSlots), tlsConfig, "http agent listening", cfg.ID, log)
 }
 
-func startEventAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger) (func(), <-chan error, error) {
+func startEventAgentServer(ctx context.Context, listen string, cfg config.Agent, log *slog.Logger, jobSlots chan struct{}) (func(), <-chan error, error) {
+	httpAuth, err := config.NormalizeAgentHTTPAuth("event", cfg.HTTPAuth)
+	if err != nil {
+		return nil, nil, fmt.Errorf("http_auth: %w", err)
+	}
+	cfg.HTTPAuth = httpAuth
 	if cfg.HTTPPathPrefix != "" {
 		return nil, nil, fmt.Errorf("http_path_prefix is not supported in event mode")
 	}
 	if cfg.HTTPTLS.Enabled {
 		return nil, nil, fmt.Errorf("http_tls is not supported in event mode")
 	}
-	cfg.ID = defaultHTTPAgentID(cfg.ID)
-	return startAgentHTTPServer(ctx, listen, newEventAgentHandler(cfg, log), nil, "event agent listening", cfg.ID, log)
+	return startAgentHTTPServer(ctx, listen, newEventAgentHandlerWithJobSlots(cfg, log, jobSlots), nil, "event agent listening", cfg.ID, log)
 }
 
 func startAgentHTTPServer(ctx context.Context, listen string, handler http.Handler, tlsConfig *tls.Config, message string, agentID string, log *slog.Logger) (func(), <-chan error, error) {
@@ -279,14 +305,27 @@ func startAgentHTTPServer(ctx context.Context, listen string, handler http.Handl
 }
 
 func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
-	agentID := defaultHTTPAgentID(cfg.ID)
+	return newHTTPAgentHandlerWithJobSlots(cfg, log, make(chan struct{}, agentMaxConcurrentJobs))
+}
+
+func newHTTPAgentHandlerWithJobSlots(cfg config.Agent, log *slog.Logger, jobSlots chan struct{}) http.Handler {
+	agentID := cfg.ID
 	mux := http.NewServeMux()
 	r := runner.New()
 	policies := policy.DefaultPolicies()
 	invokeAuthLimiter := abuse.NewConfiguredLimiter(abuse.RateLimitConfig{})
-	mux.Handle("/speedtest/random", newSpeedtestHandler(cfg.Speedtest, cfg.HTTPToken, log))
+	mux.Handle("/speedtest/random", newSpeedtestHandler(cfg.Speedtest, cfg.HTTPAuth, log))
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if status, message, ok := authorizeAgentRequest(req, cfg.HTTPAuth, invokeAuthLimiter); !ok {
+			writeJSON(w, status, map[string]string{"error": message})
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, agentHealthPayload(cfg, agentID))
 	})
 	mux.HandleFunc("/invoke", func(w http.ResponseWriter, req *http.Request) {
@@ -294,51 +333,48 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		if cfg.HTTPToken != "" {
-			token, ok := bearerToken(req.Header.Get("Authorization"))
-			if !ok || token != cfg.HTTPToken {
-				if !invokeAuthLimiter.AllowRequest(speedtestClientIP(req)) {
-					writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
-					return
-				}
-			}
-			if !ok {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization header must use Bearer scheme"})
-				return
-			}
-			if token != cfg.HTTPToken {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-				return
-			}
+		if status, message, ok := authorizeAgentRequest(req, cfg.HTTPAuth, invokeAuthLimiter); !ok {
+			writeJSON(w, status, map[string]string{"error": message})
+			return
 		}
+		if !tryAcquireAgentJob(jobSlots) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent jobs"})
+			return
+		}
+		defer releaseAgentJob(jobSlots)
 
 		var spec grpcwire.JobSpec
-		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<20)).Decode(&spec); err != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&spec); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
-		p, err := prepareAgentJob(&spec, agentID, policies)
+		p, err := prepareAgentJob(&spec, agentID, policies, cfg.Capabilities)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+		writeController := http.NewResponseController(w)
+		if err := setAgentWriteDeadline(writeController); err != nil {
+			log.Warn("set http agent write deadline failed", "job_id", spec.ID, "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unavailable"})
 			return
 		}
+		defer clearAgentWriteDeadline(writeController)
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 
 		writeLine := func(v any) error {
+			if err := setAgentWriteDeadline(writeController); err != nil {
+				return err
+			}
 			if err := json.NewEncoder(w).Encode(v); err != nil {
 				return err
 			}
-			flusher.Flush()
-			return nil
+			return writeController.Flush()
 		}
 		executeAgentJob(req.Context(), cfg, spec, p, r, log, writeLine)
 	})
@@ -352,71 +388,106 @@ func newHTTPAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
 }
 
 func newEventAgentHandler(cfg config.Agent, log *slog.Logger) http.Handler {
-	agentID := defaultHTTPAgentID(cfg.ID)
+	return newEventAgentHandlerWithJobSlots(cfg, log, make(chan struct{}, agentMaxConcurrentJobs))
+}
+
+func newEventAgentHandlerWithJobSlots(cfg config.Agent, log *slog.Logger, jobSlots chan struct{}) http.Handler {
+	agentID := cfg.ID
 	r := runner.New()
 	policies := policy.DefaultPolicies()
+	invokeAuthLimiter := abuse.NewConfiguredLimiter(abuse.RateLimitConfig{})
+	readSlots := make(chan struct{}, agentMaxConcurrentEventReads)
 	mux := http.NewServeMux()
+	mux.HandleFunc("/init", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	mux.HandleFunc("/invoke", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		requestBody, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 1<<20))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		if status, message, ok := authorizeAgentRequest(req, cfg.HTTPAuth, invokeAuthLimiter); !ok {
+			writeJSON(w, status, map[string]string{"error": message})
 			return
 		}
-		var event struct {
+		if !tryAcquireAgentJob(readSlots) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent requests"})
+			return
+		}
+		readSlotHeld := true
+		defer func() {
+			if readSlotHeld {
+				releaseAgentJob(readSlots)
+			}
+		}()
+		var spec grpcwire.JobSpec
+		event := struct {
 			Action string `json:"action"`
-		}
-		if err := json.Unmarshal(requestBody, &event); err != nil {
+			*grpcwire.JobSpec
+		}{JobSpec: &spec}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&event); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
-		switch strings.ToLower(strings.TrimSpace(event.Action)) {
+		if spec.ProtocolVersion != grpcwire.AgentProtocolVersion {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unsupported agent protocol version %d (required %d)", spec.ProtocolVersion, grpcwire.AgentProtocolVersion)})
+			return
+		}
+		switch event.Action {
 		case "healthz":
+			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusOK, agentHealthPayload(cfg, agentID))
 			return
-		case "", "invoke", "job":
+		case "invoke":
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported event action"})
 			return
 		}
-
-		var spec grpcwire.JobSpec
-		if err := json.Unmarshal(requestBody, &spec); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		releaseAgentJob(readSlots)
+		readSlotHeld = false
+		if !tryAcquireAgentJob(jobSlots) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent jobs"})
 			return
 		}
-		p, err := prepareAgentJob(&spec, agentID, policies)
+		defer releaseAgentJob(jobSlots)
+
+		p, err := prepareAgentJob(&spec, agentID, policies, cfg.Capabilities)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-
 		response := eventInvokeResponse{
 			JobID:  spec.ID,
 			Events: make([]map[string]any, 0),
 		}
-		collect := func(v any) error {
-			payload, ok := v.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected event payload %T", v)
-			}
-			if payload["type"] == "summary" {
-				response.Result = payload
-				return nil
-			}
-			response.Events = append(response.Events, payload)
-			return nil
+		collector := eventResultCollector{
+			response:  &response,
+			maxEvents: agentMaxEventResultEvents,
+			maxBytes:  agentMaxEventResultBytes - agentEventEnvelopeReserve,
 		}
-		executeAgentJob(req.Context(), cfg, spec, p, r, log, collect)
+		executeAgentJob(req.Context(), cfg, spec, p, r, log, collector.collect)
+		if collector.err != nil {
+			writeJSONWithDeadline(w, http.StatusRequestEntityTooLarge, map[string]string{"error": collector.err.Error()}, log)
+			return
+		}
 		if response.Result == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job did not produce a result"})
+			writeJSONWithDeadline(w, http.StatusInternalServerError, map[string]string{"error": "job did not produce a result"}, log)
+			return
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil || len(encoded)+1 > agentMaxEventResultBytes {
+			writeJSONWithDeadline(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "event result exceeds byte limit"}, log)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, response)
+		writeJSONWithDeadline(w, http.StatusOK, response, log)
 	})
 	return logHTTPRequests(log, mux)
 }
@@ -427,24 +498,71 @@ type eventInvokeResponse struct {
 	Result map[string]any   `json:"result"`
 }
 
+type eventResultCollector struct {
+	response  *eventInvokeResponse
+	maxEvents int
+	maxBytes  int
+	bytes     int
+	err       error
+}
+
+func (c *eventResultCollector) collect(value any) error {
+	if c.err != nil {
+		return c.err
+	}
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected event payload %T", value)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	size := len(encoded) + 1
+	if c.maxBytes <= 0 || size > c.maxBytes-c.bytes {
+		c.err = errors.New("event result exceeds byte limit")
+		return c.err
+	}
+	c.bytes += size
+	if payload["type"] == "summary" {
+		c.response.Result = payload
+		return nil
+	}
+	if c.maxEvents <= 0 || len(c.response.Events) >= c.maxEvents {
+		c.err = errors.New("event result exceeds event limit")
+		return c.err
+	}
+	c.response.Events = append(c.response.Events, payload)
+	return nil
+}
+
 func agentHealthPayload(cfg config.Agent, agentID string) map[string]any {
 	return map[string]any{
 		"status":  "ok",
 		"version": version.Current(),
 		"network": agentNetworkHealthPayload(),
 		"agent": map[string]any{
-			"id":           agentID,
-			"country":      cfg.Country,
-			"region":       cfg.Region,
-			"provider":     cfg.Provider,
-			"isp":          cfg.ISP,
-			"capabilities": agentCapabilities(cfg.Capabilities),
-			"protocols":    model.ProtocolMask(cfg.Protocols),
+			"protocol_version":    grpcwire.AgentProtocolVersion,
+			"id":                  agentID,
+			"country":             cfg.Country,
+			"region":              cfg.Region,
+			"provider":            cfg.Provider,
+			"isp":                 cfg.ISP,
+			"capabilities":        agentCapabilities(cfg.Capabilities),
+			"protocols":           model.ProtocolMask(cfg.Protocols),
+			"max_concurrent_jobs": agentMaxConcurrentJobs,
 		},
 	}
 }
 
 func agentNetworkHealthPayload() map[string]any {
+	agentNetworkHealthOnce.Do(func() {
+		agentNetworkHealth = probeAgentNetworkHealth()
+	})
+	return cloneStringAnyMap(agentNetworkHealth)
+}
+
+func probeAgentNetworkHealth() map[string]any {
 	capabilities := map[string]any{
 		"effective": false,
 		"bounded":   false,
@@ -478,6 +596,18 @@ func agentNetworkHealthPayload() map[string]any {
 	return network
 }
 
+func cloneStringAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		if nested, ok := value.(map[string]any); ok {
+			out[key] = cloneStringAnyMap(nested)
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func capabilitySetContains(raw string, capability uint) bool {
 	value, err := strconv.ParseUint(raw, 16, 64)
 	return err == nil && value&(uint64(1)<<capability) != 0
@@ -492,7 +622,18 @@ func probeICMPEchoDatagram(network string, address string) map[string]any {
 	return map[string]any{"available": true}
 }
 
-func prepareAgentJob(spec *grpcwire.JobSpec, agentID string, policies policy.Set) (policy.Policy, error) {
+func prepareAgentJob(spec *grpcwire.JobSpec, agentID string, policies policy.Set, capabilities []string) (policy.Policy, error) {
+	if spec.ProtocolVersion != grpcwire.AgentProtocolVersion {
+		return policy.Policy{}, fmt.Errorf("unsupported agent protocol version %d (required %d)", spec.ProtocolVersion, grpcwire.AgentProtocolVersion)
+	}
+	if !agentHasCapability(capabilities, spec.Tool) {
+		return policy.Policy{}, fmt.Errorf("%w: tool %q is not enabled by agent capabilities", errUnsupportedAgentTool, spec.Tool)
+	}
+	if spec.ID == "" || spec.ID != strings.TrimSpace(spec.ID) || len(spec.ID) > agentMaxJobIDLength {
+		return policy.Policy{}, fmt.Errorf("job id must contain 1-%d bytes", agentMaxJobIDLength)
+	}
+	runtime := policies.Runtime()
+	spec.Args = boundedAgentArgs(spec.Tool, spec.Args, runtime)
 	createReq := model.CreateJobRequest{
 		Tool:           spec.Tool,
 		Target:         spec.Target,
@@ -506,43 +647,115 @@ func prepareAgentJob(spec *grpcwire.JobSpec, agentID string, policies policy.Set
 	if err != nil {
 		return policy.Policy{}, err
 	}
-	if spec.TimeoutSeconds > 0 {
-		p.Timeout = time.Duration(spec.TimeoutSeconds) * time.Second
-	}
-	if spec.ProbeTimeoutSeconds > 0 {
-		p.ProbeTimeout = time.Duration(spec.ProbeTimeoutSeconds) * time.Second
-	}
+	spec.TimeoutSeconds = clampAgentSeconds(spec.TimeoutSeconds, int(p.Timeout/time.Second))
+	spec.ProbeTimeoutSeconds = clampAgentSeconds(spec.ProbeTimeoutSeconds, int(p.ProbeTimeout/time.Second))
+	spec.ResolveTimeoutSeconds = clampAgentSeconds(spec.ResolveTimeoutSeconds, runtime.ResolveTimeoutSec)
+	p.Timeout = time.Duration(spec.TimeoutSeconds) * time.Second
+	p.ProbeTimeout = time.Duration(spec.ProbeTimeoutSeconds) * time.Second
 	return p, nil
 }
 
+func agentHasCapability(capabilities []string, tool model.Tool) bool {
+	for _, capability := range agentCapabilities(capabilities) {
+		if capability == tool {
+			return true
+		}
+	}
+	return false
+}
+
+func boundedAgentArgs(tool model.Tool, args map[string]string, runtime config.Runtime) map[string]string {
+	out := make(map[string]string, len(args)+2)
+	for key, value := range args {
+		out[key] = value
+	}
+	bound := func(key string, maximum int) {
+		raw := out[key]
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > maximum {
+			value = maximum
+		}
+		out[key] = strconv.Itoa(value)
+	}
+	switch tool {
+	case model.ToolPing:
+		bound("count", runtime.Count)
+	case model.ToolTraceroute:
+		bound("max_hops", runtime.MaxHops)
+	case model.ToolMTR:
+		bound("count", runtime.Count)
+		bound("max_hops", runtime.MaxHops)
+	}
+	return out
+}
+
+func clampAgentSeconds(value int, maximum int) int {
+	if maximum <= 0 {
+		return 1
+	}
+	if value <= 0 || value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func tryAcquireAgentJob(slots chan struct{}) bool {
+	select {
+	case slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseAgentJob(slots chan struct{}) {
+	<-slots
+}
+
 func executeAgentJob(ctx context.Context, cfg config.Agent, spec grpcwire.JobSpec, p policy.Policy, r runner.Runner, log *slog.Logger, writeLine func(any) error) {
+	jobCtx, cancel := agentJobContext(ctx, p.Timeout)
+	defer cancel()
+	write := func(value any) error {
+		err := writeLine(value)
+		if err != nil {
+			cancel()
+		}
+		return err
+	}
 	sendEvent := func(event model.StreamEvent) error {
 		redactStreamEvent(&event, spec.Tool, cfg.HideFirstHops)
-		return writeLine(event.WirePayload())
+		return write(event.WirePayload())
 	}
 
-	resolvedTarget, resolvedVersion, err := resolveAgentTarget(ctx, spec.Tool, spec.Target, spec.ResolvedTarget, spec.IPVersion, spec.ResolveOnAgent, spec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
+	resolvedTarget, resolvedVersion, err := resolveAgentTarget(jobCtx, spec.Tool, spec.Target, spec.ResolvedTarget, spec.IPVersion, spec.ResolveOnAgent, spec.ResolveTimeoutSeconds, model.ProtocolMask(cfg.Protocols))
 	job := model.Job{ID: spec.ID, Tool: spec.Tool, Target: spec.Target, ResolvedTarget: resolvedTarget, Args: spec.Args, IPVersion: resolvedVersion, ResolveOnAgent: spec.ResolveOnAgent}
 	if err != nil {
 		failureType := agentPreflightFailureType(err)
 		_ = sendEvent(model.StreamEvent{Type: failureType, Message: failureType})
 		parsed := agentPreflightFailureResult(job, err)
 		compactParsedResult(parsed)
-		_ = writeLine(parsed.WirePayload())
+		_ = write(parsed.WirePayload())
 		log.Warn("agent rejected job", "job_id", spec.ID, "failure_type", failureType, "err", err)
 		return
 	}
 
-	log.Debug("agent job start", "job_id", spec.ID, "tool", spec.Tool, "target", spec.Target)
-	parsed, runErr := r.RunStream(ctx, job, p, sendEvent)
+	log.Debug("agent job start", "job_id", spec.ID, "tool", spec.Tool)
+	parsed, runErr := r.RunStream(jobCtx, job, p, sendEvent)
 	if parsed != nil {
 		redactHops(parsed, cfg.HideFirstHops)
 		compactParsedResult(parsed)
-		_ = writeLine(parsed.WirePayload())
+		_ = write(parsed.WirePayload())
 	}
 	if runErr != nil {
 		log.Warn("agent job failed", "job_id", spec.ID, "err", runErr)
 	}
+}
+
+func agentJobContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+	return context.WithCancel(parent)
 }
 
 func bearerToken(header string) (string, bool) {
@@ -556,6 +769,45 @@ func bearerToken(header string) (string, bool) {
 	return token, true
 }
 
+func authorizeAgentRequest(req *http.Request, auth config.HTTPAuth, limiter *abuse.Limiter) (int, string, bool) {
+	validScheme := true
+	validCredentials := false
+	switch auth.Type {
+	case config.HTTPAuthNone:
+		return 0, "", true
+	case config.HTTPAuthBearer:
+		values := req.Header.Values("Authorization")
+		var token string
+		if len(values) == 1 {
+			token, validScheme = bearerToken(values[0])
+		} else {
+			validScheme = false
+		}
+		validCredentials = validScheme && constantTimeTokenEqual(token, auth.Secret)
+	case config.HTTPAuthHeader:
+		values := req.Header.Values(auth.Header)
+		validCredentials = len(values) == 1 && constantTimeTokenEqual(values[0], auth.Secret)
+	default:
+		validScheme = false
+	}
+	if validCredentials {
+		return 0, "", true
+	}
+	if limiter != nil && !limiter.AllowRequest(speedtestClientIP(req)) {
+		return http.StatusTooManyRequests, "rate limit exceeded", false
+	}
+	if auth.Type == config.HTTPAuthBearer && !validScheme {
+		return http.StatusUnauthorized, "authorization header must use Bearer scheme", false
+	}
+	return http.StatusUnauthorized, "invalid token", false
+}
+
+func constantTimeTokenEqual(left string, right string) bool {
+	leftHash := sha256.Sum256([]byte(left))
+	rightHash := sha256.Sum256([]byte(right))
+	return subtle.ConstantTimeCompare(leftHash[:], rightHash[:]) == 1
+}
+
 func logHTTPRequests(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -564,7 +816,7 @@ func logHTTPRequests(log *slog.Logger, next http.Handler) http.Handler {
 		log.Debug("http agent request",
 			"method", r.Method,
 			"path", r.URL.Path,
-			"client_ip", httpClientIP(r),
+			"client_ip", speedtestClientIP(r),
 			"status", lrw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
@@ -582,29 +834,47 @@ func (w *loggingResponseWriter) WriteHeader(status int) {
 }
 
 func (w *loggingResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	_ = w.FlushError()
 }
 
-func defaultHTTPAgentID(agentID string) string {
-	if agentID != "" {
-		return agentID
-	}
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
-		return hostname
-	}
-	return "unknown"
+func (w *loggingResponseWriter) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
-func run(ctx context.Context, cfg config.Agent, log *slog.Logger) error {
-	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Enabled)
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func setAgentWriteDeadline(controller *http.ResponseController) error {
+	err := controller.SetWriteDeadline(time.Now().Add(agentHTTPWriteTimeout))
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func clearAgentWriteDeadline(controller *http.ResponseController) {
+	_ = controller.SetWriteDeadline(time.Time{})
+}
+
+func writeJSONWithDeadline(w http.ResponseWriter, status int, value any, log *slog.Logger) {
+	controller := http.NewResponseController(w)
+	if err := setAgentWriteDeadline(controller); err != nil {
+		log.Warn("set event agent write deadline failed", "err", err)
+		return
+	}
+	defer clearAgentWriteDeadline(controller)
+	writeJSON(w, status, value)
+}
+
+func run(ctx context.Context, cfg config.Agent, log *slog.Logger, jobSlots chan struct{}) error {
+	creds, err := tlsutil.ClientCredentials(cfg.TLS.CAFiles, cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.Enabled, cfg.TLS.ServerName)
 	if err != nil {
 		return err
 	}
 	backoff := time.Second
 	for {
-		if err := runGRPCSession(ctx, cfg, creds, log); err != nil {
+		if err := runGRPCSession(ctx, cfg, creds, log, jobSlots); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -622,40 +892,186 @@ func run(ctx context.Context, cfg config.Agent, log *slog.Logger) error {
 	}
 }
 
-func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.TransportCredentials, log *slog.Logger) error {
-	conn, err := grpc.NewClient(cfg.ServerAddr, grpc.WithTransportCredentials(creds), grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcwire.JSONCodec{})))
+var errAgentGRPCSendTimeout = errors.New("agent gRPC send timed out")
+
+type agentMessageStream interface {
+	Send(*grpcwire.AgentMessage) error
+}
+
+type agentSendRequest struct {
+	ctx     context.Context
+	message *grpcwire.AgentMessage
+	done    chan error
+}
+
+type agentGRPCSender struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stream    agentMessageStream
+	queue     chan agentSendRequest
+	timeout   time.Duration
+	done      chan struct{}
+	errors    chan error
+	failOnce  sync.Once
+	failureMu sync.Mutex
+	failure   error
+}
+
+func newAgentGRPCSender(ctx context.Context, cancel context.CancelFunc, stream agentMessageStream, queueSize int, timeout time.Duration) *agentGRPCSender {
+	if queueSize <= 0 {
+		queueSize = 1
+	}
+	if timeout <= 0 {
+		timeout = agentGRPCSendTimeout
+	}
+	sender := &agentGRPCSender{
+		ctx:     ctx,
+		cancel:  cancel,
+		stream:  stream,
+		queue:   make(chan agentSendRequest, queueSize),
+		timeout: timeout,
+		done:    make(chan struct{}),
+		errors:  make(chan error, 1),
+	}
+	go sender.run()
+	return sender
+}
+
+func (s *agentGRPCSender) Send(ctx context.Context, message *grpcwire.AgentMessage) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	request := agentSendRequest{ctx: ctx, message: message, done: make(chan error, 1)}
+	timer := time.NewTimer(s.timeout)
+	defer timer.Stop()
+	select {
+	case s.queue <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.failureError()
+	case <-timer.C:
+		s.fail(errAgentGRPCSendTimeout)
+		return errAgentGRPCSendTimeout
+	}
+	select {
+	case err := <-request.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.failureError()
+	case <-timer.C:
+		s.fail(errAgentGRPCSendTimeout)
+		return errAgentGRPCSendTimeout
+	}
+}
+
+func (s *agentGRPCSender) Errors() <-chan error {
+	return s.errors
+}
+
+func (s *agentGRPCSender) run() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			s.fail(s.ctx.Err())
+			return
+		case <-s.done:
+			return
+		case request := <-s.queue:
+			if err := request.ctx.Err(); err != nil {
+				request.done <- err
+				continue
+			}
+			result := make(chan error, 1)
+			go func(message *grpcwire.AgentMessage) {
+				result <- s.stream.Send(message)
+			}(request.message)
+			timer := time.NewTimer(s.timeout)
+			select {
+			case err := <-result:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				request.done <- err
+				if err != nil {
+					s.fail(err)
+					return
+				}
+			case <-timer.C:
+				request.done <- errAgentGRPCSendTimeout
+				s.fail(errAgentGRPCSendTimeout)
+				return
+			case <-s.done:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				request.done <- s.failureError()
+				return
+			case <-s.ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				request.done <- s.ctx.Err()
+				s.fail(s.ctx.Err())
+				return
+			}
+		}
+	}
+}
+
+func (s *agentGRPCSender) fail(err error) {
+	if err == nil {
+		err = errors.New("agent gRPC sender stopped")
+	}
+	s.failOnce.Do(func() {
+		s.failureMu.Lock()
+		s.failure = err
+		s.failureMu.Unlock()
+		if s.cancel != nil {
+			s.cancel()
+		}
+		close(s.done)
+		s.errors <- err
+	})
+}
+
+func (s *agentGRPCSender) failureError() error {
+	s.failureMu.Lock()
+	defer s.failureMu.Unlock()
+	if s.failure != nil {
+		return s.failure
+	}
+	return context.Canceled
+}
+
+func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.TransportCredentials, log *slog.Logger, jobSlots chan struct{}) error {
+	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+	conn, err := grpc.NewClient(cfg.ServerAddr, grpc.WithTransportCredentials(creds), grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcwire.JSONCodec{}), grpc.MaxCallRecvMsgSize(1<<20)))
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 	client := grpcwire.NewControlClient(conn)
-	stream, err := client.Connect(ctx)
+	stream, err := client.Connect(sessionCtx)
 	if err != nil {
 		return err
 	}
-	caps := agentCapabilities(cfg.Capabilities)
-	if err := stream.Send(&grpcwire.AgentMessage{
-		Type: "hello",
-		Agent: &grpcwire.AgentHello{
-			ID:           cfg.ID,
-			Country:      cfg.Country,
-			Region:       cfg.Region,
-			Provider:     cfg.Provider,
-			ISP:          cfg.ISP,
-			Version:      version.String(),
-			Token:        cfg.RegisterToken,
-			Capabilities: caps,
-			Protocols:    model.ProtocolMask(cfg.Protocols),
-		},
+	hello := newAgentHello(cfg)
+	sender := newAgentGRPCSender(sessionCtx, sessionCancel, stream, agentGRPCSendQueueSize, agentGRPCSendTimeout)
+	if err := sender.Send(sessionCtx, &grpcwire.AgentMessage{
+		Type:  "hello",
+		Agent: hello,
 	}); err != nil {
 		return err
 	}
-	log.Info("agent connected", "agent_id", cfg.ID, "server_addr", cfg.ServerAddr, "capabilities", caps, "protocols", cfg.Protocols)
+	log.Info("agent connected", "agent_id", cfg.ID, "server_addr", cfg.ServerAddr, "capabilities", hello.Capabilities, "protocols", cfg.Protocols, "protocol_version", hello.ProtocolVersion)
 
 	r := runner.New()
 	defaultPolicies := policy.DefaultPolicies()
 	var wg sync.WaitGroup
-	var sendMu sync.Mutex
 	var runningMu sync.Mutex
 	runningCancels := map[string]context.CancelFunc{}
 	cancelJob := func(jobID string) bool {
@@ -669,19 +1085,26 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 		return true
 	}
 	errCh := make(chan error, 2)
-	go heartbeat(ctx, stream, &sendMu, errCh)
+	go heartbeat(sessionCtx, sender)
+	go func() {
+		errCh <- <-sender.Errors()
+	}()
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
-				if err == io.EOF || ctx.Err() != nil {
-					errCh <- ctx.Err()
+				if err == io.EOF || sessionCtx.Err() != nil {
+					errCh <- sessionCtx.Err()
 					return
 				}
 				errCh <- err
 				return
 			}
-			if msg.Type == "cancel" && msg.Cancel != nil {
+			if err := validateServerMessage(msg); err != nil {
+				errCh <- err
+				return
+			}
+			if msg.Type == "cancel" {
 				if cancelJob(msg.Cancel.JobID) {
 					log.Debug("job cancel received", "job_id", msg.Cancel.JobID)
 				} else {
@@ -689,29 +1112,25 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 				}
 				continue
 			}
-			if msg.Type != "job" || msg.Job == nil {
-				continue
-			}
 			jobSpec := msg.Job
-			log.Debug("job received", "job_id", jobSpec.ID, "tool", jobSpec.Tool, "target", jobSpec.Target, "ip_version", jobSpec.IPVersion)
-			p, ok := defaultPolicies.Get(jobSpec.Tool)
-			if !ok {
+			log.Debug("job received", "job_id", jobSpec.ID, "tool", jobSpec.Tool, "ip_version", jobSpec.IPVersion)
+			p, err := prepareAgentJob(jobSpec, cfg.ID, defaultPolicies, cfg.Capabilities)
+			if err != nil {
+				rejectGRPCAgentJob(sessionCtx, sender, jobSpec, err, log)
 				continue
 			}
-			if jobSpec.TimeoutSeconds > 0 {
-				p.Timeout = time.Duration(jobSpec.TimeoutSeconds) * time.Second
+			if !tryAcquireAgentJob(jobSlots) {
+				rejectGRPCAgentJob(sessionCtx, sender, jobSpec, errAgentBusy, log)
+				continue
 			}
-			if jobSpec.ProbeTimeoutSeconds > 0 {
-				p.ProbeTimeout = time.Duration(jobSpec.ProbeTimeoutSeconds) * time.Second
-			}
-			jobSpec.Args = policy.AgentArgs(jobSpec.Tool, jobSpec.Args)
-			jobCtx, cancel := context.WithCancel(ctx)
+			jobCtx, cancel := agentJobContext(sessionCtx, p.Timeout)
 			runningMu.Lock()
 			runningCancels[jobSpec.ID] = cancel
 			runningMu.Unlock()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer releaseAgentJob(jobSlots)
 				defer cancel()
 				defer func() {
 					runningMu.Lock()
@@ -724,20 +1143,20 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 				if err != nil {
 					failureType := agentPreflightFailureType(err)
 					parsed := agentPreflightFailureResult(job, err)
-					_ = sendStreamEvent(stream, &sendMu, jobSpec.ID, model.StreamEvent{Type: failureType, Message: failureType})
-					sendParsed(stream, &sendMu, jobSpec.ID, parsed)
+					_ = sendStreamEvent(jobCtx, sender, jobSpec.ID, model.StreamEvent{Type: failureType, Message: failureType})
+					_ = sendParsed(jobCtx, sender, jobSpec.ID, parsed)
 					log.Warn("agent rejected job", "job_id", jobSpec.ID, "failure_type", failureType, "err", err)
 					return
 				}
 				log.Debug("job start", "job_id", job.ID, "tool", job.Tool)
 				parsed, err := r.RunStream(jobCtx, job, p, func(event model.StreamEvent) error {
 					redactStreamEvent(&event, jobSpec.Tool, cfg.HideFirstHops)
-					return sendStreamEvent(stream, &sendMu, jobSpec.ID, event)
+					return sendStreamEvent(jobCtx, sender, jobSpec.ID, event)
 				})
 				if parsed != nil {
 					redactHops(parsed, cfg.HideFirstHops)
 					compactParsedResult(parsed)
-					if sendErr := sendParsed(stream, &sendMu, jobSpec.ID, parsed); sendErr != nil {
+					if sendErr := sendParsed(jobCtx, sender, jobSpec.ID, parsed); sendErr != nil {
 						log.Warn("send parsed result failed", "job_id", jobSpec.ID, "err", sendErr)
 					} else {
 						log.Debug("parsed result sent", "job_id", jobSpec.ID, "exit_code", parsed.ExitCode, "duration_ms", time.Since(start).Milliseconds())
@@ -750,8 +1169,55 @@ func runGRPCSession(ctx context.Context, cfg config.Agent, creds credentials.Tra
 		}
 	}()
 	err = <-errCh
+	sessionCancel()
 	wg.Wait()
 	return err
+}
+
+func validateServerMessage(msg *grpcwire.ServerMessage) error {
+	if msg == nil {
+		return errors.New("nil server message")
+	}
+	switch msg.Type {
+	case "job":
+		if msg.Job == nil || msg.Cancel != nil {
+			return errors.New("invalid job server message")
+		}
+	case "cancel":
+		if msg.Cancel == nil || msg.Job != nil || msg.Cancel.JobID == "" || msg.Cancel.JobID != strings.TrimSpace(msg.Cancel.JobID) {
+			return errors.New("invalid cancel server message")
+		}
+	default:
+		return fmt.Errorf("unsupported server message type %q", msg.Type)
+	}
+	return nil
+}
+
+func newAgentHello(cfg config.Agent) *grpcwire.AgentHello {
+	return &grpcwire.AgentHello{
+		ProtocolVersion:   grpcwire.AgentProtocolVersion,
+		ID:                cfg.ID,
+		Country:           cfg.Country,
+		Region:            cfg.Region,
+		Provider:          cfg.Provider,
+		ISP:               cfg.ISP,
+		Version:           version.String(),
+		Token:             cfg.RegisterToken,
+		Capabilities:      agentCapabilities(cfg.Capabilities),
+		Protocols:         model.ProtocolMask(cfg.Protocols),
+		MaxConcurrentJobs: agentMaxConcurrentJobs,
+	}
+}
+
+func rejectGRPCAgentJob(ctx context.Context, sender *agentGRPCSender, spec *grpcwire.JobSpec, err error, log *slog.Logger) {
+	job := model.Job{ID: spec.ID, Tool: spec.Tool, Target: spec.Target, Args: spec.Args, IPVersion: spec.IPVersion, ResolveOnAgent: spec.ResolveOnAgent}
+	failureType := agentPreflightFailureType(err)
+	parsed := agentPreflightFailureResult(job, err)
+	if !errors.Is(err, errAgentBusy) {
+		_ = sendStreamEvent(ctx, sender, spec.ID, model.StreamEvent{Type: failureType, Message: failureType})
+	}
+	_ = sendParsed(ctx, sender, spec.ID, parsed)
+	log.Warn("agent rejected job", "job_id", spec.ID, "failure_type", failureType, "err", err)
 }
 
 func nextRetryDelay(current time.Duration) time.Duration {
@@ -777,41 +1243,18 @@ func sleepContext(ctx context.Context, delay time.Duration) bool {
 }
 
 func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, resolvedTarget string, version model.IPVersion, resolveOnAgent bool, resolveTimeoutSeconds int, protocols model.ProtocolMask) (string, model.IPVersion, error) {
-	protocols = normalizeAgentProtocols(protocols)
-	if resolveOnAgent {
-		if literalVersion, literal, err := policy.LiteralIPVersion(tool, target); err != nil {
+	_ = resolveOnAgent
+	if protocols == 0 || protocols&^model.ProtocolAll != 0 {
+		return "", model.IPAny, errUnsupportedAgentProtocol
+	}
+	if tool == model.ToolDNS {
+		if err := policy.ValidateTarget(tool, target); err != nil {
 			return "", model.IPAny, err
-		} else if literal {
-			if err := policy.ValidateLiteralTarget(ctx, tool, target, version); err != nil {
-				return "", model.IPAny, err
-			}
-			if err := validateAgentProtocol(literalVersion, protocols); err != nil {
-				return "", literalVersion, err
-			}
 		}
-		runtime := config.DefaultRuntime()
-		if resolveTimeoutSeconds > 0 {
-			runtime.ResolveTimeoutSec = resolveTimeoutSeconds
+		if err := validateAgentProtocol(version, protocols); err != nil {
+			return "", version, err
 		}
-		var lastErr error
-		candidates := agentTargetVersions(version, protocols)
-		if len(candidates) == 0 {
-			return "", version, errUnsupportedAgentProtocol
-		}
-		for _, candidate := range candidates {
-			resolvedTarget, resolvedVersion, err := policy.ResolveTargetWithRuntime(ctx, tool, target, candidate, runtime)
-			if err == nil {
-				if err := validateAgentProtocol(resolvedVersion, protocols); err != nil {
-					return "", resolvedVersion, err
-				}
-				return resolvedTarget, resolvedVersion, nil
-			}
-			lastErr = err
-		}
-		if lastErr != nil {
-			return "", model.IPAny, lastErr
-		}
-		return "", version, errUnsupportedAgentProtocol
+		return "", version, nil
 	}
 	if resolvedTarget != "" {
 		if err := policy.ValidateResolvedIP(resolvedTarget, version); err != nil {
@@ -832,6 +1275,7 @@ func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, res
 		}
 		return resolvedTarget, resolvedVersion, nil
 	}
+
 	literalVersion, literal, err := policy.LiteralIPVersion(tool, target)
 	if err != nil {
 		return "", model.IPAny, err
@@ -843,17 +1287,38 @@ func resolveAgentTarget(ctx context.Context, tool model.Tool, target string, res
 		if err := validateAgentProtocol(literalVersion, protocols); err != nil {
 			return "", literalVersion, err
 		}
-		return "", literalVersion, nil
+		runtime := config.DefaultRuntime()
+		pinnedTarget, resolvedVersion, err := policy.ResolveTargetWithRuntime(ctx, tool, target, literalVersion, runtime)
+		if err != nil {
+			return "", model.IPAny, err
+		}
+		return pinnedTarget, resolvedVersion, nil
 	}
-	version, err = agentExecutionVersion(version, protocols)
-	if err != nil {
-		return "", version, err
+
+	runtime := config.DefaultRuntime()
+	runtime.ResolveTimeoutSec = clampAgentSeconds(resolveTimeoutSeconds, runtime.ResolveTimeoutSec)
+	var lastErr error
+	candidates := agentTargetVersions(version, protocols)
+	if len(candidates) == 0 {
+		return "", version, errUnsupportedAgentProtocol
 	}
-	return "", version, nil
+	for _, candidate := range candidates {
+		pinnedTarget, resolvedVersion, err := policy.ResolveTargetWithRuntime(ctx, tool, target, candidate, runtime)
+		if err == nil {
+			if err := validateAgentProtocol(resolvedVersion, protocols); err != nil {
+				return "", resolvedVersion, err
+			}
+			return pinnedTarget, resolvedVersion, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return "", model.IPAny, lastErr
+	}
+	return "", version, errUnsupportedAgentProtocol
 }
 
 func agentTargetVersions(version model.IPVersion, protocols model.ProtocolMask) []model.IPVersion {
-	protocols = normalizeAgentProtocols(protocols)
 	switch version {
 	case model.IPv4:
 		if protocols&model.ProtocolIPv4 == 0 {
@@ -877,49 +1342,33 @@ func agentTargetVersions(version model.IPVersion, protocols model.ProtocolMask) 
 	}
 }
 
-var errUnsupportedAgentProtocol = errors.New(model.JobErrorUnsupportedProtocol)
-
-func normalizeAgentProtocols(protocols model.ProtocolMask) model.ProtocolMask {
-	if protocols == 0 {
-		return model.ProtocolAll
-	}
-	return protocols
-}
+var (
+	errUnsupportedAgentProtocol = errors.New(model.JobErrorUnsupportedProtocol)
+	errUnsupportedAgentTool     = errors.New(model.JobErrorUnsupportedTool)
+	errAgentBusy                = errors.New("too many concurrent jobs")
+)
 
 func validateAgentProtocol(version model.IPVersion, protocols model.ProtocolMask) error {
+	if protocols == 0 || protocols&^model.ProtocolAll != 0 {
+		return errUnsupportedAgentProtocol
+	}
 	required := policy.RequiredProtocol(version)
 	if required == 0 {
 		return nil
 	}
-	if normalizeAgentProtocols(protocols)&required == 0 {
+	if protocols&required == 0 {
 		return errUnsupportedAgentProtocol
 	}
 	return nil
 }
 
-func agentExecutionVersion(version model.IPVersion, protocols model.ProtocolMask) (model.IPVersion, error) {
-	if version == model.IPv4 || version == model.IPv6 {
-		if err := validateAgentProtocol(version, protocols); err != nil {
-			return version, err
-		}
-		return version, nil
-	}
-	protocols = normalizeAgentProtocols(protocols)
-	hasIPv4 := protocols&model.ProtocolIPv4 != 0
-	hasIPv6 := protocols&model.ProtocolIPv6 != 0
-	switch {
-	case hasIPv4 && hasIPv6:
-		return version, nil
-	case hasIPv6:
-		return model.IPv6, nil
-	case hasIPv4:
-		return model.IPv4, nil
-	default:
-		return version, errUnsupportedAgentProtocol
-	}
-}
-
 func agentPreflightFailureType(err error) string {
+	if errors.Is(err, errAgentBusy) {
+		return model.JobErrorAgentBusy
+	}
+	if errors.Is(err, errUnsupportedAgentTool) || model.PublicJobErrorType(err.Error()) == model.JobErrorUnsupportedTool {
+		return model.JobErrorUnsupportedTool
+	}
 	if errors.Is(err, errUnsupportedAgentProtocol) || model.PublicJobErrorType(err.Error()) == model.JobErrorUnsupportedProtocol {
 		return model.JobErrorUnsupportedProtocol
 	}
@@ -941,7 +1390,11 @@ func agentPreflightFailureResult(job model.Job, err error) *model.ToolResult {
 	}
 }
 
-func newSpeedtestHandler(cfg config.Speedtest, token string, log *slog.Logger) http.Handler {
+func newSpeedtestHandler(cfg config.Speedtest, auth config.HTTPAuth, log *slog.Logger) http.Handler {
+	return newSpeedtestHandlerWithSlots(cfg, auth, log, make(chan struct{}, agentMaxConcurrentSpeedtests))
+}
+
+func newSpeedtestHandlerWithSlots(cfg config.Speedtest, auth config.HTTPAuth, log *slog.Logger, slots chan struct{}) http.Handler {
 	if cfg.MaxBytes <= 0 {
 		return http.NotFoundHandler()
 	}
@@ -965,10 +1418,15 @@ func newSpeedtestHandler(cfg config.Speedtest, token string, log *slog.Logger) h
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 			return
 		}
-		if token != "" && r.URL.Query().Get("token") != token {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		if status, message, ok := authorizeAgentRequest(r, auth, nil); !ok {
+			writeJSON(w, status, map[string]string{"error": message})
 			return
 		}
+		if !tryAcquireAgentJob(slots) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent speedtests"})
+			return
+		}
+		defer releaseAgentJob(slots)
 		size := cfg.DefaultBytes
 		if raw := r.URL.Query().Get("bytes"); raw != "" {
 			n, err := strconv.ParseInt(raw, 10, 64)
@@ -986,27 +1444,35 @@ func newSpeedtestHandler(cfg config.Speedtest, token string, log *slog.Logger) h
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set("X-Speedtest-Bytes", strconv.FormatInt(size, 10))
+		writeController := http.NewResponseController(w)
+		if err := setAgentWriteDeadline(writeController); err != nil {
+			log.Debug("set speedtest write deadline failed", "client_ip", clientIP, "err", err)
+			return
+		}
+		defer clearAgentWriteDeadline(writeController)
 		if r.Method == http.MethodHead {
 			return
 		}
-		if _, err := io.CopyN(w, rand.Reader, size); err != nil {
+		deadlineWriter := &refreshingDeadlineWriter{writer: w, controller: writeController}
+		if _, err := io.CopyN(deadlineWriter, rand.Reader, size); err != nil {
 			log.Debug("speedtest write failed", "client_ip", clientIP, "err", err)
 		}
 	})
 }
 
-func speedtestClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+type refreshingDeadlineWriter struct {
+	writer     io.Writer
+	controller *http.ResponseController
 }
 
-func httpClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+func (w *refreshingDeadlineWriter) Write(p []byte) (int, error) {
+	if err := setAgentWriteDeadline(w.controller); err != nil {
+		return 0, err
 	}
+	return w.writer.Write(p)
+}
+
+func speedtestClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -1058,10 +1524,8 @@ func timeoutHop(index int) model.HopResult {
 	return model.HopResult{Index: index, Timeout: true}
 }
 
-func sendStreamEvent(stream grpcwire.Control_ConnectClient, sendMu *sync.Mutex, jobID string, event model.StreamEvent) error {
-	sendMu.Lock()
-	defer sendMu.Unlock()
-	return stream.Send(&grpcwire.AgentMessage{
+func sendStreamEvent(ctx context.Context, sender *agentGRPCSender, jobID string, event model.StreamEvent) error {
+	return sender.Send(ctx, &grpcwire.AgentMessage{
 		Type: "result",
 		Result: &grpcwire.AgentResult{
 			JobID: jobID,
@@ -1081,11 +1545,9 @@ func compactParsedResult(result *model.ToolResult) {
 	}
 }
 
-func sendParsed(stream grpcwire.Control_ConnectClient, sendMu *sync.Mutex, jobID string, parsed *model.ToolResult) error {
+func sendParsed(ctx context.Context, sender *agentGRPCSender, jobID string, parsed *model.ToolResult) error {
 	compactParsedResult(parsed)
-	sendMu.Lock()
-	defer sendMu.Unlock()
-	return stream.Send(&grpcwire.AgentMessage{
+	return sender.Send(ctx, &grpcwire.AgentMessage{
 		Type: "result",
 		Result: &grpcwire.AgentResult{
 			JobID: jobID,
@@ -1094,22 +1556,17 @@ func sendParsed(stream grpcwire.Control_ConnectClient, sendMu *sync.Mutex, jobID
 	})
 }
 
-func heartbeat(ctx context.Context, stream grpcwire.Control_ConnectClient, sendMu *sync.Mutex, errCh chan<- error) {
+func heartbeat(ctx context.Context, sender *agentGRPCSender) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			errCh <- ctx.Err()
 			return
 		case <-ticker.C:
-			sendMu.Lock()
-			if err := stream.Send(&grpcwire.AgentMessage{Type: "heartbeat", Heartbeat: &grpcwire.Heartbeat{}}); err != nil {
-				sendMu.Unlock()
-				errCh <- err
+			if err := sender.Send(ctx, &grpcwire.AgentMessage{Type: "heartbeat", Heartbeat: &grpcwire.Heartbeat{}}); err != nil {
 				return
 			}
-			sendMu.Unlock()
 		}
 	}
 }

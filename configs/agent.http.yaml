@@ -7,7 +7,10 @@ provider: "kubernetes"
 isp: "bgp"
 server_addr: "localhost:8443"
 register_token: "change-me-agent-token"
-http_token: "change-me-agent-http-token"
+http_auth:
+  type: "bearer"
+  header: ""
+  secret: "change-me-agent-http-secret"
 http_addr: ":9000"
 http_path_prefix: ""
 protocols: 1

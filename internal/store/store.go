@@ -2,11 +2,18 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/ztelliot/mtr/internal/config"
 	"github.com/ztelliot/mtr/internal/model"
 )
+
+var ErrBootstrapAdminTokenRequired = errors.New("bootstrap admin token is required for a new store")
+
+type Initialization struct {
+	Seeded bool
+}
 
 type Store interface {
 	CreateJob(context.Context, model.Job) error
@@ -17,7 +24,12 @@ type Store interface {
 	ListQueuedJobs(context.Context, string, []model.Tool, model.ProtocolMask, int) ([]model.Job, error)
 	ClaimQueuedJob(context.Context, string, string) (bool, error)
 	UpdateJobStatus(context.Context, string, model.JobStatus, string) error
+	RequeueRunningJob(context.Context, string) (bool, error)
+	FinishRunningJob(context.Context, string, model.JobStatus, string) (bool, error)
+	FailActiveJob(context.Context, string, string) (bool, error)
 	AddJobEvent(context.Context, model.JobEvent) error
+	AddRunningJobEvent(context.Context, string, string, model.JobEvent) (bool, error)
+	FinishRunningJobWithEvent(context.Context, string, string, model.JobStatus, string, model.JobEvent) (bool, error)
 	ListJobEvents(context.Context, string) ([]model.JobEvent, error)
 	CreateScheduledJob(context.Context, model.ScheduledJob) error
 	GetScheduledJob(context.Context, string) (model.ScheduledJob, error)
@@ -40,12 +52,12 @@ type Store interface {
 	DeleteAgentConfig(context.Context, string) error
 	GetManagedSettings(context.Context) (config.ManagedSettings, error)
 	UpdateManagedSettings(context.Context, config.ManagedSettings) (config.ManagedSettings, error)
-	UpdateManagedSettingsAndAgentLabels(context.Context, config.ManagedSettings, []config.AgentConfig, []config.HTTPAgent) (config.ManagedSettings, error)
+	UpdateManagedSettingsAndAgentLabels(context.Context, config.ManagedSettings, []config.AgentConfig, []config.OutboundAgent) (config.ManagedSettings, error)
 	AddAuditEvent(context.Context, AuditEvent) error
-	ListHTTPAgents(context.Context) ([]config.HTTPAgent, error)
-	GetHTTPAgent(context.Context, string) (config.HTTPAgent, error)
-	UpsertHTTPAgent(context.Context, config.HTTPAgent) error
-	DeleteHTTPAgent(context.Context, string) error
+	ListOutboundAgents(context.Context) ([]config.OutboundAgent, error)
+	GetOutboundAgent(context.Context, string) (config.OutboundAgent, error)
+	UpsertOutboundAgent(context.Context, config.OutboundAgent) error
+	DeleteOutboundAgent(context.Context, string) error
 }
 
 type AuditEvent struct {

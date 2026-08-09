@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/ztelliot/mtr/internal/abuse"
 	"github.com/ztelliot/mtr/internal/api"
@@ -27,6 +31,7 @@ import (
 const (
 	defaultSystemServerConfig = "/etc/mtr/server.yaml"
 	defaultLocalServerConfig  = "configs/server.yaml"
+	maxBootstrapTokenBytes    = 4096
 )
 
 func main() {
@@ -52,40 +57,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var st store.Store
-	var closer func()
-	switch {
-	case isSQLiteDSN(cfg.DatabaseURL):
-		sqlite, err := store.NewSQLite(ctx, cfg.DatabaseURL)
-		if err != nil {
-			log.Error("connect sqlite", "err", err)
+	st, closer, initialization, err := openConfiguredStore(ctx, cfg.DatabaseURL, "")
+	if errors.Is(err, store.ErrBootstrapAdminTokenRequired) {
+		bootstrapToken, readErr := readBootstrapAdminToken(cfg.BootstrapAdminTokenFile)
+		if readErr != nil {
+			log.Error("read bootstrap admin token", "path", cfg.BootstrapAdminTokenFile, "err", readErr)
 			os.Exit(1)
 		}
-		st = sqlite
-		closer = sqlite.Close
-	case cfg.DatabaseURL != "":
-		pg, err := store.NewPostgres(ctx, cfg.DatabaseURL)
-		if err != nil {
-			log.Error("connect postgres", "err", err)
-			os.Exit(1)
-		}
-		st = pg
-		closer = pg.Close
-	default:
-		mem := store.NewMemory()
-		settings, err := mem.GetManagedSettings(ctx)
-		if err != nil {
-			log.Error("load memory managed settings", "err", err)
-			os.Exit(1)
-		}
-		for _, token := range settings.APITokens {
-			if token.ManageAccess == "write" && token.Secret != "" {
-				log.Info("initialized admin api token", "token", token.Secret)
-				break
-			}
-		}
-		st = mem
-		closer = func() {}
+		st, closer, initialization, err = openConfiguredStore(ctx, cfg.DatabaseURL, bootstrapToken)
+	}
+	if err != nil {
+		log.Error("initialize store", "err", err)
+		os.Exit(1)
+	}
+	if initialization.Seeded {
+		log.Info("initialized managed settings from bootstrap admin token file")
 	}
 	defer closer()
 
@@ -143,7 +129,7 @@ func main() {
 		log.Error("load grpc tls", "err", err)
 		os.Exit(1)
 	}
-	grpcSrv := grpc.NewServer(grpc.Creds(creds), grpc.ForceServerCodec(grpcwire.JSONCodec{}))
+	grpcSrv := grpc.NewServer(grpc.Creds(creds), grpc.ForceServerCodec(grpcwire.JSONCodec{}), grpc.MaxRecvMsgSize(1<<20))
 	grpcwire.RegisterControlServer(grpcSrv, hub)
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -207,6 +193,74 @@ func isSQLiteDSN(dsn string) bool {
 		strings.HasPrefix(dsn, "file:") ||
 		strings.HasSuffix(dsn, ".db") ||
 		strings.HasSuffix(dsn, ".sqlite")
+}
+
+func openConfiguredStore(ctx context.Context, databaseURL string, bootstrapAdminToken string) (store.Store, func(), store.Initialization, error) {
+	if isSQLiteDSN(databaseURL) {
+		sqlite, initialization, err := store.NewSQLite(ctx, databaseURL, bootstrapAdminToken)
+		if err != nil {
+			return nil, nil, store.Initialization{}, err
+		}
+		return sqlite, sqlite.Close, initialization, nil
+	}
+	if databaseURL != "" {
+		postgres, initialization, err := store.NewPostgres(ctx, databaseURL, bootstrapAdminToken)
+		if err != nil {
+			return nil, nil, store.Initialization{}, err
+		}
+		return postgres, postgres.Close, initialization, nil
+	}
+	memory, initialization, err := store.NewMemory(bootstrapAdminToken)
+	if err != nil {
+		return nil, nil, store.Initialization{}, err
+	}
+	return memory, func() {}, initialization, nil
+}
+
+func readBootstrapAdminToken(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("open bootstrap admin token file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspect bootstrap admin token file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("bootstrap admin token path must be a regular file")
+	}
+	if info.Mode().Perm()&0o137 != 0 {
+		return "", errors.New("bootstrap admin token file must not be executable, group-writable, or accessible by other users")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxBootstrapTokenBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read bootstrap admin token file: %w", err)
+	}
+	if len(body) > maxBootstrapTokenBytes {
+		return "", errors.New("bootstrap admin token exceeds size limit")
+	}
+	token := string(body)
+	if strings.HasSuffix(token, "\n") {
+		token = strings.TrimSuffix(token, "\n")
+		token = strings.TrimSuffix(token, "\r")
+	}
+	if len(token) < 16 {
+		return "", errors.New("bootstrap admin token must contain at least 16 bytes")
+	}
+	for _, char := range token {
+		if unicode.IsSpace(char) || unicode.IsControl(char) {
+			return "", errors.New("bootstrap admin token must not contain whitespace or control characters")
+		}
+	}
+	return token, nil
 }
 
 func newLogger(level string) *slog.Logger {

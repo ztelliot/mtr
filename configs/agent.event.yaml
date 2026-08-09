@@ -6,6 +6,12 @@ region: "edge"
 provider: "faas"
 isp: "bgp"
 http_addr: ":8000"
+# The function platform's invocation API or IAM boundary authenticates requests,
+# so application-level HTTP authentication is explicitly disabled here.
+http_auth:
+  type: "none"
+  header: ""
+  secret: ""
 http_path_prefix: ""
 protocols: 1
 hide_first_hops: 0

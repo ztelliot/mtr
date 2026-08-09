@@ -10,3 +10,30 @@ spec:
   policyTypes:
     - Ingress
   ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mtr-server-ingress
+  namespace: mtr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mtr-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mtr-web
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mtr-agent
+      ports:
+        - protocol: TCP
+          port: 8443

@@ -1,12 +1,17 @@
 http_addr: ":8080"
 grpc_addr: ":8443"
 log_level: "info"
-database_url: "postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable"
+# Required only while initializing an empty store. The file must contain the
+# initial admin API token and must not be accessible by other users (0600 or
+# 0440 are accepted). Remove it after a persistent store has been initialized.
+# bootstrap_admin_token_file: "/var/run/mtr/bootstrap/admin-token"
+# Mount the PostgreSQL CA at this path and replace the example credentials.
+database_url: "postgres://mtr:change-me@postgres:5432/mtr?sslmode=verify-full&sslrootcert=/var/run/mtr/postgres/ca.crt"
 geoip_url: ""
 # Reverse proxy IPs/CIDRs allowed to supply client IP headers.
 trusted_proxies: []
-# Custom single-IP headers accepted unconditionally before proxy headers.
-# X-Real-IP is handled separately and only trusted from trusted_proxies.
+# Custom single-IP headers accepted only when the direct peer matches
+# trusted_proxies. X-Real-IP is handled separately under the same trust rule.
 client_ip_headers: []
 # Set all three files to enable mTLS on the gRPC control plane and require
 # Agents to present a client certificate signed by this CA.

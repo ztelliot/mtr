@@ -1,7 +1,35 @@
-.git
-.codex
-node_modules
-web/node_modules
-web/dist
+**
+!.dockerignore
+!Dockerfile.agent
+!Dockerfile.server
+!Dockerfile.web
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/**
+
+# Build inputs never need generated artifacts, dependencies, tests, local
+# configuration, deployment output, or private key material. Keeping the
+# context as an allowlist also prevents unrelated untracked files from being
+# uploaded to a local or remote BuildKit daemon.
+**/*_test.go
+web/src/*.test.ts
+web/node_modules/
+web/dist/
 web/*.tsbuildinfo
-mtr.db*
+**/.npmrc
+**/.yarnrc*
+**/.pnpmrc
+**/.netrc
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore

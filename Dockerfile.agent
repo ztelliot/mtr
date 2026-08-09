@@ -1,6 +1,6 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
@@ -11,8 +11,7 @@ ARG TARGETVARIANT
 ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
-RUN apk add --no-cache ca-certificates && \
-    set -eux; \
+RUN set -eux; \
     targetos="${TARGETOS:-linux}"; \
     targetarch="${TARGETARCH:-$(go env GOARCH)}"; \
     goarm="${TARGETVARIANT#v}"; \
@@ -33,5 +32,6 @@ LABEL org.opencontainers.image.title="mtr-agent" \
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/mtr-agent /usr/local/bin/mtr-agent
 EXPOSE 8000 9000
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/mtr-agent"]
 CMD ["-config", "/etc/mtr/agent.yaml"]

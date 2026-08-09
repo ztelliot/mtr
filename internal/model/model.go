@@ -35,6 +35,10 @@ const (
 
 const ProtocolAll = ProtocolIPv4 | ProtocolIPv6
 
+// MaxFanoutTargets bounds the work and aggregate result size created by one
+// unpinned request. Callers can narrow larger fleets with agent tags.
+const MaxFanoutTargets = 16
+
 type JobStatus string
 
 const (
@@ -76,6 +80,8 @@ const (
 	JobErrorTargetBlocked       = "target_blocked"
 	JobErrorUnsupportedTool     = "unsupported_tool"
 	JobErrorUnsupportedProtocol = "unsupported_protocol"
+	JobErrorUnsupportedArgument = "unsupported_argument"
+	JobErrorAgentBusy           = "agent_busy"
 	JobErrorAgentDisconnected   = "agent_disconnected"
 	JobErrorTimeout             = "job_timeout"
 	JobErrorToolFailed          = "tool_failed"
@@ -100,7 +106,7 @@ func (j Job) MarshalJSON() ([]byte, error) {
 }
 
 func PublicJobErrorType(message string) string {
-	switch strings.TrimSpace(strings.ToLower(message)) {
+	switch message {
 	case "":
 		return ""
 	case JobErrorTargetBlocked:
@@ -109,13 +115,17 @@ func PublicJobErrorType(message string) string {
 		return JobErrorUnsupportedTool
 	case JobErrorUnsupportedProtocol:
 		return JobErrorUnsupportedProtocol
-	case JobErrorAgentDisconnected, "agent disconnected":
+	case JobErrorUnsupportedArgument:
+		return JobErrorUnsupportedArgument
+	case JobErrorAgentBusy:
+		return JobErrorAgentBusy
+	case JobErrorAgentDisconnected:
 		return JobErrorAgentDisconnected
-	case JobErrorTimeout, "job timed out", "timeout":
+	case JobErrorTimeout:
 		return JobErrorTimeout
-	case JobErrorToolFailed, "agent tool failed":
+	case JobErrorToolFailed:
 		return JobErrorToolFailed
-	case JobErrorFanoutFailed, "one or more fanout jobs failed":
+	case JobErrorFanoutFailed:
 		return JobErrorFanoutFailed
 	default:
 		return JobErrorFailed
@@ -369,14 +379,16 @@ const (
 	AgentAllLabel      = "agent"
 	AgentGRPCLabel     = "agent:grpc"
 	AgentHTTPLabel     = "agent:http"
+	AgentEventLabel    = "agent:event"
 	AgentIDLabelPrefix = "id:"
 )
 
 type AgentTransport string
 
 const (
-	AgentTransportGRPC AgentTransport = "grpc"
-	AgentTransportHTTP AgentTransport = "http"
+	AgentTransportGRPC  AgentTransport = "grpc"
+	AgentTransportHTTP  AgentTransport = "http"
+	AgentTransportEvent AgentTransport = "event"
 )
 
 func AgentIDLabel(agentID string) string {
@@ -403,6 +415,8 @@ func NormalizeAgentLabels(agentID string, transport AgentTransport, labels []str
 		add(AgentGRPCLabel)
 	case AgentTransportHTTP:
 		add(AgentHTTPLabel)
+	case AgentTransportEvent:
+		add(AgentEventLabel)
 	}
 	add(AgentIDLabel(agentID))
 	for _, label := range labels {
@@ -416,7 +430,7 @@ func NormalizeAgentLabels(agentID string, transport AgentTransport, labels []str
 
 func IsReservedAgentLabel(label string) bool {
 	label = strings.TrimSpace(label)
-	return label == AgentAllLabel || label == AgentGRPCLabel || label == AgentHTTPLabel || strings.HasPrefix(label, AgentIDLabelPrefix)
+	return label == AgentAllLabel || label == AgentGRPCLabel || label == AgentHTTPLabel || label == AgentEventLabel || strings.HasPrefix(label, AgentIDLabelPrefix)
 }
 
 type CreateJobRequest struct {

@@ -12,31 +12,43 @@ import (
 )
 
 type Memory struct {
-	mu         sync.Mutex
-	jobs       map[string]model.Job
-	events     map[string][]model.JobEvent
-	agents     map[string]model.Agent
-	agentCfgs  map[string]config.AgentConfig
-	schedules  map[string]model.ScheduledJob
-	settings   config.ManagedSettings
-	httpAgents map[string]config.HTTPAgent
-	audit      []AuditEvent
+	mu             sync.Mutex
+	jobs           map[string]model.Job
+	events         map[string][]model.JobEvent
+	agents         map[string]model.Agent
+	agentCfgs      map[string]config.AgentConfig
+	schedules      map[string]model.ScheduledJob
+	settings       config.ManagedSettings
+	outboundAgents map[string]config.OutboundAgent
+	audit          []AuditEvent
 }
 
-func NewMemory() *Memory {
-	settings := config.CloneManagedSettings(config.DefaultManagedSettings())
+func NewMemory(bootstrapAdminToken string) (*Memory, Initialization, error) {
+	settings, err := bootstrapManagedSettings(bootstrapAdminToken)
+	if err != nil {
+		return nil, Initialization{}, err
+	}
+	settings = config.CloneManagedSettings(settings)
 	settings.Revision = 1
 	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return &Memory{
-		jobs:       map[string]model.Job{},
-		events:     map[string][]model.JobEvent{},
-		agents:     map[string]model.Agent{},
-		agentCfgs:  map[string]config.AgentConfig{},
-		schedules:  map[string]model.ScheduledJob{},
-		settings:   settings,
-		httpAgents: map[string]config.HTTPAgent{},
-		audit:      []AuditEvent{},
+		jobs:           map[string]model.Job{},
+		events:         map[string][]model.JobEvent{},
+		agents:         map[string]model.Agent{},
+		agentCfgs:      map[string]config.AgentConfig{},
+		schedules:      map[string]model.ScheduledJob{},
+		settings:       settings,
+		outboundAgents: map[string]config.OutboundAgent{},
+		audit:          []AuditEvent{},
+	}, Initialization{Seeded: true}, nil
+}
+
+func NewTestMemory() *Memory {
+	store, _, err := NewMemory("test-admin-token")
+	if err != nil {
+		panic(err)
 	}
+	return store
 }
 
 func (m *Memory) CreateJob(_ context.Context, j model.Job) error {
@@ -169,6 +181,52 @@ func (m *Memory) UpdateJobStatus(_ context.Context, id string, status model.JobS
 	return nil
 }
 
+func (m *Memory) RequeueRunningJob(_ context.Context, id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if j.Status != model.JobRunning {
+		return false, nil
+	}
+	j.Status = model.JobQueued
+	j.Error = ""
+	j.StartedAt = nil
+	j.CompletedAt = nil
+	j.UpdatedAt = time.Now().UTC()
+	m.jobs[id] = j
+	return true, nil
+}
+
+func (m *Memory) FinishRunningJob(_ context.Context, id string, status model.JobStatus, msg string) (bool, error) {
+	return m.transitionJob(id, map[model.JobStatus]bool{model.JobRunning: true}, status, msg)
+}
+
+func (m *Memory) FailActiveJob(_ context.Context, id string, msg string) (bool, error) {
+	return m.transitionJob(id, map[model.JobStatus]bool{model.JobQueued: true, model.JobRunning: true}, model.JobFailed, msg)
+}
+
+func (m *Memory) transitionJob(id string, from map[model.JobStatus]bool, status model.JobStatus, msg string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if !from[j.Status] {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	j.Status = status
+	j.UpdatedAt = now
+	j.CompletedAt = &now
+	j.Error = msg
+	m.jobs[id] = j
+	return true, nil
+}
+
 func (m *Memory) AddJobEvent(_ context.Context, e model.JobEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -177,6 +235,59 @@ func (m *Memory) AddJobEvent(_ context.Context, e model.JobEvent) error {
 	}
 	m.events[e.JobID] = append(m.events[e.JobID], e)
 	return nil
+}
+
+// AddRunningJobEvent appends e only while sourceJobID is still running for
+// agentID. The source and event jobs differ for fanout jobs, whose child
+// results are stored on the parent.
+func (m *Memory) AddRunningJobEvent(ctx context.Context, sourceJobID string, agentID string, e model.JobEvent) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	source, ok := m.jobs[sourceJobID]
+	if !ok || source.Status != model.JobRunning || source.AgentID != agentID {
+		return false, nil
+	}
+	if _, ok := m.jobs[e.JobID]; !ok {
+		return false, ErrNotFound
+	}
+	e.AgentID = agentID
+	m.events[e.JobID] = append(m.events[e.JobID], e)
+	return true, nil
+}
+
+// FinishRunningJobWithEvent atomically finishes a running source job and
+// appends its terminal event. The event can target a fanout parent job.
+func (m *Memory) FinishRunningJobWithEvent(ctx context.Context, sourceJobID string, agentID string, status model.JobStatus, msg string, e model.JobEvent) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	source, ok := m.jobs[sourceJobID]
+	if !ok || source.Status != model.JobRunning || source.AgentID != agentID {
+		return false, nil
+	}
+	if _, ok := m.jobs[e.JobID]; !ok {
+		return false, ErrNotFound
+	}
+	now := time.Now().UTC()
+	source.Status = status
+	source.UpdatedAt = now
+	source.CompletedAt = &now
+	source.Error = msg
+	m.jobs[sourceJobID] = source
+	e.AgentID = agentID
+	m.events[e.JobID] = append(m.events[e.JobID], e)
+	return true, nil
 }
 
 func (m *Memory) ListJobEvents(_ context.Context, jobID string) ([]model.JobEvent, error) {
@@ -367,6 +478,9 @@ func (m *Memory) MarkStaleAgentsOffline(_ context.Context, ttl time.Duration) (i
 	cutoff := time.Now().UTC().Add(-ttl)
 	var n int64
 	for id, a := range m.agents {
+		if _, managedOutbound := m.outboundAgents[id]; managedOutbound {
+			continue
+		}
 		if a.Status == model.AgentOnline && a.LastSeenAt.Before(cutoff) {
 			a.Status = model.AgentOffline
 			m.agents[id] = a
@@ -439,14 +553,14 @@ func (m *Memory) GetManagedSettings(_ context.Context) (config.ManagedSettings, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	settings := config.CloneManagedSettings(m.settings)
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}
 	return settings, nil
 }
 
 func (m *Memory) UpdateManagedSettings(_ context.Context, settings config.ManagedSettings) (config.ManagedSettings, error) {
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}
 	m.mu.Lock()
@@ -460,8 +574,8 @@ func (m *Memory) UpdateManagedSettings(_ context.Context, settings config.Manage
 	return config.CloneManagedSettings(m.settings), nil
 }
 
-func (m *Memory) UpdateManagedSettingsAndAgentLabels(_ context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.HTTPAgent) (config.ManagedSettings, error) {
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+func (m *Memory) UpdateManagedSettingsAndAgentLabels(_ context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.OutboundAgent) (config.ManagedSettings, error) {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}
 	cfgs = append([]config.AgentConfig(nil), cfgs...)
@@ -470,9 +584,9 @@ func (m *Memory) UpdateManagedSettingsAndAgentLabels(_ context.Context, settings
 			return settings, err
 		}
 	}
-	nodes = append([]config.HTTPAgent(nil), nodes...)
+	nodes = append([]config.OutboundAgent(nil), nodes...)
 	for i := range nodes {
-		if err := normalizeHTTPAgent(&nodes[i]); err != nil {
+		if err := normalizeOutboundAgent(&nodes[i]); err != nil {
 			return settings, err
 		}
 	}
@@ -495,13 +609,13 @@ func (m *Memory) UpdateManagedSettingsAndAgentLabels(_ context.Context, settings
 		m.agentCfgs[cfg.ID] = cfg
 	}
 	for _, node := range nodes {
-		if existing, ok := m.httpAgents[node.ID]; ok {
+		if existing, ok := m.outboundAgents[node.ID]; ok {
 			node.CreatedAt = existing.CreatedAt
 		} else {
 			node.CreatedAt = now
 		}
 		node.UpdatedAt = now
-		m.httpAgents[node.ID] = node
+		m.outboundAgents[node.ID] = node
 	}
 	return config.CloneManagedSettings(m.settings), nil
 }
@@ -529,50 +643,50 @@ func (m *Memory) AuditEvents() []AuditEvent {
 	return out
 }
 
-func (m *Memory) ListHTTPAgents(_ context.Context) ([]config.HTTPAgent, error) {
+func (m *Memory) ListOutboundAgents(_ context.Context) ([]config.OutboundAgent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]config.HTTPAgent, 0, len(m.httpAgents))
-	for _, node := range m.httpAgents {
+	out := make([]config.OutboundAgent, 0, len(m.outboundAgents))
+	for _, node := range m.outboundAgents {
 		out = append(out, node)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
-func (m *Memory) GetHTTPAgent(_ context.Context, id string) (config.HTTPAgent, error) {
+func (m *Memory) GetOutboundAgent(_ context.Context, id string) (config.OutboundAgent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	node, ok := m.httpAgents[id]
+	node, ok := m.outboundAgents[id]
 	if !ok {
-		return config.HTTPAgent{}, ErrNotFound
+		return config.OutboundAgent{}, ErrNotFound
 	}
 	return node, nil
 }
 
-func (m *Memory) UpsertHTTPAgent(_ context.Context, node config.HTTPAgent) error {
-	if err := normalizeHTTPAgent(&node); err != nil {
+func (m *Memory) UpsertOutboundAgent(_ context.Context, node config.OutboundAgent) error {
+	if err := normalizeOutboundAgent(&node); err != nil {
 		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
-	if existing, ok := m.httpAgents[node.ID]; ok {
+	if existing, ok := m.outboundAgents[node.ID]; ok {
 		node.CreatedAt = existing.CreatedAt
 	} else {
 		node.CreatedAt = now
 	}
 	node.UpdatedAt = now
-	m.httpAgents[node.ID] = node
+	m.outboundAgents[node.ID] = node
 	return nil
 }
 
-func (m *Memory) DeleteHTTPAgent(_ context.Context, id string) error {
+func (m *Memory) DeleteOutboundAgent(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.httpAgents[id]; !ok {
+	if _, ok := m.outboundAgents[id]; !ok {
 		return ErrNotFound
 	}
-	delete(m.httpAgents, id)
+	delete(m.outboundAgents, id)
 	return nil
 }

@@ -12,18 +12,36 @@ import (
 	"github.com/ztelliot/mtr/internal/store"
 )
 
+const jobStreamWriteTimeout = 10 * time.Second
+
 func (s *Server) streamJobEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	select {
+	case s.streamSlots <- struct{}{}:
+		defer func() { <-s.streamSlots }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "too many concurrent job streams")
+		return
+	}
 	jobID := chi.URLParam(r, "id")
 	ctx := r.Context()
-	if _, err := s.store.GetJob(ctx, jobID); err != nil {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
 			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if err := s.authorizeJobRead(ctx, job); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errJobReadForbidden) {
+			status = http.StatusForbidden
 		}
 		writeError(w, status, err.Error())
 		return
@@ -39,14 +57,39 @@ func (s *Server) streamJobEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(w)
+	setWriteDeadline := func() error {
+		err := controller.SetWriteDeadline(time.Now().Add(jobStreamWriteTimeout))
+		if errors.Is(err, http.ErrNotSupported) {
+			return nil
+		}
+		return err
+	}
+	flush := func() error {
+		if err := setWriteDeadline(); err != nil {
+			return err
+		}
+		err := controller.Flush()
+		if errors.Is(err, http.ErrNotSupported) {
+			w.(http.Flusher).Flush()
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
 	seen := map[string]struct{}{}
 	for _, event := range history {
 		seen[event.ID] = struct{}{}
+		if err := setWriteDeadline(); err != nil {
+			return
+		}
 		if err := writeSSE(w, event); err != nil {
 			return
 		}
 	}
-	flusher.Flush()
+	if err := flush(); err != nil {
+		return
+	}
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -55,8 +98,15 @@ func (s *Server) streamJobEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-heartbeat.C:
-			_, _ = fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
+			if err := setWriteDeadline(); err != nil {
+				return
+			}
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			if err := flush(); err != nil {
+				return
+			}
 		case event, ok := <-events:
 			if !ok {
 				return
@@ -65,10 +115,15 @@ func (s *Server) streamJobEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[event.ID] = struct{}{}
+			if err := setWriteDeadline(); err != nil {
+				return
+			}
 			if err := writeSSE(w, event); err != nil {
 				return
 			}
-			flusher.Flush()
+			if err := flush(); err != nil {
+				return
+			}
 		}
 	}
 }

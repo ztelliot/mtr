@@ -18,6 +18,22 @@ Chinese version: [README.zh-CN.md](README.zh-CN.md)
 For a local SQLite-backed test run:
 
 ```sh
+bootstrap_token_file="$(mktemp)"
+chmod 0600 "$bootstrap_token_file"
+openssl rand -hex 32 > "$bootstrap_token_file"
+MTR_BOOTSTRAP_ADMIN_TOKEN_FILE="$bootstrap_token_file" \
+  go run ./cmd/server -config configs/server.sqlite.yaml
+```
+
+The file contains the initial admin API token. Use it to sign in and create the
+narrower API and Agent register tokens you need. After the persistent SQLite
+database has been seeded successfully, stop Server, save any token that must be
+retained in an appropriate secret store, delete the bootstrap file, and restart
+without `MTR_BOOTSTRAP_ADMIN_TOKEN_FILE`:
+
+```sh
+rm -f "$bootstrap_token_file"
+unset bootstrap_token_file
 go run ./cmd/server -config configs/server.sqlite.yaml
 ```
 
@@ -56,31 +72,48 @@ docker build -f Dockerfile.agent -t mtr-agent:v1.2.3 \
 ```
 
 Agent runtime settings live in the Agent YAML: `mode`, `http_addr`, identity,
-register token, HTTP token, capabilities, protocols, TLS, and speed-test limits.
+register token, inbound HTTP authentication, capabilities, protocols, TLS, and
+speed-test limits.
 `protocols` is a bitmask: `1` means IPv4, `2` means IPv6, and `3` means both.
 Jobs may set `ip_version` to `4` or `6`; tasks are only dispatched to Agents
-whose protocol mask supports the requested protocol.
+whose protocol mask supports the requested protocol. `protocols` and
+`capabilities` must both be explicit and non-empty; zero or an empty list is
+rejected instead of being expanded into broader access.
+
+Agent control is intentionally versioned as one complete protocol, without
+per-feature negotiation. Every hello, health response, and job request must
+carry `protocol_version: 1`; UDP probes and every advertised HTTP version are
+part of that version. Upgrade Server, Agent, and Web together.
 
 Server and Agent config fields can also be supplied through environment
 variables. Use the YAML path with an `MTR_` prefix and uppercase underscores:
 `tls.ca_files` becomes `MTR_TLS_CA_FILES`, and `speedtest.max_bytes` becomes
 `MTR_SPEEDTEST_MAX_BYTES`. Config file values win when both sources set the same
 field. String lists may be comma-separated or YAML/JSON arrays.
+Unknown YAML keys, structured subfields, and `MTR_` environment variable names
+are rejected so misspelled security settings cannot silently fall back.
 When Server runs behind a reverse proxy, set `trusted_proxies` to the proxy IPs
-or CIDRs allowed to supply standard proxy headers; otherwise `X-Forwarded-For`
-and `X-Real-IP` are ignored for logging and rate limiting. `client_ip_headers`
-is an ordered list of custom single-IP headers trusted unconditionally before
-proxy headers, for example a long private header name or `Eo-Connecting-Ip`.
+or CIDRs allowed to supply proxy headers; otherwise `X-Forwarded-For`,
+`X-Real-IP`, and `client_ip_headers` are ignored for logging and rate limiting.
+`client_ip_headers` is an ordered list of custom single-IP headers evaluated
+before the standard proxy headers, but only for a peer in `trusted_proxies`.
+Never broaden `trusted_proxies` unless a firewall or NetworkPolicy makes the
+proxy the only process that can reach the listener.
 
 Server runtime policy is stored in persisted managed settings, not in
 `server.yaml`. This includes API tokens, Agent register tokens, rate limits,
 global and label-based tool policies, label-based scheduler/runtime knobs,
-probe counts, timeouts, and managed HTTP Agents. Per-node tuning is label-based:
+probe counts, timeouts, and outbound Agents. Per-node tuning is label-based:
 every node has the reserved `agent` and `id:<agent-id>` labels, so global,
-grouped, and single-node rules share one mechanism. On a fresh database, Server
-creates one admin API token and prints it to the log. Use that token with the
-Manage page or the
-`/v1/manage/tokens`, `/v1/manage/register-tokens`, `/v1/manage/rate-limit`,
+grouped, and single-node rules share one mechanism. An empty store is initialized
+only from the token in `bootstrap_admin_token_file` (or
+`MTR_BOOTSTRAP_ADMIN_TOKEN_FILE`). The file must be regular, no larger than 4
+KiB, non-executable, not group-writable, and inaccessible to world users;
+modes `0600` and `0440` are accepted.
+The token is never written to logs. After a persistent store has been seeded,
+remove the file and unset the option. An in-memory store needs the file on every
+start because it is not persistent. Use that token from a trusted operator
+client with `/v1/manage/tokens`, `/v1/manage/register-tokens`, `/v1/manage/rate-limit`,
 `/v1/manage/labels`, and `/v1/manage/agents` endpoints to create the tokens and
 policy you want. Each Agent register token has a `remaining_uses` allowance
 (new tokens default to `1`). The allowance is consumed atomically only when a
@@ -97,25 +130,111 @@ must change. Set
 `log_level: debug` in the Server or Agent config for verbose scheduling and
 execution logs.
 
-Server can actively invoke managed HTTP Agents created through
-`/v1/manage/agents` with `transport`, `id`, `base_url`, and `http_token`. An
-Agent exposes `/invoke` when its mode includes `http`; `http_token` is required
-for that mode. Use `http_path_prefix` to serve HTTP endpoints below a prefix
-such as `/api` or `/v1`, and include that same prefix in the managed Agent
-`base_url`. Server probes `/healthz` at startup to learn version, location,
-provider, capabilities, protocols, and network privilege diagnostics, then probes it again only while
-recovering from connection failures. Listener TLS is controlled by Agent
-`http_tls`; client-side TLS settings live on the managed HTTP Agent record.
-Client verification checks the configured CA chain only, so in-cluster addresses
-do not need to match certificate SANs.
+Server can actively invoke outbound Agents created through
+`/v1/manage/agents`. The required `transport` selects one of two contracts:
+
+- `http`: `url` is a base URL. Server reads `GET <url>/healthz` and streams
+  NDJSON from `POST <url>/invoke`.
+- `event`: `url` is the complete synchronous function-invocation URL. Server
+  posts `action: healthz` and `action: invoke` events to that same URL and
+  consumes one complete JSON response.
+
+Authentication is independent of transport. `auth.type` is explicitly one of
+`none`, `bearer`, `header`, or `huaweicloud_aksk`. The first three cover no
+authentication, a static bearer token, and a static custom-header token.
+`huaweicloud_aksk` is the native unattended option for Huawei Cloud
+FunctionGraph: Server calculates a new `SDK-HMAC-SHA256` signature from the
+final method, URL, headers, and JSON body for every health or invocation
+request. Set its `access_key`, `secret`, and `project_id`; `secret` is the Secret
+Key and is write-only in management responses. When editing, leaving it empty
+retains the existing value only if the transport, URL, authentication fields,
+additional headers, and TLS settings are all unchanged; changing any part of
+that credential scope requires the Secret Key to be entered again.
+
+Both `http://` and `https://` outbound URLs are accepted; choosing cleartext
+HTTP is a deployment decision that exposes authentication headers and payloads
+to the network, so use it only on a suitably trusted path. Non-secret provider
+options can be supplied through the separate `headers` map; authentication and
+other sensitive values belong in `auth`, not in `headers`. Event responses use
+`event_response: direct` when the function result is the HTTP body, or
+`result_field` when the provider wraps the function result in a top-level
+`result` object or JSON string. The latter matches synchronous Huawei Cloud
+FunctionGraph invocation. This deliberately does not accept API Gateway
+`statusCode`/`body`/`isBase64Encoded` envelopes.
+
+FunctionGraph also accepts an IAM token in a static `X-Auth-Token` header, but
+that token is valid for only 24 hours and is therefore suitable here only for
+manual testing or when an external component refreshes it. The built-in AK/SK
+authorizer currently supports long-lived AK/SK credentials only; temporary
+credentials with a security token and automatic IAM username/password token
+refresh are not supported. Keep Server time synchronized with NTP because
+Huawei Cloud validates the generated `X-Sdk-Date`. See the official
+[FunctionGraph authentication](https://support.huaweicloud.com/intl/en-us/api-functiongraph/functiongraph_06_0230.html)
+and [API request signing](https://support.huaweicloud.com/intl/en-us/devg-apisign/api-sign-algorithm-001.html)
+documentation.
+
+An outbound Agent endpoint is trusted control-plane configuration and may be
+public or private, so Agents inside a VPC or cluster remain reachable. Server
+resolves and pins each connection itself, rejects redirects and environment
+proxies, and limits every response. Loopback, link-local/metadata, unspecified,
+and multicast endpoint addresses remain forbidden. This does not relax job targets: user
+probe targets still always reject private, loopback, link-local, metadata, and
+other special-use addresses. Event invocation is always single-attempt. HTTP invocation may
+retry only a DNS, dial, or TLS failure that occurred before a connection was
+obtained; once the request might have started, it is never replayed. A `429`
+response is treated as temporary backpressure and the job is atomically
+requeued.
+
+Server probes an outbound Agent once at startup, periodically refreshes its
+metadata at the configured maximum health interval, and uses exponential
+health probes only while recovering. Queue polling is separate, so Event
+functions are not invoked on every scheduler tick. Listener TLS is controlled
+by Agent `http_tls`; outbound TLS settings live on the managed Agent record.
+Without `tls.ca_files`, TLS uses the system roots and verifies the certificate
+hostname/SAN against the URL hostname. With explicit `tls.ca_files`, Server
+instead verifies the chain, validity period, and ServerAuth usage against that
+dedicated trust set and intentionally ignores certificate SANs. Use a CA
+dedicated to these Agents, or a narrowly shared certificate pin, rather than a
+general-purpose trust root. `tls.server_name` is only an optional SNI routing
+hint and never changes certificate identity verification. Any custom CA, client
+certificate, or SNI hint requires `tls.enabled: true` and an `https://` URL.
+
+Example Huawei Cloud FunctionGraph Event Agent record:
+
+```json
+{
+  "id": "edge-event-1",
+  "transport": "event",
+  "enabled": true,
+  "url": "https://functiongraph.cn-north-4.myhuaweicloud.com/v2/<project-id>/fgs/functions/<function-urn>/invocations",
+  "auth": {
+    "type": "huaweicloud_aksk",
+    "access_key": "<access-key>",
+    "secret": "<secret-key>",
+    "project_id": "<project-id>"
+  },
+  "headers": {"X-CFF-Request-Version": "v1"},
+  "event_response": "result_field",
+  "labels": ["apac"]
+}
+```
+
+An Agent exposes the streaming contract when its mode includes `http`. That
+mode requires explicit application-layer authentication: set `http_auth.type`
+to `bearer` or `header` and provide a non-empty `secret`. Use
+`http_path_prefix` to serve those endpoints below a prefix such as `/api` or
+`/v1`, and include that prefix in the outbound Agent `url`.
 
 HTTP Agent contract:
 
-```sh
+```yaml
 mode: "http"
 id: "edge-fc-1"
 http_addr: ":9000"
-http_token: "change-me-http-token"
+http_auth:
+  type: "bearer"
+  header: ""
+  secret: "change-me-http-auth-secret"
 http_path_prefix: ""
 http_tls:
   enabled: true
@@ -130,11 +249,28 @@ To run both the long-lived gRPC Agent and HTTP Agent in one process, use
 
 ```sh
 curl -N -X POST http://localhost:9000/invoke \
-  -H 'Authorization: Bearer change-me-http-token' \
+  -H 'Authorization: Bearer change-me-http-auth-secret' \
   -H 'Accept: application/x-ndjson' \
   -H 'Content-Type: application/json' \
-  -d '{"id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4}'
+  -d '{"protocol_version":1,"id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4}'
 ```
+
+For a provider or gateway that uses a static custom header, configure both
+sides with the same header name and secret. For example, the Agent can use:
+
+```yaml
+http_auth:
+  type: "header"
+  header: "X-MTR-Agent-Token"
+  secret: "change-me-shared-secret"
+```
+
+The corresponding Server outbound Agent record must then contain
+`"auth":{"type":"header","header":"X-MTR-Agent-Token","secret":"change-me-shared-secret"}`.
+With `bearer`, Server instead sends `Authorization: Bearer <secret>`. Server
+also accepts these authentication modes over cleartext HTTP, but doing so
+exposes the credential and request contents on the network; HTTPS remains the
+safe default outside a deliberately trusted path.
 
 The response is compact newline-delimited JSON (`application/x-ndjson`): each
 line is a structured progress, hop, metric, or final summary event. Server
@@ -146,39 +282,60 @@ same compact event shape on the Agent-to-Server path.
 ### Event mode
 
 Use `event` mode when a function platform invokes the Agent one request at a
-time and waits for a complete response. It exposes only `POST /invoke`, listens
-on `:8000` by default, and leaves authentication to the platform's invocation
-API or IAM layer. Unlike HTTP mode, it does not use `http_token`, path prefixes,
-listener TLS, or streaming responses.
+time and waits for a complete response. It listens on `:8000` by default and
+returns one JSON document from `POST /invoke` instead of an NDJSON stream. A
+lightweight, unauthenticated `POST /init` endpoint returns `{"status":"ok"}`
+for platforms that perform a container initialization call; platforms without
+that lifecycle hook can ignore it. Event mode requires an explicit
+`http_auth.type`: use `none` only when the function platform's invocation API
+or IAM boundary already authenticates every request. `bearer` requires
+`Authorization: Bearer <secret>`; `header` requires the configured header and
+secret. Both authenticated forms cover every `POST /invoke`, including the
+`healthz` action. Event mode does not support path prefixes or listener TLS.
 
 `configs/agent.event.yaml` contains a complete example:
 
 ```yaml
 mode: "event"
 id: "edge-event-1"
+country: "CN"
+region: "edge"
+provider: "faas"
 http_addr: ":8000"
+http_auth:
+  type: "none" # only behind an authenticated invocation boundary
+  header: ""
+  secret: ""
 http_path_prefix: ""
+protocols: 1
+capabilities: [ping, traceroute, mtr, http, dns, port]
 http_tls:
   enabled: false
 speedtest:
   max_bytes: 0
 ```
 
+The curl examples below assume an unexposed local test with
+`http_auth.type: none`. For defense in depth, select `bearer` with
+`MTR_HTTP_AUTH_TYPE=bearer` and `MTR_HTTP_AUTH_SECRET=<secret>`, or select
+`header` and additionally set `MTR_HTTP_AUTH_HEADER`. Add the matching header
+to both health and job requests. Authentication runs before event action
+dispatch, so `healthz` cannot bypass it.
+
 Send `action: healthz` to inspect the Agent and its runtime network privileges:
 
 ```sh
 curl -X POST http://localhost:8000/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"action":"healthz"}'
+  -d '{"protocol_version":1,"action":"healthz"}'
 ```
 
-Job requests use the existing `JobSpec` fields. `action` may be omitted or set
-to `invoke` or `job`:
+Job requests use the existing `JobSpec` fields and require `action: invoke`:
 
 ```sh
 curl -X POST http://localhost:8000/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
+  -d '{"protocol_version":1,"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
 ```
 
 The function returns one `application/json` document after the job finishes.
@@ -208,7 +365,8 @@ cannot run together in one process.
 The same image built from `Dockerfile.agent` supports `grpc`, `http`, and
 `event` modes. It contains only the Agent binary and CA certificates; runtime
 configuration is supplied through a mounted YAML file, `MTR_*` environment
-variables, or both. The default config file is optional.
+variables, or both. The default config file is optional. The Agent and Server
+scratch images run as the unprivileged UID/GID `65532:65532` by default.
 
 Build the image and start an event-mode container locally:
 
@@ -219,27 +377,36 @@ docker buildx build \
   -f Dockerfile.agent \
   -t mtr-agent:latest .
 
-docker run --rm -p 8000:8000 \
-  --user 65532:65532 \
+docker run --rm -p 127.0.0.1:8000:8000 \
   -e MTR_MODE=event \
+  -e MTR_HTTP_AUTH_TYPE=none \
   -e MTR_HTTP_ADDR=:8000 \
   -e MTR_ID=edge-event-1 \
   -e MTR_COUNTRY=CN \
   -e MTR_REGION=edge \
   -e MTR_PROVIDER=faas \
+  -e MTR_PROTOCOLS=1 \
+  -e MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port \
   mtr-agent:latest
 ```
 
-For deployment, configure the platform to forward `POST /invoke` to port 8000.
-The Agent does not implement `/init`; a platform that requires an initializer
-needs a small adapter. The function timeout should exceed the job's
-`timeout_seconds` and leave room for cold start. Provider-specific envelopes
-added outside the container must be handled by the caller or a Server adapter.
+For deployment, configure the platform to send invocation requests to
+`POST /invoke` on port 8000. The same listener provides a lightweight
+`POST /init` response for platforms that enable a separate container
+initialization call; no extra adapter is required, and platforms that do not
+use initialization can ignore it. The function timeout should exceed the
+job's `timeout_seconds` and leave room for cold start. Provider-specific
+envelopes added outside the container must be handled by the caller or a Server
+adapter.
 
 To push the image, replace `--load` with `--push` and use the desired registry
-tag. Add `--provenance=false --sbom=false` only when the registry rejects
-Buildx attestation manifests. Build for the architecture used by the runtime,
-usually `linux/amd64` or `linux/arm64`.
+tag. Current Buildx versions may attach provenance or SBOM attestations as
+additional manifests in the image index. If an older registry reports that it
+cannot parse the manifest, retry the same single-platform build with
+`--provenance=false --sbom=false`. These compatibility flags remove that
+supply-chain metadata, so they should not be the default and do not fix an
+architecture mismatch or every registry-side manifest error. Build for the
+architecture used by the runtime, usually `linux/amd64` or `linux/arm64`.
 
 #### Network privileges
 
@@ -249,8 +416,9 @@ bounding set, and adding a `cap_net_raw` file capability may cause the binary to
 fail at startup. Check `network.cap_net_raw` in the `healthz` response instead
 of relying on image metadata.
 
-When `NET_RAW` is unavailable, ping can use `udp`, `tcp`, or `auto` mode. ICMP
-traceroute and MTR still require `NET_RAW`; their TCP mode remains available.
+When `NET_RAW` is unavailable, ping can use `udp`, `tcp`, or `auto` mode. For
+traceroute and MTR, use `udp`: both ICMP probes and TCP probes that discover
+intermediate hops need `NET_RAW`.
 
 UDP ping sends a real UDP datagram. A UDP reply or an ICMP Port Unreachable
 response counts as reachability; the default destination port is `33434` and
@@ -271,9 +439,13 @@ docker run --rm -p 8000:8000 \
   --user 0:0 \
   --cap-drop ALL \
   --cap-add NET_RAW \
+  --security-opt no-new-privileges:true \
   -e MTR_ID=edge-docker-1 \
   -e MTR_MODE=event \
+  -e MTR_HTTP_AUTH_TYPE=none \
   -e MTR_HTTP_ADDR=:8000 \
+  -e MTR_PROTOCOLS=1 \
+  -e MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port \
   mtr-agent:latest
 ```
 
@@ -283,12 +455,12 @@ permitted and effective sets empty. The `healthz` result is authoritative.
 Agent speed test endpoint:
 
 ```sh
-curl -o /dev/null 'http://localhost:9000/speedtest/random?bytes=10485760&token=change-me-http-token'
+curl -H 'Authorization: Bearer change-me-http-auth-secret' -o /dev/null 'http://localhost:9000/speedtest/random?bytes=10485760'
 ```
 
 The speed test endpoint is only available when HTTP mode is enabled, on
-`http_addr`. It is protected by the Agent `http_token`, supplied as the `token`
-query parameter. Configure limits under `speedtest` in the Agent config, or set
+`http_addr`. It is protected by the Agent `http_auth`, using the configured
+Bearer or custom header. Configure limits under `speedtest` in the Agent config, or set
 `speedtest.max_bytes: 0` to disable the endpoint. Speed-test rate limiting uses
 the direct remote address and ignores `X-Forwarded-For`.
 
@@ -301,10 +473,22 @@ curl -X POST http://localhost:8080/v1/jobs \
   -d '{"tool":"ping","target":"1.1.1.1"}'
 ```
 
-`ping` accepts `args.protocol` as `icmp`, `udp`, `tcp`, or `auto`; the default is
-strict `icmp`, and only an explicit `auto` request may fall back. UDP defaults
-to port `33434`, while TCP defaults to port `80`; `args.port` overrides either.
-`traceroute` and `mtr` continue to accept only `icmp` or `tcp`.
+`ping`, `traceroute`, and `mtr` accept `args.protocol` as `icmp`, `udp`, `tcp`,
+or `auto`. The default is strict `icmp`; an explicit `auto` request tries
+`icmp`, then `udp`, then `tcp`, and locks the first protocol that responds. UDP
+defaults to port `33434`, while TCP defaults to port `80`; `args.port`
+overrides either. UDP route probes use the Linux socket error queue and do not
+require a raw socket; UDP route probing is currently supported only on Linux.
+TCP route probes correlate the quoted TCP flow in raw ICMP Time Exceeded
+messages and treat either a completed connect or a destination RST as reached.
+This implementation is Linux-only and needs `NET_RAW` to collect intermediate
+hops.
+`http` accepts `args.http_version` as `1.1`, `2`, `3`, or `auto`. The default is
+strict HTTP/1.1; `auto` tries HTTP/3, HTTP/2, then HTTP/1.1 and only falls back
+before a response has started. HTTP/2 and HTTP/3 require HTTPS, and HTTP/3
+requires outbound UDP access. Results report the selected protocol in
+`protocol` or `http_version`, plus `requested_protocol` or
+`requested_http_version` when `auto` was requested.
 `count` and `max_hops` are controlled by Server runtime policy, not by user
 requests. `dns` replaces the old `nslookup` tool name. `port` performs a native
 TCP connect probe and requires `args.port`. By default, Server resolves target
@@ -328,7 +512,7 @@ curl -X POST http://localhost:8080/v1/schedules \
 
 Scheduled jobs select nodes with `schedule_targets`. Every Agent gets the
 server-managed `agent` label plus `id:<agent-id>`. Custom labels are set in
-server-side Agent or managed HTTP Agent config. Use `agent` for all nodes, a
+server-side Agent or outbound Agent config. Use `agent` for all nodes, a
 custom label for a group, or `id:<agent-id>` for one node.
 `cron_expression` uses the standard five fields `minute hour day month weekday`
 and is evaluated in UTC. All selected targets run together at each cron tick.
@@ -348,12 +532,17 @@ curl -H 'Authorization: Bearer developer-token' \
 Stream structured job events for browser UI:
 
 ```js
-const events = new EventSource('/v1/jobs/<job-id>/stream?access_token=developer-token')
-events.addEventListener('hop', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('metric', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('progress', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('parsed', (event) => console.log(JSON.parse(event.data)))
+const response = await fetch('/v1/jobs/<job-id>/stream', {
+  headers: {Authorization: 'Bearer developer-token', Accept: 'text/event-stream'}
+})
+for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+  console.log(chunk) // parse the standard SSE frames incrementally
+}
 ```
+
+API tokens are accepted only through the Bearer header. The Web workbench uses
+authenticated `fetch` streaming because native `EventSource` cannot attach that
+header; tokens are never placed in stream URLs.
 
 ## Web Workbench
 
@@ -371,14 +560,17 @@ Configure the runtime API connection in `web/public/config.json`:
 ```json
 {
   "apiBaseUrl": "",
-  "apiToken": "frontend-token",
+  "apiToken": "REPLACE_WITH_PUBLIC_API_TOKEN",
   "brand": "QwQ MTR",
   "brandUrl": null
 }
 ```
 
-An empty `apiBaseUrl` works with the Vite development proxy. Start the Go server
-and the frontend in separate terminals:
+An empty `apiBaseUrl` works with the Vite development proxy. Replace
+`REPLACE_WITH_PUBLIC_API_TOKEN` with a Server-issued public diagnostics token
+before opening the workbench. Initialize a fresh Server with the bootstrap-token
+procedure in Quick Start (an initialized store does not need that file), then
+start Server and the frontend in separate terminals:
 
 ```sh
 go run ./cmd/server -config configs/server.sqlite.yaml
@@ -407,16 +599,18 @@ docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
   --build-arg COMMIT=$(git rev-parse HEAD) .
 ```
 
-The frontend image serves the Vite build with Caddy on port `80`. At runtime it
-loads `/config.json`, so deployments can replace that single file without
-rebuilding the image. Use an empty `apiBaseUrl` only when the same public origin
-also reverse-proxies `/v1` to Server. Otherwise set it to the browser-reachable
-Server API origin:
+The frontend image serves the Vite build with Caddy on unprivileged port `8080`
+and runs as UID/GID `65532:65532`. At runtime it loads `/config.json`, so
+deployments can replace that single file without rebuilding the image. The
+image proxies same-origin `/v1` requests to `MTR_SERVER_URL`, which defaults to
+`http://mtr-server:8080`. Leave `apiBaseUrl` empty for that recommended layout,
+or set it to a browser-reachable Server API origin with the required
+cross-origin policy:
 
 ```json
 {
   "apiBaseUrl": "https://mtr-api.example.com",
-  "apiToken": "frontend-token",
+  "apiToken": "REPLACE_WITH_PUBLIC_API_TOKEN",
   "brand": "QwQ MTR",
   "brandUrl": "https://mtr.example.com"
 }
@@ -426,33 +620,71 @@ Omit `brandUrl` to keep the header brand as an in-app home link, set it to a
 URL to send every deployment to one canonical brand address, or set it to
 `null`/`""` to render the brand without a link.
 
+The Web client reads `apiToken` from `config.json` and automatically sends it as
+an `Authorization: Bearer` header on API and streaming requests, so visitors do
+not need to enter a token. This value is a public client credential: every
+browser user can read it from `/config.json` or developer tools. Give it only
+the minimum tools and Agent scope needed for public diagnostics, with
+`all: false`, `schedule_access: none`, and `manage_access: none`. Never publish
+the bootstrap/admin token, a management token, or a schedule-write token here.
+Assume the public token can be copied and abused; Server authorization and rate
+limits are the security boundary.
+
+For a container deployment, prepare that JSON file outside the repository and
+mount it over the image default; it must be readable by UID `65532`:
+
+```sh
+docker run --rm -p 8081:8080 \
+  --mount type=bind,src=/absolute/path/config.json,dst=/usr/share/caddy/config.json,readonly \
+  ghcr.io/ztelliot/mtr-web:0.1.0
+```
+
 The Kubernetes examples include `deploy/k8s/web.yaml`, which deploys
-`ghcr.io/ztelliot/mtr-web:latest`, exposes it as the `mtr-web` Service, and
-mounts `mtr-web-config` over `/usr/share/caddy/config.json`. For a local
-cluster smoke test, first create the Secrets described in the Kubernetes
-deployment section, then apply the baseline resources:
+`ghcr.io/ztelliot/mtr-web:0.1.0`, exposes it as the `mtr-web` Service, and
+mounts `mtr-web-config` over `/usr/share/caddy/config.json`. The `0.1.0` image
+names are release targets, not an assertion that the public registry already
+contains them. Publish those images or load locally built images into the
+cluster first. Before exposing Web, replace
+`REPLACE_WITH_PUBLIC_API_TOKEN` in the ConfigMap with a public diagnostics token.
+It intentionally remains a ConfigMap rather than a Secret because the browser
+must receive the value and cannot keep it confidential. For a local cluster
+smoke test, create the Secrets described in the Kubernetes deployment section
+and apply the baseline resources:
 
 ```sh
 kubectl apply -k deploy/k8s
-kubectl -n mtr port-forward svc/mtr-server 8080:8080
 kubectl -n mtr port-forward svc/mtr-web 8081:80
 ```
 
-If you access the workbench at `http://localhost:8081`, set
-`apiBaseUrl` in `mtr-web-config` to `http://localhost:8080` and set `apiToken`
-to a valid API token. For public deployments, use a restricted frontend token
-rather than the initial admin token. Alternatively, put an Ingress or gateway
-in front of both services and route `/v1` to `mtr-server` and `/` to `mtr-web`.
+If you access the workbench at `http://localhost:8081`, leave `apiBaseUrl`
+empty: the Web Pod proxies `/v1` to the in-cluster `mtr-server` Service, and the
+client uses the preconfigured public token automatically. Override
+`MTR_SERVER_URL` on the Web container if the internal Server address differs.
+
+The baseline Caddy proxy overwrites `X-Mtr-Proxy-Client-Ip` with its direct
+peer address. Server trusts that header only because `mtr-server-ingress`
+allows HTTP traffic solely from the Web Pod. This trust model is safe only when
+the cluster CNI actually supports and enforces NetworkPolicy. If it does not,
+replace the `0.0.0.0/0` and `::/0` trusted ranges with the real Web Pod CIDR or
+another narrowly scoped proxy range before deployment. If you add an Ingress,
+an external Agent, or another Server client, update the NetworkPolicy and
+trusted proxy chain together; never expose this baseline broad trusted-proxy
+setting without the network isolation. An Ingress is not a drop-in addition:
+the baseline policy blocks a controller from reaching Server directly, and
+Caddy derives the client header from its direct peer. To retain the end-user IP
+behind an Ingress, explicitly configure Caddy to trust only that controller's
+forwarding headers before extending the NetworkPolicy.
 
 The `deploy/k8s/agent.yaml` DaemonSet can derive per-node Agent metadata from
 Kubernetes Node annotations without teaching the Agent binary about Kubernetes.
 An init container reads the current Node annotations, renders a normal
 `agent.yaml` into an `emptyDir`, and the Agent container starts with that
 generated config. The ServiceAccount only needs read-only `get nodes` permission
-for the init container. The init container talks to the apiserver via the
-explicit `MTR_KUBERNETES_API_SERVER` env in the manifest, so adjust it if your
-cluster's Kubernetes Service IP is not `https://10.96.0.1:443`. The example maps
-these annotations by default:
+for the init container. By default, the init container builds the API address
+from Kubernetes' injected `KUBERNETES_SERVICE_HOST` and
+`KUBERNETES_SERVICE_PORT_HTTPS` variables. Set the optional
+`MTR_KUBERNETES_API_SERVER` override only when the cluster requires a different
+address. The example maps these annotations by default:
 
 ```sh
 kubectl annotate node <node> \
@@ -498,8 +730,8 @@ they close. Access records use the `http access` message and include:
 
 The Server accepts a safe `X-Request-ID` value and returns it in the response;
 otherwise it generates a UUID. Query strings are intentionally excluded from
-access records because API authentication also supports the `access_token`
-query parameter. Set `log_level: info` or `debug` to emit access logs.
+access records because arbitrary application parameters may contain sensitive
+values. Set `log_level: info` or `debug` to emit access logs.
 
 ## Prometheus Watch Metrics
 
@@ -688,7 +920,13 @@ Production deployments should place Anubis or another browser-facing gateway in 
 
 Agents execute diagnostics with native Go implementations and only upload structured result events.
 
-Targets resolving to loopback, private, link-local, multicast, carrier-grade NAT, documentation, benchmarking, or other special-use address ranges are rejected by both Server and Agent.
+Connection-oriented probes reject targets that resolve to loopback, private,
+link-local, multicast, carrier-grade NAT, documentation, benchmarking, or other
+special-use address ranges at both Server and Agent. The `dns` tool is
+deliberately different: it queries the requested record name without first
+connecting to the returned address, so it can reveal private records visible to
+the Agent's resolver. Treat DNS tool permission as access to that resolver's
+namespace and scope public tokens accordingly.
 
 The Agent image only needs the compiled Agent binary and CA certificates; diagnostic tools are implemented in Go.
 
@@ -697,18 +935,25 @@ The Agent image only needs the compiled Agent binary and CA certificates; diagno
 For container deployments, prefer a non-root user, use a read-only root
 filesystem, disable privilege escalation, and explicitly reduce Linux
 capabilities. Server does not need extra capabilities. Agent needs `NET_RAW`
-only for ICMP-backed `ping`, `traceroute`, and `mtr`; UDP/TCP ping does not need
-it.
+for ICMP ping and for ICMP or TCP traceroute/MTR; UDP probes and TCP ping do
+not need it.
 
 The Server example uses `65532:65532` as an unprivileged container UID/GID. The
 ICMP Agent example uses UID 0 with every capability dropped except `NET_RAW`,
 because Docker does not place `--cap-add NET_RAW` in a non-root process's
 permitted/effective sets. An Agent restricted to UDP/TCP ping can instead use
-UID/GID `65532:65532` and omit `--cap-add`. Mounted config and certificate files
-must be readable by the selected UID/GID. For private keys, prefer mode `0640`
-with the matching group, or use Docker/Compose secrets. The published container
-images do not include Server or Agent runtime config; mount those files
-explicitly.
+the image default UID/GID `65532:65532` and omit `--cap-add`. Mounted config and
+certificate files must be readable by the selected UID/GID. For private keys,
+prefer mode `0640` with the matching group, or use Docker/Compose secrets. The
+published container images do not include Server or Agent runtime config; mount
+those files explicitly. Before the first Server start, place a random token in
+`/etc/mtr/bootstrap/admin-token`, make it readable by UID/GID 65532 but not by
+other users, and remove it after the persistent store is initialized. The
+sample PostgreSQL DSN in `configs/server.yaml` names
+`/var/run/mtr/postgres/ca.crt` as `sslrootcert`, so the example also mounts that
+CA at the exact path; make the host file readable by UID/GID 65532. Omit this
+mount only when using SQLite or a PostgreSQL setup whose DSN uses another
+verified CA location.
 
 ```sh
 docker network create mtr-net
@@ -725,9 +970,12 @@ docker run -d --name mtr-server \
   --memory 512m \
   -p 8080:8080 \
   -p 8443:8443 \
+  -e MTR_BOOTSTRAP_ADMIN_TOKEN_FILE=/var/run/mtr/bootstrap/admin-token \
   -v /etc/mtr/server.yaml:/etc/mtr/server.yaml:ro \
+  -v /etc/mtr/bootstrap:/var/run/mtr/bootstrap:ro \
+  -v /etc/mtr/postgres/ca.crt:/var/run/mtr/postgres/ca.crt:ro \
   -v /etc/mtr/tls/server:/var/run/mtr/tls:ro \
-  ghcr.io/ztelliot/mtr-server:latest
+  ghcr.io/ztelliot/mtr-server:0.1.0
 
 docker run -d --name mtr-agent \
   --network mtr-net \
@@ -742,7 +990,7 @@ docker run -d --name mtr-agent \
   --memory 512m \
   -v /etc/mtr/agent.yaml:/etc/mtr/agent.yaml:ro \
   -v /etc/mtr/tls/agent:/var/run/mtr/tls:ro \
-  ghcr.io/ztelliot/mtr-agent:latest
+  ghcr.io/ztelliot/mtr-agent:0.1.0
 ```
 
 If Server uses SQLite, add a writable state mount and point `database_url` at a
@@ -776,7 +1024,7 @@ root and the `mtr` group:
 ```sh
 useradd --system --home /var/lib/mtr --shell /usr/sbin/nologin mtr
 install -d -o mtr -g mtr -m 0750 /var/lib/mtr
-install -d -o root -g mtr -m 0750 /etc/mtr /etc/mtr/tls
+install -d -o root -g mtr -m 0750 /etc/mtr /etc/mtr/tls /etc/mtr/bootstrap
 install -o root -g mtr -m 0640 configs/server.yaml /etc/mtr/server.yaml
 install -o root -g mtr -m 0640 configs/agent.yaml /etc/mtr/agent.yaml
 install -o root -g mtr -m 0644 certs/ca.crt /etc/mtr/tls/ca.crt
@@ -788,10 +1036,19 @@ install -o root -g root -m 0755 mtr-server /usr/local/bin/mtr-server
 install -o root -g root -m 0755 mtr-agent /usr/local/bin/mtr-agent
 install -o root -g root -m 0644 systemd/mtr-server.service /etc/systemd/system/mtr-server.service
 install -o root -g root -m 0644 systemd/mtr-agent.service /etc/systemd/system/mtr-agent.service
+umask 0077
+openssl rand -hex 32 > /etc/mtr/bootstrap/admin-token
+chown root:mtr /etc/mtr/bootstrap/admin-token
+chmod 0640 /etc/mtr/bootstrap/admin-token
 systemctl daemon-reload
 systemctl enable --now mtr-server
 systemctl enable --now mtr-agent
 ```
+
+The Server unit points at this bootstrap file. After the persistent store is
+initialized and the required managed tokens are saved, remove
+`/etc/mtr/bootstrap/admin-token`; an initialized store continues to start
+without it.
 
 If Server uses SQLite, put the database under `/var/lib/mtr/`. The Server unit
 sets `WorkingDirectory=/var/lib/mtr` and `StateDirectory=mtr`, making that the
@@ -811,14 +1068,17 @@ The repository now includes a baseline manifest set under `deploy/k8s/`:
 
 - `server.yaml`: single-replica Server `Deployment` plus `Service`
 - `agent.yaml`: Agent `DaemonSet`, with each pod using its own pod name as `MTR_ID`
-- `networkpolicy.yaml`: denies inbound traffic to Agent pods
+- `networkpolicy.yaml`: denies inbound Agent traffic and restricts Server HTTP
+  and gRPC ingress to the baseline Web and Agent pods
 - `secrets.example.yaml`: Secret templates with placeholders you should replace
 - `kustomization.yaml`: baseline resources for `kubectl apply -k deploy/k8s`; it
   intentionally does not include `secrets.example.yaml`
 
 These manifests assume:
 
-- PostgreSQL is provided externally and injected through the `database-url` secret value.
+- PostgreSQL is provided externally. Its TLS-verified `database-url` is injected
+  through `mtr-server-env`, and its CA certificate is mounted from
+  `mtr-server-postgres-ca`.
 - The gRPC control plane uses `mtr-server.mtr.svc.cluster.local:8443`, so the example Server certificate SANs match that service DNS name.
 - All Agents share one client certificate, while each pod keeps a unique logical identity through `MTR_ID=metadata.name`.
 - Agent pods read their registration token from the `mtr-agent-env` Secret, and
@@ -826,26 +1086,41 @@ These manifests assume:
   settings.
 - Server stays at `replicas: 1`. The scheduler hub holds in-process connection state, so this baseline does not claim horizontal control-plane scaling.
 - API tokens, Agent register tokens, rate limits, global settings, label-based
-  scheduler/runtime settings, label policies, and managed HTTP Agents are
+  scheduler/runtime settings, label policies, and outbound Agents are
   stored in Server managed settings. They are not read from the Kubernetes
   Server ConfigMap or Secret.
+- A fresh store reads its initial admin API token once from the optional
+  `mtr-server-bootstrap` Secret. The token is never printed to Server logs.
+- The CNI supports and enforces NetworkPolicy. Without that enforcement, replace
+  the Server ConfigMap's broad trusted-proxy ranges with the actual Web Pod CIDR
+  or another narrowly scoped proxy range before applying the manifests.
 
-You can edit the placeholders in `deploy/k8s/secrets.example.yaml` and apply that
-file before the baseline resources, or create the Secrets directly:
+Bootstrap is intentionally staged: create only the Server prerequisites and
+start Server first. Use the initial admin token from a trusted local client to
+create both a public Web diagnostics token and an Agent register token. Only
+then configure Web and deploy the Web and Agent workloads. This avoids
+publishing an admin token to browsers or requiring managed tokens before Server
+exists. You can adapt the placeholders in `deploy/k8s/secrets.example.yaml`, or
+create the first-stage Secrets directly:
 
 ```sh
 kubectl apply -f deploy/k8s/namespace.yaml
 
 kubectl -n mtr create secret generic mtr-server-env \
-  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable'
+  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=verify-full&sslrootcert=/var/run/mtr/postgres/ca.crt'
+
+kubectl -n mtr create secret generic mtr-server-postgres-ca \
+  --from-file=ca.crt=certs/postgres-ca.crt
+
+umask 077
+openssl rand -hex 32 > admin-token
+kubectl -n mtr create secret generic mtr-server-bootstrap \
+  --from-file=admin-token=admin-token
 
 kubectl -n mtr create secret generic mtr-server-tls \
   --from-file=ca.crt=certs/ca.crt \
   --from-file=tls.crt=certs/server.crt \
   --from-file=tls.key=certs/server.key
-
-kubectl -n mtr create secret generic mtr-agent-env \
-  --from-literal=register-token='<managed-register-token>'
 
 kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=ca.crt=certs/ca.crt \
@@ -853,17 +1128,58 @@ kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=tls.key=certs/agent-shared.key
 ```
 
-`<managed-register-token>` is the token value returned by the Manage page or
-`/v1/manage/register-tokens`. On a fresh database, Server prints the initial
-admin API token on startup; use that token to create an Agent register token,
-set its allowed Agent IDs and remaining uses for the rollout,
-then store the returned value in `mtr-agent-env`.
-
-Then apply the baseline resources:
+Apply only Server in the first stage, then keep a local port-forward open in
+one terminal:
 
 ```sh
-kubectl apply -k deploy/k8s
+kubectl apply -f deploy/k8s/server.yaml
+kubectl -n mtr rollout status deployment/mtr-server
+kubectl -n mtr port-forward service/mtr-server 8080:8080
 ```
+
+The value in the local `admin-token` file is the initial admin API token. In
+another terminal, create a deliberately narrow public token (this example
+allows only `ping`) and the rollout's Agent register token:
+
+```sh
+ADMIN_TOKEN="$(tr -d '\r\n' < admin-token)"
+
+curl --fail-with-body -X POST http://127.0.0.1:8080/v1/manage/tokens \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"public-web","all":false,"schedule_access":"none","manage_access":"none","agents":["*"],"tools":{"ping":{}}}' \
+  > /tmp/mtr-public-web-token.json
+
+curl --fail-with-body -X POST http://127.0.0.1:8080/v1/manage/register-tokens \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"k8s-agents","remaining_uses":3}' \
+  > /tmp/mtr-agent-register-token.json
+unset ADMIN_TOKEN
+```
+
+The generated values are revealed once as `.token.secret` in the first response
+and `.token.token` in the second. Adjust the public token's tools and Agent scope
+to the deployment, and set `remaining_uses` and `allowed_agent_ids` for the
+actual rollout. Put the public value into a private copy or overlay of
+`mtr-web-config`; never put the admin token there. Store the register value in
+the Agent Secret, then deploy the remaining workloads:
+
+```sh
+kubectl -n mtr create secret generic mtr-agent-env \
+  --from-literal=register-token='<managed-register-token>'
+kubectl apply -f '<private-web-manifest>' \
+  -f deploy/k8s/agent.yaml \
+  -f deploy/k8s/networkpolicy.yaml
+kubectl -n mtr rollout status deployment/mtr-web
+```
+
+After the persistent database has been initialized and the required managed
+tokens have been saved, delete the local admin and one-time response files and
+the bootstrap Secret; the optional volume may remain absent on later restarts.
+Future reconciliations may use a private Kustomize overlay based on
+`deploy/k8s`; do not reapply the checked-in Web placeholder over the deployed
+public token.
 
 The Agent manifest is intentionally tight on privileges:
 
@@ -872,6 +1188,7 @@ The Agent manifest is intentionally tight on privileges:
 - read-only root filesystem, with only read-only config/cert mounts and one
   `emptyDir` mounted at `/tmp`
 - all Linux capabilities dropped except `NET_RAW`
+- privilege escalation disabled and the runtime-default seccomp profile enabled
 - a NetworkPolicy denies inbound traffic to Agent pods
 
 `NET_RAW` is the one deliberate exception because the current ICMP-backed
@@ -899,6 +1216,10 @@ FaaS deployment assets live in `deploy/fc/`. The checked-in `targets.json`
 describes public target metadata and placeholder runtime settings; `generate.mjs`
 turns that file into provider-specific deployment templates.
 
+The public template selects `header` authentication with
+`X-MTR-Agent-Token`. Set its secret only in your local targets file, then use
+the same header name and secret in the Server outbound Agent's `auth` object.
+
 Supported targets:
 
 - `aliyun`: Alibaba Cloud Function Compute, using the Serverless Devs `fc3`
@@ -909,7 +1230,7 @@ Supported targets:
 - `gcloud`: Google Cloud Run, using `gcloud alpha run deploy`.
 
 Keep real deployment values out of `targets.json`. For production, copy it to a
-local file such as `.targets.json`, fill in values like `MTR_HTTP_TOKEN`,
+local file such as `.targets.json`, fill in values like `MTR_HTTP_AUTH_SECRET`,
 `MTR_HTTP_PATH_PREFIX`, Alibaba Cloud log project IDs, and private image
 locations, then generate templates from that local file:
 
@@ -965,13 +1286,14 @@ local binary:
 ```json
 {
   "binary": {
-    "path": ".cache/mtr-agent",
-    "fromImage": {
-      "image": "ghcr.io/ztelliot/mtr-agent:dev"
-    }
+    "path": ".cache/mtr-agent"
   }
 }
 ```
+
+`binary.path` and `binary.fromImage` are mutually exclusive. Image extraction
+always stages the executable under `output/binary`; every provider output is
+also required to remain below `output/`.
 
 Set `binary.fromImage.pull` to `false` when the image is already present
 locally.
@@ -1017,7 +1339,9 @@ Alibaba Cloud logging is opt-in per target. Set `log: true` and provide
   "env": {
     "MTR_MODE": "http",
     "MTR_LOG_LEVEL": "info",
-    "MTR_HTTP_TOKEN": "<http-token>",
+    "MTR_HTTP_AUTH_TYPE": "header",
+    "MTR_HTTP_AUTH_HEADER": "X-MTR-Agent-Token",
+    "MTR_HTTP_AUTH_SECRET": "<http-auth-secret>",
     "MTR_HTTP_ADDR": ":9000",
     "MTR_HTTP_PATH_PREFIX": "/<path-prefix>",
     "MTR_PROTOCOLS": 1,
@@ -1168,7 +1492,9 @@ gcloud alpha run deploy mob-hongkong \
   --set-env-vars=MTR_MODE=http \
   --set-env-vars=MTR_LOG_LEVEL=info \
   --set-env-vars=MTR_HTTP_ADDR=:9000 \
-  --set-env-vars=MTR_HTTP_TOKEN=<http-token> \
+  --set-env-vars=MTR_HTTP_AUTH_TYPE=header \
+  --set-env-vars=MTR_HTTP_AUTH_HEADER=X-MTR-Agent-Token \
+  --set-env-vars=MTR_HTTP_AUTH_SECRET=<http-auth-secret> \
   --set-env-vars=MTR_HTTP_PATH_PREFIX=/<path-prefix> \
   --set-env-vars='^#^MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port' \
   --set-env-vars=MTR_PROTOCOLS=3 \
@@ -1185,7 +1511,9 @@ memory `128Mi`, min instances `0`, max instances `4`, `--allow-unauthenticated`,
 `target.run`.
 
 Tencent Cloud SCF can deploy from a container image instead of the copied binary.
-Set `providers.qcloud.image` to enable image mode for all Tencent Cloud targets:
+Build and publish the referenced source tag first; it is not bundled by the
+deployment generator. Set `providers.qcloud.image` to enable image mode for all
+Tencent Cloud targets:
 
 ```json
 {
@@ -1194,7 +1522,7 @@ Set `providers.qcloud.image` to enable image mode for all Tencent Cloud targets:
       "name": "mtr-agent-qcloud",
       "output": "qcloud",
       "image": {
-        "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:0.1.0",
         "imageType": "personal",
         "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
         "containerImageAccelerate": true
@@ -1228,7 +1556,7 @@ image object, or `image.registries` for selected regions:
 ```json
 {
   "image": {
-    "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+    "sourceImage": "ghcr.io/ztelliot/mtr-agent:0.1.0",
     "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
     "registries": {
       "ap-hongkong": "hkccr.ccs.tencentyun.com",
@@ -1251,8 +1579,8 @@ image:
 Cloud registry before deployment:
 
 ```bash
-docker pull ghcr.io/ztelliot/mtr-agent:latest
-docker tag ghcr.io/ztelliot/mtr-agent:latest ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
+docker pull ghcr.io/ztelliot/mtr-agent:0.1.0
+docker tag ghcr.io/ztelliot/mtr-agent:0.1.0 ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
 docker push ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
 ```
 

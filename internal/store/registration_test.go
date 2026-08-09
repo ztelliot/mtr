@@ -11,11 +11,11 @@ import (
 )
 
 func TestMemoryAgentRegistrationRules(t *testing.T) {
-	testAgentRegistrationRules(t, NewMemory())
+	testAgentRegistrationRules(t, NewTestMemory())
 }
 
 func TestSQLiteAgentRegistrationRules(t *testing.T) {
-	st, err := NewSQLite(context.Background(), "sqlite://:memory:")
+	st, err := newTestSQLite(context.Background(), "sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,10 +141,10 @@ func testAgentRegistrationRules(t *testing.T, st Store) {
 
 func TestUpsertAgentPreservesRegistrationMetadata(t *testing.T) {
 	t.Run("memory", func(t *testing.T) {
-		testUpsertAgentPreservesRegistrationMetadata(t, NewMemory())
+		testUpsertAgentPreservesRegistrationMetadata(t, NewTestMemory())
 	})
 	t.Run("sqlite", func(t *testing.T) {
-		st, err := NewSQLite(context.Background(), "sqlite://:memory:")
+		st, err := newTestSQLite(context.Background(), "sqlite://:memory:")
 		if err != nil {
 			t.Fatal(err)
 		}

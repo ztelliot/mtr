@@ -20,6 +20,11 @@ var hostnameRE = regexp.MustCompile(`^[a-zA-Z0-9.-]{1,253}$`)
 
 const DefaultPortRange = "1-65535"
 
+const (
+	DefaultTCPProbePort = "80"
+	DefaultUDPProbePort = "33434"
+)
+
 var (
 	ErrInvalidPortRangeRule = errors.New("invalid port range rule")
 	ErrPortNotAllowed       = errors.New("port is not allowed")
@@ -50,9 +55,9 @@ func PoliciesWithRuntime(runtime config.Runtime) Set {
 	probeTimeout := time.Duration(runtime.ProbeStepTimeoutSec) * time.Second
 	return Set{runtime: runtime, byTool: map[model.Tool]Policy{
 		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
-		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
-		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,tcp", "port": DefaultPortRange}},
-		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD"}},
+		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
+		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
+		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2,1.1"}},
 		model.ToolDNS:        {Tool: model.ToolDNS, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolDNS}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"type": "A,AAAA,CNAME,MX,TXT,NS"}},
 		model.ToolPort:       {Tool: model.ToolPort, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPort}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"port": DefaultPortRange}},
 	}}
@@ -163,11 +168,11 @@ func normalizeRuntime(runtime config.Runtime) config.Runtime {
 	if runtime.ResolveTimeoutSec <= 0 {
 		runtime.ResolveTimeoutSec = defaults.ResolveTimeoutSec
 	}
-	if runtime.HTTPInvokeAttempts <= 0 {
-		runtime.HTTPInvokeAttempts = defaults.HTTPInvokeAttempts
+	if runtime.OutboundInvokeAttempts <= 0 {
+		runtime.OutboundInvokeAttempts = defaults.OutboundInvokeAttempts
 	}
-	if runtime.HTTPMaxHealthIntervalSec <= 0 {
-		runtime.HTTPMaxHealthIntervalSec = defaults.HTTPMaxHealthIntervalSec
+	if runtime.OutboundMaxHealthIntervalSec <= 0 {
+		runtime.OutboundMaxHealthIntervalSec = defaults.OutboundMaxHealthIntervalSec
 	}
 	return runtime
 }
@@ -178,19 +183,22 @@ func TimeoutForJob(job model.Job) time.Duration {
 
 func TimeoutForJobWithRuntime(job model.Job, runtime config.Runtime) time.Duration {
 	runtime = normalizeRuntime(runtime)
-	probeStepTimeout := time.Duration(runtime.ProbeStepTimeoutSec) * time.Second
+	probeStepTimeout := saturatingDurationProduct(time.Second, runtime.ProbeStepTimeoutSec)
 	var timeout time.Duration
 	switch job.Tool {
 	case model.ToolPing:
-		timeout = time.Duration(runtime.Count)*probeStepTimeout + time.Duration(runtime.Count-1)*time.Second
+		timeout = saturatingDurationAdd(
+			saturatingDurationProduct(probeStepTimeout, runtime.Count),
+			saturatingDurationProduct(time.Second, runtime.Count-1),
+		)
 	case model.ToolTraceroute:
-		timeout = time.Duration(runtime.MaxHops) * probeStepTimeout
+		timeout = saturatingDurationProduct(probeStepTimeout, runtime.MaxHops)
 	case model.ToolMTR:
-		timeout = time.Duration(runtime.Count*runtime.MaxHops) * probeStepTimeout
+		timeout = saturatingDurationProduct(probeStepTimeout, runtime.Count, runtime.MaxHops)
 	case model.ToolHTTP:
-		timeout = time.Duration(runtime.HTTPTimeoutSec) * time.Second
+		timeout = saturatingDurationProduct(time.Second, runtime.HTTPTimeoutSec)
 	case model.ToolDNS:
-		timeout = time.Duration(runtime.DNSTimeoutSec) * time.Second
+		timeout = saturatingDurationProduct(time.Second, runtime.DNSTimeoutSec)
 	case model.ToolPort:
 		timeout = probeStepTimeout
 	default:
@@ -199,11 +207,37 @@ func TimeoutForJobWithRuntime(job model.Job, runtime config.Runtime) time.Durati
 	if timeout <= 0 {
 		timeout = probeStepTimeout
 	}
-	maxToolTimeout := time.Duration(runtime.MaxToolTimeoutSec) * time.Second
+	maxToolTimeout := saturatingDurationProduct(time.Second, runtime.MaxToolTimeoutSec)
 	if timeout > maxToolTimeout {
 		return maxToolTimeout
 	}
 	return timeout
+}
+
+func saturatingDurationProduct(unit time.Duration, factors ...int) time.Duration {
+	if unit <= 0 {
+		return 0
+	}
+	const maximum = time.Duration(1<<63 - 1)
+	result := unit
+	for _, factor := range factors {
+		if factor <= 0 {
+			return 0
+		}
+		if result > maximum/time.Duration(factor) {
+			return maximum
+		}
+		result *= time.Duration(factor)
+	}
+	return result
+}
+
+func saturatingDurationAdd(left, right time.Duration) time.Duration {
+	const maximum = time.Duration(1<<63 - 1)
+	if left >= maximum-right {
+		return maximum
+	}
+	return left + right
 }
 
 func ServerArgs(tool model.Tool, args map[string]string) map[string]string {
@@ -214,7 +248,7 @@ func ServerArgsWithRuntime(tool model.Tool, args map[string]string, runtime conf
 	runtime = normalizeRuntime(runtime)
 	out := make(map[string]string, len(args)+2)
 	for k, v := range args {
-		if k == "count" || k == "max_hops" || k == "max_hop" {
+		if k == "count" || k == "max_hops" {
 			continue
 		}
 		out[k] = v
@@ -222,11 +256,18 @@ func ServerArgsWithRuntime(tool model.Tool, args map[string]string, runtime conf
 	switch tool {
 	case model.ToolPing:
 		out["count"] = strconv.Itoa(runtime.Count)
+		materializeRouteDefaults(out)
 	case model.ToolTraceroute:
 		out["max_hops"] = strconv.Itoa(runtime.MaxHops)
+		materializeRouteDefaults(out)
 	case model.ToolMTR:
 		out["count"] = strconv.Itoa(runtime.Count)
 		out["max_hops"] = strconv.Itoa(runtime.MaxHops)
+		materializeRouteDefaults(out)
+	case model.ToolHTTP:
+		materializeHTTPDefaults(out)
+	case model.ToolDNS:
+		materializeDNSDefaults(out)
 	}
 	return out
 }
@@ -246,19 +287,47 @@ func AgentArgsWithRuntime(tool model.Tool, args map[string]string, runtime confi
 		if out["count"] == "" {
 			out["count"] = strconv.Itoa(runtime.Count)
 		}
+		materializeRouteDefaults(out)
 	case model.ToolTraceroute:
-		if out["max_hops"] == "" && out["max_hop"] == "" {
+		if out["max_hops"] == "" {
 			out["max_hops"] = strconv.Itoa(runtime.MaxHops)
 		}
+		materializeRouteDefaults(out)
 	case model.ToolMTR:
 		if out["count"] == "" {
 			out["count"] = strconv.Itoa(runtime.Count)
 		}
-		if out["max_hops"] == "" && out["max_hop"] == "" {
+		if out["max_hops"] == "" {
 			out["max_hops"] = strconv.Itoa(runtime.MaxHops)
 		}
+		materializeRouteDefaults(out)
+	case model.ToolHTTP:
+		materializeHTTPDefaults(out)
+	case model.ToolDNS:
+		materializeDNSDefaults(out)
 	}
 	return out
+}
+
+func materializeRouteDefaults(args map[string]string) {
+	if strings.TrimSpace(args["protocol"]) == "" {
+		args["protocol"] = "icmp"
+	}
+}
+
+func materializeHTTPDefaults(args map[string]string) {
+	if strings.TrimSpace(args["method"]) == "" {
+		args["method"] = "GET"
+	}
+	if strings.TrimSpace(args["http_version"]) == "" {
+		args["http_version"] = "1.1"
+	}
+}
+
+func materializeDNSDefaults(args map[string]string) {
+	if strings.TrimSpace(args["type"]) == "" {
+		args["type"] = "A"
+	}
 }
 
 func (s Set) ServerArgs(tool model.Tool, args map[string]string) map[string]string {
@@ -332,30 +401,117 @@ func (s Set) validate(req model.CreateJobRequest, requirePinned bool) (Policy, e
 	if requiresPortArg(req.Tool) && strings.TrimSpace(req.Args["port"]) == "" {
 		return Policy{}, fmt.Errorf("%s requires port", req.Tool)
 	}
-	for k, v := range req.Args {
-		if isServerOwnedArg(k) {
-			continue
-		}
-		pattern, ok := p.AllowedArgs[k]
-		if !ok {
-			return Policy{}, fmt.Errorf("argument %q is not allowed for %s", k, req.Tool)
-		}
-		if k == "port" {
-			if err := ValidatePortAllowed(pattern, v); err != nil {
-				return Policy{}, fmt.Errorf("argument %q is invalid", k)
-			}
-			continue
-		}
-		if pattern != "" && !AllowedArgContains(pattern, v) {
-			return Policy{}, fmt.Errorf("argument %q is invalid", k)
-		}
+	if err := ValidateAllowedArgs(req.Tool, req.Args, p.AllowedArgs); err != nil {
+		return Policy{}, err
 	}
 	return p, nil
 }
 
+// EffectiveArgs returns the complete arguments a probe will use. Semantic
+// defaults are materialized before authorization and dispatch.
+func EffectiveArgs(tool model.Tool, args map[string]string) map[string]string {
+	out := make(map[string]string, len(args)+2)
+	for key, value := range args {
+		if isServerOwnedArg(key) {
+			continue
+		}
+		out[key] = value
+	}
+	switch tool {
+	case model.ToolPing, model.ToolTraceroute, model.ToolMTR:
+		if strings.TrimSpace(out["protocol"]) == "" {
+			out["protocol"] = "icmp"
+		}
+		if strings.TrimSpace(out["port"]) == "" {
+			switch out["protocol"] {
+			case "tcp":
+				out["port"] = DefaultTCPProbePort
+			case "udp":
+				out["port"] = DefaultUDPProbePort
+			}
+		}
+	case model.ToolHTTP:
+		if strings.TrimSpace(out["method"]) == "" {
+			out["method"] = "GET"
+		}
+		if strings.TrimSpace(out["http_version"]) == "" {
+			out["http_version"] = "1.1"
+		}
+	case model.ToolDNS:
+		if strings.TrimSpace(out["type"]) == "" {
+			out["type"] = "A"
+		}
+	}
+	return out
+}
+
+// ValidateAllowedArgs validates both submitted arguments and semantic
+// defaults. For auto modes every possible fallback must be authorized.
+func ValidateAllowedArgs(tool model.Tool, args map[string]string, allowedArgs map[string]string) error {
+	effective := EffectiveArgs(tool, args)
+	for key, value := range effective {
+		pattern, ok := allowedArgs[key]
+		if !ok {
+			return fmt.Errorf("argument %q is not allowed for %s", key, tool)
+		}
+		if key == "port" {
+			if err := ValidatePortAllowed(pattern, value); err != nil {
+				return fmt.Errorf("argument %q is invalid", key)
+			}
+			continue
+		}
+		if !AllowedArgPermits(tool, key, pattern, value) {
+			return fmt.Errorf("argument %q is invalid", key)
+		}
+	}
+
+	if isNetworkProbeTool(tool) && effective["protocol"] == "auto" && strings.TrimSpace(effective["port"]) == "" {
+		pattern, ok := allowedArgs["port"]
+		if !ok {
+			return fmt.Errorf("argument %q is not allowed for %s", "port", tool)
+		}
+		for _, port := range []string{DefaultUDPProbePort, DefaultTCPProbePort} {
+			if err := ValidatePortAllowed(pattern, port); err != nil {
+				return fmt.Errorf("argument %q is invalid", "port")
+			}
+		}
+	}
+	return nil
+}
+
+// AllowedArgPermits is stricter than a literal CSV lookup for auto: granting
+// auto also requires granting every concrete protocol/version it may select.
+func AllowedArgPermits(tool model.Tool, key string, rule string, value string) bool {
+	if !AllowedArgContains(rule, value) {
+		return false
+	}
+	if value != "auto" {
+		return true
+	}
+	var candidates []string
+	switch {
+	case isNetworkProbeTool(tool) && key == "protocol":
+		candidates = []string{"icmp", "udp", "tcp"}
+	case tool == model.ToolHTTP && key == "http_version":
+		candidates = []string{"3", "2", "1.1"}
+	default:
+		return true
+	}
+	for _, candidate := range candidates {
+		if !AllowedArgContains(rule, candidate) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNetworkProbeTool(tool model.Tool) bool {
+	return tool == model.ToolPing || tool == model.ToolTraceroute || tool == model.ToolMTR
+}
+
 func ValidatePortAllowed(rule string, value string) error {
-	port, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || port < 1 || port > 65535 {
+	port, err := parseCanonicalPort(value)
+	if err != nil {
 		return ErrPortNotAllowed
 	}
 	ranges, err := parsePortRanges(rule)
@@ -376,33 +532,31 @@ func ValidatePortRangeRule(rule string) error {
 }
 
 func parsePortRanges(rule string) ([][2]int, error) {
-	rule = strings.TrimSpace(rule)
 	if rule == "" {
-		rule = DefaultPortRange
+		return nil, ErrInvalidPortRangeRule
 	}
 	parts := strings.Split(rule, ",")
 	ranges := make([][2]int, 0, len(parts))
 	for _, part := range parts {
-		part = strings.TrimSpace(part)
 		if part == "" {
-			continue
+			return nil, ErrInvalidPortRangeRule
 		}
 		bounds := strings.Split(part, "-")
 		if len(bounds) > 2 {
 			return nil, ErrInvalidPortRangeRule
 		}
-		start, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		start, err := parseCanonicalPort(bounds[0])
 		if err != nil {
 			return nil, ErrInvalidPortRangeRule
 		}
 		end := start
 		if len(bounds) == 2 {
-			end, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			end, err = parseCanonicalPort(bounds[1])
 			if err != nil {
 				return nil, ErrInvalidPortRangeRule
 			}
 		}
-		if start < 1 || end > 65535 || start > end {
+		if start > end {
 			return nil, ErrInvalidPortRangeRule
 		}
 		ranges = append(ranges, [2]int{start, end})
@@ -411,6 +565,22 @@ func parsePortRanges(rule string) ([][2]int, error) {
 		return nil, ErrInvalidPortRangeRule
 	}
 	return ranges, nil
+}
+
+func parseCanonicalPort(value string) (int, error) {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return 0, ErrInvalidPortRangeRule
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, ErrInvalidPortRangeRule
+		}
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, ErrInvalidPortRangeRule
+	}
+	return port, nil
 }
 
 func formatPortRanges(ranges [][2]int) string {
@@ -474,7 +644,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 func isServerOwnedArg(key string) bool {
-	return key == "count" || key == "max_hops" || key == "max_hop"
+	return key == "count" || key == "max_hops"
 }
 
 func requiresPinnedAgent(tool model.Tool) bool {
@@ -633,8 +803,8 @@ func AgentSupports(a model.Agent, tool model.Tool, version model.IPVersion) bool
 		return false
 	}
 	protocols := a.Protocols
-	if protocols == 0 {
-		protocols = model.ProtocolAll
+	if protocols == 0 || protocols&^model.ProtocolAll != 0 {
+		return false
 	}
 	required := RequiredProtocol(version)
 	return required == 0 || protocols&required != 0
@@ -680,19 +850,88 @@ func validateAllowedIP(raw string) error {
 	if err != nil {
 		return fmt.Errorf("invalid resolved ip %q", raw)
 	}
-	if addr.Is4In6() {
-		return validateAllowedIP(addr.Unmap().String())
+	if embedded, ok := embeddedIPv4Address(addr); ok {
+		if err := validateAllowedIP(embedded.String()); err != nil {
+			return fmt.Errorf("target address %s embeds a disallowed IPv4 address: %w", addr, err)
+		}
 	}
-	if addr.IsUnspecified() ||
-		addr.IsLoopback() ||
-		addr.IsPrivate() ||
-		addr.IsLinkLocalUnicast() ||
-		addr.IsMulticast() ||
-		!addr.IsGlobalUnicast() ||
-		isBlockedSpecialUse(addr) {
+	if !PublicNetworkAddressAllowed(addr) {
 		return fmt.Errorf("target address %s is not allowed", addr)
 	}
 	return nil
+}
+
+// PublicNetworkAddressAllowed reports whether an address is suitable for an
+// outbound request that must not reach private or special-use networks.
+func PublicNetworkAddressAllowed(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || !addr.IsGlobalUnicast() || isBlockedSpecialUse(addr) {
+		return false
+	}
+	if embedded, ok := embeddedIPv4Address(addr); ok {
+		return PublicNetworkAddressAllowed(embedded)
+	}
+	return true
+}
+
+// ManagedAgentEndpointAddressAllowed reports whether an address may be used
+// for a server-managed Agent endpoint. Managed Agents commonly live in a VPC
+// or cluster network, so private IPv4 and IPv6 ULA addresses are permitted.
+// Host-local, link-local, multicast, and cloud metadata endpoints remain
+// forbidden; endpoint DNS is checked again for every connection.
+func ManagedAgentEndpointAddressAllowed(addr netip.Addr) bool {
+	if addr.Zone() != "" {
+		return false
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || !addr.IsGlobalUnicast() {
+		return false
+	}
+	if embedded, ok := embeddedIPv4Address(addr); ok {
+		return ManagedAgentEndpointAddressAllowed(embedded)
+	}
+	for _, metadataAddress := range [...]netip.Addr{
+		netip.MustParseAddr("100.100.100.200"),
+		netip.MustParseAddr("fd00:ec2::254"),
+	} {
+		if addr == metadataAddress {
+			return false
+		}
+	}
+	return true
+}
+
+func embeddedIPv4Address(addr netip.Addr) (netip.Addr, bool) {
+	if addr.Is4In6() {
+		return addr.Unmap(), true
+	}
+	if !addr.Is6() {
+		return netip.Addr{}, false
+	}
+	for _, prefix := range []netip.Prefix{
+		netip.MustParsePrefix("64:ff9b::/96"),
+		netip.MustParsePrefix("64:ff9b:1::/48"),
+	} {
+		if !prefix.Contains(addr) {
+			continue
+		}
+		bytes := addr.As16()
+		var embedded [4]byte
+		switch prefix.Bits() {
+		case 48:
+			embedded = [4]byte{bytes[6], bytes[7], bytes[9], bytes[10]}
+		case 96:
+			embedded = [4]byte{bytes[12], bytes[13], bytes[14], bytes[15]}
+		default:
+			continue
+		}
+		return netip.AddrFrom4(embedded), true
+	}
+	if prefix := netip.MustParsePrefix("2002::/16"); prefix.Contains(addr) {
+		bytes := addr.As16()
+		return netip.AddrFrom4([4]byte{bytes[2], bytes[3], bytes[4], bytes[5]}), true
+	}
+	return netip.Addr{}, false
 }
 
 func validateIPVersion(ip net.IP, version model.IPVersion) error {
@@ -727,6 +966,11 @@ func isBlockedSpecialUse(addr netip.Addr) bool {
 		netip.MustParsePrefix("240.0.0.0/4"),
 		netip.MustParsePrefix("::/128"),
 		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("100::/64"),
+		netip.MustParsePrefix("2001::/23"),
+		netip.MustParsePrefix("2001:2::/48"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("2002::/16"),
 		netip.MustParsePrefix("fc00::/7"),
 		netip.MustParsePrefix("fe80::/10"),
 		netip.MustParsePrefix("ff00::/8"),

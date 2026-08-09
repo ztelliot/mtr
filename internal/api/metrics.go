@@ -219,7 +219,7 @@ func (c *watchMetricsCollector) collectAgents(ctx context.Context, ch chan<- pro
 	if err != nil {
 		return false
 	}
-	httpAgents, err := c.store.ListHTTPAgents(ctx)
+	outboundAgents, err := c.store.ListOutboundAgents(ctx)
 	if err != nil {
 		return false
 	}
@@ -227,7 +227,7 @@ func (c *watchMetricsCollector) collectAgents(ctx context.Context, ch chan<- pro
 	for _, config := range configs {
 		disabled[config.ID] = config.Disabled
 	}
-	for _, agent := range httpAgents {
+	for _, agent := range outboundAgents {
 		disabled[agent.ID] = !agent.Enabled
 	}
 	for _, agent := range agents {

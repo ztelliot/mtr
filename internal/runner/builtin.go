@@ -15,9 +15,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -26,19 +29,26 @@ import (
 )
 
 const (
-	icmpProtocolIPv4         = 1
-	icmpProtocolIPv6         = 58
-	defaultPingProbeTimeout  = time.Second
-	defaultPingInterval      = time.Second
-	defaultRouteProbeTimeout = time.Second
-	defaultUDPProbePort      = 33434
-	tcpProbeTimeout          = 2 * time.Second
+	icmpProtocolIPv4           = 1
+	icmpProtocolIPv6           = 58
+	defaultPingProbeTimeout    = time.Second
+	defaultPingInterval        = time.Second
+	defaultRouteProbeTimeout   = time.Second
+	defaultHTTPAttemptTimeout  = time.Second
+	defaultUDPProbePort        = 33434
+	maxHTTPResponseBodyBytes   = 8 << 20
+	maxHTTPResponseHeaderBytes = 1 << 20
+	tcpProbeTimeout            = 2 * time.Second
 )
 
 var (
-	listenPingICMP = listenICMP
-	pingUDPProbe   = udpProbeWithTimeout
-	pingTCPProbe   = tcpProbeWithTimeout
+	listenPingICMP          = listenICMP
+	pingUDPProbe            = udpProbeWithTimeout
+	pingTCPProbe            = tcpProbeWithTimeout
+	listenRouteICMP         = listenICMP
+	routeUDPProbe           = udpTraceProbeWithTimeout
+	routeTCPProbe           = tcpTraceProbeWithTimeout
+	executeHTTPProbeAttempt = runHTTPProbeAttempt
 )
 
 func runBuiltin(ctx context.Context, job model.Job, probeTimeout time.Duration, sink StreamSink) (*model.ToolResult, error) {
@@ -50,7 +60,7 @@ func runBuiltin(ctx context.Context, job model.Job, probeTimeout time.Duration, 
 	case model.ToolMTR:
 		return runBuiltinMTRWithTimeout(ctx, job, sink, probeTimeout)
 	case model.ToolHTTP:
-		return runBuiltinHTTP(ctx, job, sink)
+		return runBuiltinHTTPWithTimeout(ctx, job, sink, probeTimeout)
 	case model.ToolDNS:
 		return runBuiltinDNS(ctx, job, sink)
 	case model.ToolPort:
@@ -67,7 +77,19 @@ func runBuiltinPing(ctx context.Context, job model.Job, sink StreamSink) (*model
 func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSink, probeTimeout time.Duration) (*model.ToolResult, error) {
 	probeTimeout = normalizedPingProbeTimeout(probeTimeout)
 	count := parsePositiveInt(argOr(job.Args, "count", "10"))
-	requestedMode := pingProbeMode(argOr(job.Args, "protocol", "icmp"))
+	requestedMode, err := probeMode(argOr(job.Args, "protocol", "icmp"))
+	if err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		emitPingTimeoutMetric(sink, ctx, err, 1)
+		return result, err
+	}
+	if err := validateOptionalProbePort(job.Args); err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		emitPingTimeoutMetric(sink, ctx, err, 1)
+		return result, err
+	}
 	mode := requestedMode
 	targetIP, version, err := resolveOne(ctx, executionTarget(job), job.IPVersion)
 	if err != nil {
@@ -188,7 +210,13 @@ func setPingProtocolSummary(result *model.ToolResult, requested string, actual s
 func probeOnce(ctx context.Context, conn *icmp.PacketConn, target net.IP, version model.IPVersion, mode string, port int, ttl int, id int, seq int, timeout time.Duration) (time.Duration, error) {
 	switch mode {
 	case "tcp":
-		return pingTCPProbe(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
+		rtt, err := pingTCPProbe(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			// A TCP RST from the destination proves that it is reachable even
+			// though the probed port is closed.
+			return rtt, nil
+		}
+		return rtt, err
 	case "udp":
 		return pingUDPProbe(ctx, target, version, port, ttl, normalizedPingProbeTimeout(timeout))
 	default:
@@ -308,9 +336,18 @@ func runBuiltinTraceroute(ctx context.Context, job model.Job, sink StreamSink) (
 
 func runBuiltinTracerouteWithTimeout(ctx context.Context, job model.Job, sink StreamSink, probeTimeout time.Duration) (*model.ToolResult, error) {
 	maxHops := parsePositiveInt(argOr(job.Args, "max_hops", "30"))
-	mode := probeMode(argOr(job.Args, "protocol", "icmp"))
-	port := parsePort(job.Args, defaultProbePort(mode))
-	result, err := runTrace(ctx, job, sink, maxHops, 1, mode, port, true, probeTimeout)
+	mode, err := probeMode(argOr(job.Args, "protocol", "icmp"))
+	if err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	if err := validateOptionalProbePort(job.Args); err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	result, err := runTrace(ctx, job, sink, maxHops, 1, mode, true, probeTimeout)
 	flattenResultHops(result)
 	if err != nil {
 		return result, err
@@ -318,46 +355,100 @@ func runBuiltinTracerouteWithTimeout(ctx context.Context, job model.Job, sink St
 	return result, nil
 }
 
-func runTrace(ctx context.Context, job model.Job, sink StreamSink, maxHops int, probesPerHop int, mode string, port int, emitResolved bool, probeTimeout time.Duration) (*model.ToolResult, error) {
+func runTrace(ctx context.Context, job model.Job, sink StreamSink, maxHops int, probesPerHop int, requestedMode string, emitResolved bool, probeTimeout time.Duration) (*model.ToolResult, error) {
 	probeTimeout = normalizedRouteProbeTimeout(probeTimeout)
 	targetIP, version, err := resolveOne(ctx, executionTarget(job), job.IPVersion)
 	if err != nil {
 		result := newBuiltinResult(job, -1)
+		setRouteProtocolSummary(result, requestedMode, requestedMode, job.Args)
 		fillErrorSummary(ctx, result, err)
 		return result, err
 	}
 	if emitResolved {
 		emitResolvedTarget(sink, targetIP, version)
 	}
+	mode := requestedMode
+	if mode == "auto" {
+		mode = "icmp"
+	}
 	var conn *icmp.PacketConn
 	if mode == "icmp" {
-		conn, err = listenICMP(version)
+		conn, err = listenRouteICMP(version)
 		if err != nil {
-			result := newBuiltinResult(job, -1)
-			result.IPVersion = version
-			fillErrorSummary(ctx, result, err)
-			return result, err
+			if requestedMode == "auto" {
+				mode = "udp"
+			} else {
+				result := newBuiltinResult(job, -1)
+				result.IPVersion = version
+				setRouteProtocolSummary(result, requestedMode, mode, job.Args)
+				fillErrorSummary(ctx, result, err)
+				return result, err
+			}
 		}
-		defer conn.Close()
 	}
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
 
 	result := newBuiltinResult(job, 1)
 	result.IPVersion = version
+	setRouteProtocolSummary(result, requestedMode, mode, job.Args)
 	id := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(0xffff)
+	autoSelecting := requestedMode == "auto"
 	for ttl := 1; ttl <= maxHops; ttl++ {
 		select {
 		case <-ctx.Done():
 			result.ExitCode = -1
+			setRouteProtocolSummary(result, requestedMode, mode, job.Args)
 			fillErrorSummary(ctx, result, ctx.Err())
 			return result, ctx.Err()
 		default:
 		}
 		hop := model.HopResult{Index: ttl}
 		for probe := 0; probe < probesPerHop; probe++ {
-			rtt, peer, reached, err := traceOnce(ctx, conn, targetIP, version, mode, port, id, ttl, traceProbeSeq(ttl, probe, probesPerHop), probeTimeout)
+			var rtt time.Duration
+			var peer net.IP
+			var reached bool
+			for {
+				port := routeProbePort(job.Args, mode)
+				rtt, peer, reached, err = traceOnce(ctx, conn, targetIP, version, mode, port, id, ttl, traceProbeSeq(ttl, probe, probesPerHop), probeTimeout)
+				if err == nil {
+					autoSelecting = false
+					break
+				}
+				if contextErr := routeContextError(ctx, err); contextErr != nil {
+					result.ExitCode = -1
+					setRouteProtocolSummary(result, requestedMode, mode, job.Args)
+					fillErrorSummary(ctx, result, contextErr)
+					return result, contextErr
+				}
+				if !autoSelecting || mode == "tcp" || !routeErrorAllowsFallback(err) {
+					autoSelecting = false
+					break
+				}
+				switch mode {
+				case "icmp":
+					if conn != nil {
+						_ = conn.Close()
+						conn = nil
+					}
+					mode = "udp"
+				case "udp":
+					mode = "tcp"
+				}
+				setRouteProtocolSummary(result, requestedMode, mode, job.Args)
+			}
 			if err != nil {
-				hop.Probes = append(hop.Probes, model.ProbeResult{Timeout: true})
-				continue
+				if routeProbeTimedOut(err) {
+					hop.Probes = append(hop.Probes, model.ProbeResult{Timeout: true})
+					continue
+				}
+				result.ExitCode = -1
+				setRouteProtocolSummary(result, requestedMode, mode, job.Args)
+				fillRouteProbeErrorSummary(ctx, result, err)
+				return result, err
 			}
 			ms := float64(rtt.Microseconds()) / 1000
 			probeResult := model.ProbeResult{RTTMS: &ms}
@@ -376,14 +467,16 @@ func runTrace(ctx context.Context, job model.Job, sink StreamSink, maxHops int, 
 		}
 	}
 	result.Summary["hop_count"] = len(result.Hops)
-	result.Summary["protocol"] = mode
+	setRouteProtocolSummary(result, requestedMode, mode, job.Args)
 	return result, nil
 }
 
 func traceOnce(ctx context.Context, conn *icmp.PacketConn, target net.IP, version model.IPVersion, mode string, port int, id int, ttl int, seq int, probeTimeout time.Duration) (time.Duration, net.IP, bool, error) {
-	if mode == "tcp" {
-		rtt, err := tcpProbeWithTimeout(ctx, target, version, port, ttl, normalizedRouteProbeTimeout(probeTimeout))
-		return rtt, target, err == nil, err
+	switch mode {
+	case "tcp":
+		return routeTCPProbe(ctx, target, version, port, ttl, normalizedRouteProbeTimeout(probeTimeout))
+	case "udp":
+		return routeUDPProbe(ctx, target, version, port, ttl, normalizedRouteProbeTimeout(probeTimeout))
 	}
 	if err := setTTL(conn, version, ttl); err != nil {
 		return 0, nil, false, err
@@ -504,22 +597,40 @@ func runBuiltinMTR(ctx context.Context, job model.Job, sink StreamSink) (*model.
 func runBuiltinMTRWithTimeout(ctx context.Context, job model.Job, sink StreamSink, probeTimeout time.Duration) (*model.ToolResult, error) {
 	count := parsePositiveInt(argOr(job.Args, "count", "10"))
 	maxHops := parsePositiveInt(argOr(job.Args, "max_hops", "30"))
-	mode := probeMode(argOr(job.Args, "protocol", "icmp"))
-	port := parsePort(job.Args, defaultProbePort(mode))
+	requestedMode, err := probeMode(argOr(job.Args, "protocol", "icmp"))
+	if err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	if err := validateOptionalProbePort(job.Args); err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	mode := requestedMode
 	acc := map[int][]model.ProbeResult{}
 	var final *model.ToolResult
+	var terminalErr error
+	cyclesAttempted := 0
+	observedMaxHop := 0
 	for i := 0; i < count; i++ {
-		trace, err := runTrace(ctx, job, sink, maxHops, 1, mode, port+i, i == 0, probeTimeout)
+		cyclesAttempted++
+		trace, err := runTrace(ctx, job, sink, maxHops, 1, mode, i == 0, probeTimeout)
 		if trace != nil {
+			if requestedMode == "auto" && i == 0 {
+				mode = summaryString(trace.Summary, "protocol", "tcp")
+			}
 			for _, hop := range trace.Hops {
 				acc[hop.Index] = append(acc[hop.Index], hop.Probes...)
+				if hop.Index > observedMaxHop {
+					observedMaxHop = hop.Index
+				}
 			}
 		}
 		if err != nil {
-			if final == nil {
-				return trace, err
-			}
 			final = trace
+			terminalErr = err
 			break
 		}
 		final = trace
@@ -533,16 +644,96 @@ func runBuiltinMTRWithTimeout(ctx context.Context, job model.Job, sink StreamSin
 		result.ExitCode = final.ExitCode
 		copyErrorSummary(result, final)
 	}
-	for i := 1; i <= maxHops; i++ {
+	for i := 1; i <= observedMaxHop; i++ {
 		probes := acc[i]
-		hop := summarizeHop(i, probes, count).FlattenSingleProbe()
+		if len(probes) == 0 {
+			continue
+		}
+		hop := summarizeHop(i, probes, cyclesAttempted).FlattenSingleProbe()
 		result.Hops = append(result.Hops, hop)
 		emitHopSummary(sink, hop)
 	}
 	result.Summary["hop_count"] = len(result.Hops)
-	result.Summary["protocol"] = mode
-	result.Summary["cycles"] = count
-	return result, nil
+	setRouteProtocolSummary(result, requestedMode, mode, job.Args)
+	result.Summary["cycles"] = cyclesAttempted
+	return result, terminalErr
+}
+
+func setRouteProtocolSummary(result *model.ToolResult, requested string, actual string, args map[string]string) {
+	result.Summary["protocol"] = actual
+	if requested == "auto" {
+		result.Summary["requested_protocol"] = "auto"
+	}
+	port := routeProbePort(args, actual)
+	if port > 0 {
+		result.Summary["port"] = port
+	} else {
+		delete(result.Summary, "port")
+	}
+}
+
+func routeProbePort(args map[string]string, mode string) int {
+	if mode == "icmp" || mode == "auto" {
+		return 0
+	}
+	return parsePort(args, defaultProbePort(mode))
+}
+
+func routeContextError(ctx context.Context, err error) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func routeProbeTimedOut(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func routeErrorAllowsFallback(err error) bool {
+	var unreachable *udpTraceICMPError
+	return routeProbeTimedOut(err) || errors.As(err, &unreachable)
+}
+
+func fillRouteProbeErrorSummary(ctx context.Context, result *model.ToolResult, err error) {
+	fillErrorSummary(ctx, result, err)
+	var unreachable *udpTraceICMPError
+	if errors.As(err, &unreachable) {
+		setRouteICMPErrorSummary(result, unreachable.Type, unreachable.Code, unreachable.Peer, unreachable.Errno)
+		return
+	}
+	var tcpUnreachable *tcpTraceICMPError
+	if errors.As(err, &tcpUnreachable) {
+		setRouteICMPErrorSummary(result, tcpUnreachable.Type, tcpUnreachable.Code, tcpUnreachable.Peer, tcpUnreachable.Errno)
+	}
+}
+
+func setRouteICMPErrorSummary(result *model.ToolResult, icmpType byte, icmpCode byte, peer net.IP, errno syscall.Errno) {
+	result.Summary["icmp_type"] = int(icmpType)
+	result.Summary["icmp_code"] = int(icmpCode)
+	if peer != nil {
+		result.Summary["peer"] = peer.String()
+	}
+	if errno != 0 {
+		result.Summary["errno"] = errno.Error()
+	}
+}
+
+func summaryString(summary map[string]any, key string, fallback string) string {
+	if value, ok := summary[key].(string); ok && value != "" {
+		return value
+	}
+	return fallback
 }
 
 func normalizedRouteProbeTimeout(timeout time.Duration) time.Duration {
@@ -553,51 +744,323 @@ func normalizedRouteProbeTimeout(timeout time.Duration) time.Duration {
 }
 
 func runBuiltinHTTP(ctx context.Context, job model.Job, sink StreamSink) (*model.ToolResult, error) {
-	result := newBuiltinResult(job, 0)
-	method := argOr(job.Args, "method", "GET")
-	var dnsStart, connectStart, tlsStart, requestStart, firstByteAt time.Time
-	var dnsMS, connectMS, tlsMS float64
-	var remoteAddr string
-	trace := &httptrace.ClientTrace{
-		DNSStart: func(httptrace.DNSStartInfo) {
-			dnsStart = time.Now()
-		},
-		DNSDone: func(httptrace.DNSDoneInfo) {
-			if !dnsStart.IsZero() {
-				dnsMS = elapsedMS(dnsStart)
-			}
-		},
-		ConnectStart: func(_, addr string) {
-			connectStart = time.Now()
-			remoteAddr = addr
-		},
-		ConnectDone: func(_, addr string, _ error) {
-			remoteAddr = addr
-			if !connectStart.IsZero() {
-				connectMS = elapsedMS(connectStart)
-			}
-		},
-		TLSHandshakeStart: func() {
-			tlsStart = time.Now()
-		},
-		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
-			if !tlsStart.IsZero() {
-				tlsMS = elapsedMS(tlsStart)
-			}
-		},
-		GotFirstResponseByte: func() {
-			firstByteAt = time.Now()
-		},
-	}
-	ctx = httptrace.WithClientTrace(ctx, trace)
-	req, tlsServerName, err := newHTTPProbeRequest(ctx, method, job.Target)
+	return runBuiltinHTTPWithTimeout(ctx, job, sink, defaultHTTPAttemptTimeout)
+}
+
+func runBuiltinHTTPWithTimeout(ctx context.Context, job model.Job, _ StreamSink, attemptTimeout time.Duration) (*model.ToolResult, error) {
+	method, err := httpMethod(argOr(job.Args, "method", "GET"))
 	if err != nil {
-		result.ExitCode = 1
+		result := newBuiltinResult(job, 1)
 		fillErrorSummary(ctx, result, err)
 		return result, err
 	}
+	requestedVersion, err := httpVersionMode(argOr(job.Args, "http_version", "1.1"))
+	if err != nil {
+		result := newBuiltinResult(job, 1)
+		result.Summary["method"] = method
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	versions, err := httpVersionCandidates(job.Target, requestedVersion)
+	if err != nil {
+		result := newBuiltinResult(job, 1)
+		result.Summary["method"] = method
+		setHTTPVersionSummary(result, requestedVersion, requestedVersion)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+
+	var lastResult *model.ToolResult
+	var lastErr error
+	overallStart := time.Now()
+	for index, version := range versions {
+		firstResponseTimeout := time.Duration(0)
+		if requestedVersion == "auto" && index < len(versions)-1 {
+			firstResponseTimeout = normalizedHTTPAttemptTimeout(attemptTimeout)
+		}
+		result, responseStarted, err := executeHTTPProbeAttempt(ctx, job, method, version, firstResponseTimeout)
+		setHTTPVersionSummary(result, requestedVersion, version)
+		if result != nil {
+			result.Summary["time_total_ms"] = elapsedMS(overallStart)
+		}
+		lastResult, lastErr = result, err
+		if err == nil || requestedVersion != "auto" || responseStarted || ctx.Err() != nil {
+			return result, err
+		}
+	}
+	return lastResult, lastErr
+}
+
+type httpProbeTraceCollector struct {
+	mu              sync.Mutex
+	firstByteOnce   sync.Once
+	firstByteSignal chan struct{}
+	dnsStart        time.Time
+	connectStart    time.Time
+	tlsStart        time.Time
+	firstByteAt     time.Time
+	dnsMS           float64
+	connectMS       float64
+	tlsMS           float64
+	remoteAddr      string
+}
+
+type httpProbeTraceSnapshot struct {
+	firstByteAt time.Time
+	dnsMS       float64
+	connectMS   float64
+	tlsMS       float64
+	remoteAddr  string
+}
+
+func newHTTPProbeTraceCollector() *httpProbeTraceCollector {
+	return &httpProbeTraceCollector{firstByteSignal: make(chan struct{})}
+}
+
+func (c *httpProbeTraceCollector) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) {
+			c.mu.Lock()
+			c.dnsStart = time.Now()
+			c.mu.Unlock()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			c.mu.Lock()
+			if !c.dnsStart.IsZero() {
+				c.dnsMS = elapsedMS(c.dnsStart)
+			}
+			c.mu.Unlock()
+		},
+		ConnectStart: func(_, addr string) {
+			c.mu.Lock()
+			c.connectStart = time.Now()
+			c.remoteAddr = addr
+			c.mu.Unlock()
+		},
+		ConnectDone: func(_, addr string, _ error) {
+			c.mu.Lock()
+			c.remoteAddr = addr
+			if !c.connectStart.IsZero() {
+				c.connectMS = elapsedMS(c.connectStart)
+			}
+			c.mu.Unlock()
+		},
+		TLSHandshakeStart: func() {
+			c.mu.Lock()
+			c.tlsStart = time.Now()
+			c.mu.Unlock()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+			c.mu.Lock()
+			if !c.tlsStart.IsZero() {
+				c.tlsMS = elapsedMS(c.tlsStart)
+			}
+			c.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			c.firstByteOnce.Do(func() {
+				c.mu.Lock()
+				c.firstByteAt = time.Now()
+				c.mu.Unlock()
+				close(c.firstByteSignal)
+			})
+		},
+	}
+}
+
+func (c *httpProbeTraceCollector) snapshot() httpProbeTraceSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return httpProbeTraceSnapshot{
+		firstByteAt: c.firstByteAt,
+		dnsMS:       c.dnsMS,
+		connectMS:   c.connectMS,
+		tlsMS:       c.tlsMS,
+		remoteAddr:  c.remoteAddr,
+	}
+}
+
+func runHTTPProbeAttempt(ctx context.Context, job model.Job, method string, version string, firstResponseTimeout time.Duration) (*model.ToolResult, bool, error) {
+	result := newBuiltinResult(job, 0)
+	result.Summary["method"] = method
+	var requestStart time.Time
+	probeTrace := newHTTPProbeTraceCollector()
+	trace := probeTrace.clientTrace()
+	requestCtx, cancelRequest := context.WithCancel(httptrace.WithClientTrace(ctx, trace))
+	defer cancelRequest()
+	req, tlsServerName, err := newHTTPProbeRequest(requestCtx, method, job.Target)
+	if err != nil {
+		result.ExitCode = 1
+		fillErrorSummary(ctx, result, err)
+		return result, false, err
+	}
+	if version != "1.1" && req.URL.Scheme != "https" {
+		err := fmt.Errorf("HTTP/%s requires an https target", version)
+		result.ExitCode = 1
+		fillErrorSummary(ctx, result, err)
+		return result, false, err
+	}
+
+	transport, closeTransport := newHTTPProbeTransport(job, version, tlsServerName)
+	defer closeTransport()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	requestStart = time.Now()
+	resp, err := doHTTPProbeRequest(client, req, cancelRequest, probeTrace.firstByteSignal, firstResponseTimeout)
+	timings := probeTrace.snapshot()
+	if err != nil {
+		result.ExitCode = 1
+		fillHTTPSummary(result, httpProbeSummary{
+			method:       method,
+			requestStart: requestStart,
+			dnsMS:        timings.dnsMS,
+			connectMS:    timings.connectMS,
+			tlsMS:        timings.tlsMS,
+			firstByteAt:  timings.firstByteAt,
+			remoteAddr:   timings.remoteAddr,
+			err:          err,
+			ctx:          ctx,
+		})
+		return result, !timings.firstByteAt.IsZero(), err
+	}
+	defer resp.Body.Close()
+	var n int64
+	var bodyTruncated bool
+	downloadStart := time.Now()
+	if method == http.MethodGet {
+		n, bodyTruncated, err = copyHTTPResponseBody(resp.Body, maxHTTPResponseBodyBytes)
+	} else {
+		n, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 4*1024))
+	}
+	fillHTTPSummary(result, httpProbeSummary{
+		method:        method,
+		requestStart:  requestStart,
+		downloadStart: downloadStart,
+		dnsMS:         timings.dnsMS,
+		connectMS:     timings.connectMS,
+		tlsMS:         timings.tlsMS,
+		firstByteAt:   timings.firstByteAt,
+		remoteAddr:    timings.remoteAddr,
+		resp:          resp,
+		bytesRead:     n,
+		bodyTruncated: bodyTruncated,
+		err:           err,
+		ctx:           ctx,
+	})
+	if err != nil {
+		result.ExitCode = 1
+		return result, true, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		result.ExitCode = 1
+	}
+	return result, true, nil
+}
+
+type httpProbeResponse struct {
+	resp *http.Response
+	err  error
+}
+
+func doHTTPProbeRequest(client *http.Client, req *http.Request, cancelRequest context.CancelFunc, firstByte <-chan struct{}, firstResponseTimeout time.Duration) (*http.Response, error) {
+	if firstResponseTimeout <= 0 {
+		return client.Do(req)
+	}
+	response := make(chan httpProbeResponse, 1)
+	go func() {
+		resp, err := client.Do(req)
+		response <- httpProbeResponse{resp: resp, err: err}
+	}()
+	timer := time.NewTimer(firstResponseTimeout)
+	defer timer.Stop()
+	select {
+	case outcome := <-response:
+		return outcome.resp, outcome.err
+	case <-firstByte:
+		outcome := <-response
+		return outcome.resp, outcome.err
+	case <-timer.C:
+		// Prefer a first byte or completed response that raced with the timer.
+		// Once either exists, the overall job context owns the remaining budget.
+		select {
+		case outcome := <-response:
+			return outcome.resp, outcome.err
+		case <-firstByte:
+			outcome := <-response
+			return outcome.resp, outcome.err
+		default:
+		}
+		cancelRequest()
+		outcome := <-response
+		if outcome.resp != nil {
+			_ = outcome.resp.Body.Close()
+		}
+		return nil, fmt.Errorf("HTTP response did not start within %s: %w", firstResponseTimeout, context.DeadlineExceeded)
+	}
+}
+
+func copyHTTPResponseBody(body io.Reader, limit int64) (int64, bool, error) {
+	read, err := io.Copy(io.Discard, io.LimitReader(body, limit+1))
+	if err != nil {
+		return read, false, err
+	}
+	if read > limit {
+		return limit, true, nil
+	}
+	return read, false, nil
+}
+
+func newHTTPProbeTransport(job model.Job, version string, tlsServerName string) (http.RoundTripper, func()) {
+	tlsConfig := &tls.Config{ServerName: tlsServerName}
+	if version == "3" {
+		transport := &http3.Transport{
+			TLSClientConfig:        tlsConfig,
+			QUICConfig:             &quic.Config{},
+			MaxResponseHeaderBytes: maxHTTPResponseHeaderBytes,
+			Dial: func(ctx context.Context, address string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+				address, err := httpQUICDialAddress(ctx, job, address)
+				if err != nil {
+					return nil, err
+				}
+				trace := httptrace.ContextClientTrace(ctx)
+				if trace != nil && trace.ConnectStart != nil {
+					trace.ConnectStart("udp", address)
+				}
+				if trace != nil && trace.TLSHandshakeStart != nil {
+					trace.TLSHandshakeStart()
+				}
+				conn, err := quic.DialAddr(ctx, address, tlsConfig, quicConfig)
+				var state tls.ConnectionState
+				if conn != nil {
+					state = conn.ConnectionState().TLS
+				}
+				if trace != nil && trace.TLSHandshakeDone != nil {
+					trace.TLSHandshakeDone(state, err)
+				}
+				if trace != nil && trace.ConnectDone != nil {
+					trace.ConnectDone("udp", address, err)
+				}
+				return conn, err
+			},
+		}
+		return transport, func() { _ = transport.Close() }
+	}
+
+	protocols := new(http.Protocols)
+	if version == "2" {
+		protocols.SetHTTP2(true)
+	} else {
+		protocols.SetHTTP1(true)
+	}
 	transport := &http.Transport{
-		Proxy: nil,
+		Proxy:                  nil,
+		Protocols:              protocols,
+		TLSClientConfig:        tlsConfig,
+		MaxResponseHeaderBytes: maxHTTPResponseHeaderBytes,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			address, err := httpDialAddress(job, address)
 			if err != nil {
@@ -613,63 +1076,96 @@ func runBuiltinHTTP(ctx context.Context, job model.Job, sink StreamSink) (*model
 			return dialer.DialContext(ctx, network, address)
 		},
 	}
-	defer transport.CloseIdleConnections()
-	if tlsServerName != "" {
-		transport.TLSClientConfig = &tls.Config{ServerName: tlsServerName}
+	return transport, transport.CloseIdleConnections
+}
+
+func httpQUICDialAddress(ctx context.Context, job model.Job, address string) (string, error) {
+	address, err := httpDialAddress(job, address)
+	if err != nil || job.ResolvedTarget != "" {
+		return address, err
 	}
-	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) != nil {
+		return address, err
 	}
-	requestStart = time.Now()
-	resp, err := client.Do(req)
+	trace := httptrace.ContextClientTrace(ctx)
+	if trace != nil && trace.DNSStart != nil {
+		trace.DNSStart(httptrace.DNSStartInfo{Host: host})
+	}
+	ip, _, resolveErr := resolveOne(ctx, host, job.IPVersion)
+	if trace != nil && trace.DNSDone != nil {
+		info := httptrace.DNSDoneInfo{Err: resolveErr}
+		if ip != nil {
+			info.Addrs = []net.IPAddr{{IP: ip}}
+		}
+		trace.DNSDone(info)
+	}
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	return net.JoinHostPort(ip.String(), port), nil
+}
+
+func httpVersionMode(raw string) (string, error) {
+	switch raw {
+	case "auto":
+		return "auto", nil
+	case "3":
+		return "3", nil
+	case "2":
+		return "2", nil
+	case "1.1":
+		return "1.1", nil
+	}
+	return "", fmt.Errorf("unsupported HTTP version %q", raw)
+}
+
+func httpMethod(raw string) (string, error) {
+	switch raw {
+	case http.MethodGet, http.MethodHead:
+		return raw, nil
+	default:
+		return "", fmt.Errorf("unsupported HTTP method %q", raw)
+	}
+}
+
+func httpVersionCandidates(target string, requested string) ([]string, error) {
+	u, err := url.Parse(target)
 	if err != nil {
-		result.ExitCode = 1
-		fillHTTPSummary(result, httpProbeSummary{
-			method:       method,
-			requestStart: requestStart,
-			dnsMS:        dnsMS,
-			connectMS:    connectMS,
-			tlsMS:        tlsMS,
-			firstByteAt:  firstByteAt,
-			remoteAddr:   remoteAddr,
-			err:          err,
-			ctx:          ctx,
-		})
-		return result, err
+		return nil, err
 	}
-	defer resp.Body.Close()
-	var n int64
-	downloadStart := time.Now()
-	if method == http.MethodGet {
-		n, err = io.Copy(io.Discard, resp.Body)
-	} else {
-		n, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 4*1024))
+	if requested == "auto" {
+		if u.Scheme == "https" {
+			return []string{"3", "2", "1.1"}, nil
+		}
+		return []string{"1.1"}, nil
 	}
-	fillHTTPSummary(result, httpProbeSummary{
-		method:        method,
-		requestStart:  requestStart,
-		downloadStart: downloadStart,
-		dnsMS:         dnsMS,
-		connectMS:     connectMS,
-		tlsMS:         tlsMS,
-		firstByteAt:   firstByteAt,
-		remoteAddr:    remoteAddr,
-		resp:          resp,
-		bytesRead:     n,
-		err:           err,
-		ctx:           ctx,
-	})
-	if err != nil {
-		result.ExitCode = 1
-		return result, err
+	if requested != "1.1" && u.Scheme != "https" {
+		return nil, fmt.Errorf("HTTP/%s requires an https target", requested)
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
-		result.ExitCode = 1
+	return []string{requested}, nil
+}
+
+func normalizedHTTPAttemptTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultHTTPAttemptTimeout
 	}
-	return result, nil
+	return timeout
+}
+
+func setHTTPVersionSummary(result *model.ToolResult, requested string, attempted string) {
+	if result == nil {
+		return
+	}
+	actual := attempted
+	if protocol, ok := result.Summary["http_protocol"].(string); ok {
+		actual = protocol
+	}
+	result.Summary["http_version"] = actual
+	delete(result.Summary, "http_protocol")
+	if requested == "auto" {
+		result.Summary["requested_http_version"] = "auto"
+	}
 }
 
 type httpProbeSummary struct {
@@ -683,6 +1179,7 @@ type httpProbeSummary struct {
 	remoteAddr    string
 	resp          *http.Response
 	bytesRead     int64
+	bodyTruncated bool
 	err           error
 	ctx           context.Context
 }
@@ -709,6 +1206,11 @@ func fillHTTPSummary(result *model.ToolResult, summary httpProbeSummary) {
 	if summary.resp != nil {
 		result.Summary["http_code"] = summary.resp.StatusCode
 		result.Summary["content_length"] = summary.resp.ContentLength
+		result.Summary["http_protocol"] = responseHTTPVersion(summary.resp)
+	}
+	if summary.bodyTruncated {
+		result.Summary["body_truncated"] = true
+		result.Summary["body_limit_bytes"] = int64(maxHTTPResponseBodyBytes)
 	}
 	if summary.remoteAddr != "" {
 		result.Summary["remote_addr"] = summary.remoteAddr
@@ -716,6 +1218,20 @@ func fillHTTPSummary(result *model.ToolResult, summary httpProbeSummary) {
 	if summary.err != nil {
 		result.Summary["status"] = httpErrorStatus(summary.ctx, summary.err)
 		result.Summary["error"] = summary.err.Error()
+	}
+}
+
+func responseHTTPVersion(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	switch resp.ProtoMajor {
+	case 3:
+		return "3"
+	case 2:
+		return "2"
+	default:
+		return "1.1"
 	}
 }
 
@@ -735,7 +1251,7 @@ func copyErrorSummary(dst *model.ToolResult, src *model.ToolResult) {
 	if dst == nil || src == nil {
 		return
 	}
-	for _, key := range []string{"status", "error"} {
+	for _, key := range []string{"status", "error", "icmp_type", "icmp_code", "peer", "errno"} {
 		if value, ok := src.Summary[key]; ok {
 			dst.Summary[key] = value
 		}
@@ -824,7 +1340,7 @@ func tcpProbeWithTimeout(ctx context.Context, target net.IP, version model.IPVer
 	start := time.Now()
 	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(target.String(), strconv.Itoa(port)))
 	if err != nil {
-		return 0, err
+		return time.Since(start), err
 	}
 	_ = conn.Close()
 	return time.Since(start), nil
@@ -832,7 +1348,7 @@ func tcpProbeWithTimeout(ctx context.Context, target net.IP, version model.IPVer
 
 func runBuiltinDNS(ctx context.Context, job model.Job, sink StreamSink) (*model.ToolResult, error) {
 	result := newBuiltinResult(job, 0)
-	records, err := lookupRecords(ctx, job.Target, strings.ToUpper(argOr(job.Args, "type", "A")))
+	records, err := lookupRecords(ctx, job.Target, argOr(job.Args, "type", "A"))
 	if err != nil {
 		result.ExitCode = 1
 		fillErrorSummary(ctx, result, err)
@@ -845,6 +1361,11 @@ func runBuiltinDNS(ctx context.Context, job model.Job, sink StreamSink) (*model.
 
 func runBuiltinPort(ctx context.Context, job model.Job, sink StreamSink) (*model.ToolResult, error) {
 	result := newBuiltinResult(job, 0)
+	if err := validateOptionalProbePort(job.Args); err != nil {
+		result.ExitCode = 1
+		result.Summary["status"] = "invalid_port"
+		return result, err
+	}
 	port := parsePort(job.Args, 0)
 	if port <= 0 {
 		result.ExitCode = 1
@@ -1113,26 +1634,18 @@ func flattenResultHops(result *model.ToolResult) {
 	}
 }
 
-func probeMode(raw string) string {
-	switch strings.ToLower(raw) {
-	case "tcp":
-		return "tcp"
-	default:
-		return "icmp"
-	}
-}
-
-func pingProbeMode(raw string) string {
-	switch strings.ToLower(raw) {
+func probeMode(raw string) (string, error) {
+	switch raw {
 	case "auto":
-		return "auto"
+		return "auto", nil
+	case "icmp":
+		return "icmp", nil
 	case "udp":
-		return "udp"
+		return "udp", nil
 	case "tcp":
-		return "tcp"
-	default:
-		return "icmp"
+		return "tcp", nil
 	}
+	return "", fmt.Errorf("unsupported probe protocol %q", raw)
 }
 
 func defaultProbePort(mode string) int {
@@ -1150,11 +1663,35 @@ func parsePort(args map[string]string, fallback int) int {
 	if args == nil || args["port"] == "" {
 		return fallback
 	}
-	port, err := strconv.Atoi(args["port"])
-	if err != nil || port <= 0 || port > 65535 {
-		return fallback
+	port, err := canonicalProbePort(args["port"])
+	if err != nil {
+		return 0
 	}
 	return port
+}
+
+func validateOptionalProbePort(args map[string]string) error {
+	if args == nil || args["port"] == "" {
+		return nil
+	}
+	_, err := canonicalProbePort(args["port"])
+	return err
+}
+
+func canonicalProbePort(value string) (int, error) {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return 0, fmt.Errorf("invalid port %q", value)
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, fmt.Errorf("invalid port %q", value)
+		}
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port %q", value)
+	}
+	return port, nil
 }
 
 func elapsedMS(start time.Time) float64 {

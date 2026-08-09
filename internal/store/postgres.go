@@ -17,16 +17,17 @@ type Postgres struct {
 	pool *pgxpool.Pool
 }
 
-func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
+func NewPostgres(ctx context.Context, dsn string, bootstrapAdminToken string) (*Postgres, Initialization, error) {
 	pool, err := openPostgresPool(ctx, dsn)
 	if err != nil {
-		return nil, err
+		return nil, Initialization{}, err
 	}
-	if err := migratePostgres(ctx, pool); err != nil {
+	initialization, err := migratePostgres(ctx, pool, bootstrapAdminToken)
+	if err != nil {
 		pool.Close()
-		return nil, err
+		return nil, Initialization{}, err
 	}
-	return &Postgres{pool: pool}, nil
+	return &Postgres{pool: pool}, initialization, nil
 }
 
 func (p *Postgres) Close() {
@@ -109,42 +110,61 @@ func isPostgresCode(err error, code string) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == code
 }
 
-func migratePostgres(ctx context.Context, pool *pgxpool.Pool) error {
+func migratePostgres(ctx context.Context, pool *pgxpool.Pool, bootstrapAdminToken string) (Initialization, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return Initialization{}, err
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
 	for _, stmt := range postgresSchemaStatements {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return err
+			return Initialization{}, err
 		}
 	}
-	if err := seedPostgresManagedSettings(ctx, tx); err != nil {
-		return err
+	seeded, err := seedPostgresManagedSettings(ctx, tx, bootstrapAdminToken)
+	if err != nil {
+		return Initialization{}, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return Initialization{}, err
+	}
+	return Initialization{Seeded: seeded}, nil
 }
 
-func seedPostgresManagedSettings(ctx context.Context, execer postgresJobInserter) error {
-	settings := config.DefaultManagedSettings()
+type postgresSettingsSeeder interface {
+	postgresJobInserter
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func seedPostgresManagedSettings(ctx context.Context, execer postgresSettingsSeeder, bootstrapAdminToken string) (bool, error) {
+	var exists bool
+	if err := execer.QueryRow(ctx, `select exists(select 1 from managed_settings where id='default')`).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
+	}
+	settings, err := bootstrapManagedSettings(bootstrapAdminToken)
+	if err != nil {
+		return false, err
+	}
 	settings.Revision = 1
 	now := time.Now().UTC()
 	settings.UpdatedAt = now.Format(time.RFC3339Nano)
 	raw, err := marshalJSONBytes(settings)
 	if err != nil {
-		return err
+		return false, err
 	}
 	tag, err := execer.Exec(ctx, `
 		insert into managed_settings (id, value, updated_at)
 		values ('default', $1, $2)
 		on conflict (id) do nothing`, raw, now)
-	if err == nil && tag.RowsAffected() > 0 {
-		printInitialAdminToken(settings)
+	if err != nil {
+		return false, err
 	}
-	return err
+	return tag.RowsAffected() > 0, nil
 }
 
 var postgresSchemaStatements = []string{
@@ -223,11 +243,14 @@ var postgresSchemaStatements = []string{
   revision bigint not null default 1,
   updated_at timestamptz not null
 )`,
-	`create table if not exists http_agents (
+	`create table if not exists outbound_agents (
   id text primary key,
+	transport text not null,
   enabled boolean not null default true,
-  base_url text not null,
-  http_token text not null default '',
+	url text not null,
+	headers jsonb not null default '{}',
+	auth jsonb not null,
+	event_response text not null default '',
   labels jsonb not null default '[]',
   tls jsonb not null default '{}',
   created_at timestamptz not null,
@@ -388,12 +411,101 @@ func (p *Postgres) UpdateJobStatus(ctx context.Context, id string, status model.
 	return err
 }
 
+func (p *Postgres) RequeueRunningJob(ctx context.Context, id string) (bool, error) {
+	result, err := p.pool.Exec(ctx, `
+		update jobs
+		set status=$2, updated_at=$3, started_at=null, completed_at=null, error=''
+		where id=$1 and status=$4`, id, model.JobQueued, time.Now().UTC(), model.JobRunning)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+func (p *Postgres) FinishRunningJob(ctx context.Context, id string, status model.JobStatus, msg string) (bool, error) {
+	return p.transitionJob(ctx, id, status, msg, "status='running'")
+}
+
+func (p *Postgres) FailActiveJob(ctx context.Context, id string, msg string) (bool, error) {
+	return p.transitionJob(ctx, id, model.JobFailed, msg, "status in ('queued','running')")
+}
+
+func (p *Postgres) transitionJob(ctx context.Context, id string, status model.JobStatus, msg string, predicate string) (bool, error) {
+	query := `update jobs set status=$2, updated_at=$3, completed_at=$3, error=$4 where id=$1 and ` + predicate
+	result, err := p.pool.Exec(ctx, query, id, status, time.Now().UTC(), msg)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
 func (p *Postgres) AddJobEvent(ctx context.Context, e model.JobEvent) error {
+	event, parsed, err := postgresJobEventJSON(e)
+	if err != nil {
+		return err
+	}
+	return insertPostgresJobEvent(ctx, p.pool, e, event, parsed)
+}
+
+func (p *Postgres) AddRunningJobEvent(ctx context.Context, sourceJobID string, agentID string, e model.JobEvent) (bool, error) {
+	e.AgentID = agentID
+	event, parsed, err := postgresJobEventJSON(e)
+	if err != nil {
+		return false, err
+	}
+	result, err := p.pool.Exec(ctx, `
+		insert into job_events (id, job_id, agent_id, stream, event, exit_code, parsed, created_at)
+		select $1,$2,$3,$4,$5,$6,$7,$8
+		where exists (
+			select 1 from jobs where id=$9 and status=$10 and agent_id=$11
+		)`,
+		e.ID, e.JobID, nullable(e.AgentID), e.Stream, event, e.ExitCode, parsed, e.CreatedAt,
+		sourceJobID, model.JobRunning, agentID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+func (p *Postgres) FinishRunningJobWithEvent(ctx context.Context, sourceJobID string, agentID string, status model.JobStatus, msg string, e model.JobEvent) (bool, error) {
+	e.AgentID = agentID
+	event, parsed, err := postgresJobEventJSON(e)
+	if err != nil {
+		return false, err
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	now := time.Now().UTC()
+	result, err := tx.Exec(ctx, `
+		update jobs set status=$2, updated_at=$3, completed_at=$3, error=$4
+		where id=$1 and status=$5 and agent_id=$6`,
+		sourceJobID, status, now, msg, model.JobRunning, agentID)
+	if err != nil {
+		return false, err
+	}
+	if result.RowsAffected() == 0 {
+		return false, nil
+	}
+	if err := insertPostgresJobEvent(ctx, tx, e, event, parsed); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func postgresJobEventJSON(e model.JobEvent) (any, any, error) {
 	var event any
 	if e.Event != nil {
 		b, err := marshalJSONBytes(e.Event)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		event = b
 	}
@@ -401,11 +513,15 @@ func (p *Postgres) AddJobEvent(ctx context.Context, e model.JobEvent) error {
 	if e.Parsed != nil {
 		b, err := marshalJSONBytes(e.Parsed)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		parsed = b
 	}
-	_, err := p.pool.Exec(ctx, `
+	return event, parsed, nil
+}
+
+func insertPostgresJobEvent(ctx context.Context, execer postgresJobInserter, e model.JobEvent, event any, parsed any) error {
+	_, err := execer.Exec(ctx, `
 		insert into job_events (id, job_id, agent_id, stream, event, exit_code, parsed, created_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		e.ID, e.JobID, nullable(e.AgentID), e.Stream, event, e.ExitCode, parsed, e.CreatedAt)
@@ -643,7 +759,7 @@ func (p *Postgres) RegisterAgent(ctx context.Context, a model.Agent, suppliedTok
 		return model.Agent{}, false, err
 	}
 	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return model.Agent{}, false, err
 	}
 
@@ -731,7 +847,11 @@ func (p *Postgres) DeleteAgent(ctx context.Context, id string) error {
 }
 
 func (p *Postgres) MarkStaleAgentsOffline(ctx context.Context, ttl time.Duration) (int64, error) {
-	tag, err := p.pool.Exec(ctx, `update agents set status=$1 where status=$2 and last_seen_at < $3`, model.AgentOffline, model.AgentOnline, time.Now().UTC().Add(-ttl))
+	tag, err := p.pool.Exec(ctx, `
+		update agents set status=$1
+		where status=$2 and last_seen_at < $3
+		and not exists (select 1 from outbound_agents where outbound_agents.id=agents.id)`,
+		model.AgentOffline, model.AgentOnline, time.Now().UTC().Add(-ttl))
 	return tag.RowsAffected(), err
 }
 
@@ -847,11 +967,11 @@ func (p *Postgres) GetManagedSettings(ctx context.Context) (config.ManagedSettin
 		return settings, err
 	}
 	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
-	return settings, config.NormalizeManagedSettings(&settings)
+	return settings, ValidateAndNormalizeManagedSettings(&settings)
 }
 
 func (p *Postgres) UpdateManagedSettings(ctx context.Context, settings config.ManagedSettings) (config.ManagedSettings, error) {
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}
 	currentRevision := settings.Revision
@@ -877,8 +997,8 @@ func (p *Postgres) UpdateManagedSettings(ctx context.Context, settings config.Ma
 	return p.GetManagedSettings(ctx)
 }
 
-func (p *Postgres) UpdateManagedSettingsAndAgentLabels(ctx context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.HTTPAgent) (config.ManagedSettings, error) {
-	if err := config.NormalizeManagedSettings(&settings); err != nil {
+func (p *Postgres) UpdateManagedSettingsAndAgentLabels(ctx context.Context, settings config.ManagedSettings, cfgs []config.AgentConfig, nodes []config.OutboundAgent) (config.ManagedSettings, error) {
+	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}
 	currentRevision := settings.Revision
@@ -893,9 +1013,9 @@ func (p *Postgres) UpdateManagedSettingsAndAgentLabels(ctx context.Context, sett
 			return settings, err
 		}
 	}
-	nodes = append([]config.HTTPAgent(nil), nodes...)
+	nodes = append([]config.OutboundAgent(nil), nodes...)
 	for i := range nodes {
-		if err := normalizeHTTPAgent(&nodes[i]); err != nil {
+		if err := normalizeOutboundAgent(&nodes[i]); err != nil {
 			return settings, err
 		}
 	}
@@ -938,6 +1058,10 @@ func (p *Postgres) UpdateManagedSettingsAndAgentLabels(ctx context.Context, sett
 		}
 	}
 	for _, node := range nodes {
+		headersRaw, err := marshalJSONBytes(node.Headers)
+		if err != nil {
+			return settings, err
+		}
 		labelsRaw, err := marshalJSONBytes(node.Labels)
 		if err != nil {
 			return settings, err
@@ -946,17 +1070,24 @@ func (p *Postgres) UpdateManagedSettingsAndAgentLabels(ctx context.Context, sett
 		if err != nil {
 			return settings, err
 		}
+		authRaw, err := marshalJSONBytes(node.Auth)
+		if err != nil {
+			return settings, err
+		}
 		if _, err := tx.Exec(ctx, `
-			insert into http_agents (id, enabled, base_url, http_token, labels, tls, created_at, updated_at)
-			values ($1,$2,$3,$4,$5,$6,$7,$8)
+			insert into outbound_agents (id, transport, enabled, url, headers, auth, event_response, labels, tls, created_at, updated_at)
+			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			on conflict (id) do update set
+				transport=excluded.transport,
 				enabled=excluded.enabled,
-				base_url=excluded.base_url,
-				http_token=excluded.http_token,
+				url=excluded.url,
+				headers=excluded.headers,
+				auth=excluded.auth,
+				event_response=excluded.event_response,
 				labels=excluded.labels,
 				tls=excluded.tls,
 				updated_at=excluded.updated_at`,
-			node.ID, node.Enabled, node.BaseURL, node.HTTPToken, labelsRaw, tlsRaw, now, now); err != nil {
+			node.ID, node.Transport, node.Enabled, node.URL, headersRaw, authRaw, node.EventResponse, labelsRaw, tlsRaw, now, now); err != nil {
 			return settings, err
 		}
 	}
@@ -977,17 +1108,17 @@ func (p *Postgres) AddAuditEvent(ctx context.Context, event AuditEvent) error {
 	return err
 }
 
-func (p *Postgres) ListHTTPAgents(ctx context.Context) ([]config.HTTPAgent, error) {
+func (p *Postgres) ListOutboundAgents(ctx context.Context) ([]config.OutboundAgent, error) {
 	rows, err := p.pool.Query(ctx, `
-		select id, enabled, base_url, http_token, labels, tls, created_at, updated_at
-		from http_agents order by id`)
+		select id, transport, enabled, url, headers, auth, event_response, labels, tls, created_at, updated_at
+		from outbound_agents order by id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var nodes []config.HTTPAgent
+	var nodes []config.OutboundAgent
 	for rows.Next() {
-		node, err := scanHTTPAgent(rows)
+		node, err := scanOutboundAgent(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -996,15 +1127,15 @@ func (p *Postgres) ListHTTPAgents(ctx context.Context) ([]config.HTTPAgent, erro
 	return nodes, rows.Err()
 }
 
-func (p *Postgres) GetHTTPAgent(ctx context.Context, id string) (config.HTTPAgent, error) {
+func (p *Postgres) GetOutboundAgent(ctx context.Context, id string) (config.OutboundAgent, error) {
 	row := p.pool.QueryRow(ctx, `
-		select id, enabled, base_url, http_token, labels, tls, created_at, updated_at
-		from http_agents where id=$1`, id)
-	return scanHTTPAgent(row)
+		select id, transport, enabled, url, headers, auth, event_response, labels, tls, created_at, updated_at
+		from outbound_agents where id=$1`, id)
+	return scanOutboundAgent(row)
 }
 
-func (p *Postgres) UpsertHTTPAgent(ctx context.Context, node config.HTTPAgent) error {
-	if err := normalizeHTTPAgent(&node); err != nil {
+func (p *Postgres) UpsertOutboundAgent(ctx context.Context, node config.OutboundAgent) error {
+	if err := normalizeOutboundAgent(&node); err != nil {
 		return err
 	}
 	labels, err := marshalJSONBytes(node.Labels)
@@ -1015,23 +1146,34 @@ func (p *Postgres) UpsertHTTPAgent(ctx context.Context, node config.HTTPAgent) e
 	if err != nil {
 		return err
 	}
+	authRaw, err := marshalJSONBytes(node.Auth)
+	if err != nil {
+		return err
+	}
+	headersRaw, err := marshalJSONBytes(node.Headers)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	_, err = p.pool.Exec(ctx, `
-		insert into http_agents (id, enabled, base_url, http_token, labels, tls, created_at, updated_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8)
+		insert into outbound_agents (id, transport, enabled, url, headers, auth, event_response, labels, tls, created_at, updated_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		on conflict (id) do update set
+			transport=excluded.transport,
 			enabled=excluded.enabled,
-			base_url=excluded.base_url,
-			http_token=excluded.http_token,
+			url=excluded.url,
+			headers=excluded.headers,
+			auth=excluded.auth,
+			event_response=excluded.event_response,
 			labels=excluded.labels,
 			tls=excluded.tls,
 			updated_at=excluded.updated_at`,
-		node.ID, node.Enabled, node.BaseURL, node.HTTPToken, labels, tlsRaw, now, now)
+		node.ID, node.Transport, node.Enabled, node.URL, headersRaw, authRaw, node.EventResponse, labels, tlsRaw, now, now)
 	return err
 }
 
-func (p *Postgres) DeleteHTTPAgent(ctx context.Context, id string) error {
-	tag, err := p.pool.Exec(ctx, `delete from http_agents where id=$1`, id)
+func (p *Postgres) DeleteOutboundAgent(ctx context.Context, id string) error {
+	tag, err := p.pool.Exec(ctx, `delete from outbound_agents where id=$1`, id)
 	if err != nil {
 		return err
 	}
@@ -1077,13 +1219,15 @@ func scanSchedule(row pgx.Row) (model.ScheduledJob, error) {
 	return sched, nil
 }
 
-func scanHTTPAgent(row pgx.Row) (config.HTTPAgent, error) {
-	var node config.HTTPAgent
+func scanOutboundAgent(row pgx.Row) (config.OutboundAgent, error) {
+	var node config.OutboundAgent
+	var headersRaw []byte
+	var authRaw []byte
 	var labels []byte
 	var tlsRaw []byte
 	var created time.Time
 	var updated time.Time
-	err := row.Scan(&node.ID, &node.Enabled, &node.BaseURL, &node.HTTPToken, &labels, &tlsRaw, &created, &updated)
+	err := row.Scan(&node.ID, &node.Transport, &node.Enabled, &node.URL, &headersRaw, &authRaw, &node.EventResponse, &labels, &tlsRaw, &created, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return node, ErrNotFound
 	}
@@ -1093,7 +1237,16 @@ func scanHTTPAgent(row pgx.Row) (config.HTTPAgent, error) {
 	if err := unmarshalJSONBytes(labels, &node.Labels); err != nil {
 		return node, err
 	}
-	node.Labels = normalizedAgentLabels(node.Labels)
+	if err := unmarshalJSONBytes(headersRaw, &node.Headers); err != nil {
+		return node, err
+	}
+	if err := unmarshalJSONBytes(authRaw, &node.Auth); err != nil {
+		return node, err
+	}
+	node.Labels, err = validatedAgentLabels(node.Labels)
+	if err != nil {
+		return node, fmt.Errorf("stored outbound agent labels: %w", err)
+	}
 	if err := unmarshalJSONBytes(tlsRaw, &node.TLS); err != nil {
 		return node, err
 	}
@@ -1117,7 +1270,10 @@ func scanAgentConfig(row pgx.Row) (config.AgentConfig, error) {
 	if err := unmarshalJSONBytes(labels, &cfg.Labels); err != nil {
 		return cfg, err
 	}
-	cfg.Labels = normalizedAgentLabels(cfg.Labels)
+	cfg.Labels, err = validatedAgentLabels(cfg.Labels)
+	if err != nil {
+		return cfg, fmt.Errorf("stored agent labels: %w", err)
+	}
 	cfg.CreatedAt = created.Format(time.RFC3339)
 	cfg.UpdatedAt = updated.Format(time.RFC3339)
 	return cfg, nil

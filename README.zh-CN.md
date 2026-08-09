@@ -14,6 +14,20 @@
 本地 SQLite 测试方式：
 
 ```sh
+bootstrap_token_file="$(mktemp)"
+chmod 0600 "$bootstrap_token_file"
+openssl rand -hex 32 > "$bootstrap_token_file"
+MTR_BOOTSTRAP_ADMIN_TOKEN_FILE="$bootstrap_token_file" \
+  go run ./cmd/server -config configs/server.sqlite.yaml
+```
+
+该文件保存初始 admin API token。先用它登录并创建所需的低权限 API token 和 Agent 注册
+token。确认持久化 SQLite 数据库已完成初始化后，停止 Server，把仍需保留的 token 安全存入
+密钥系统，删除 bootstrap 文件，再在不设置 `MTR_BOOTSTRAP_ADMIN_TOKEN_FILE` 的情况下重启：
+
+```sh
+rm -f "$bootstrap_token_file"
+unset bootstrap_token_file
 go run ./cmd/server -config configs/server.sqlite.yaml
 ```
 
@@ -50,26 +64,40 @@ docker build -f Dockerfile.agent -t mtr-agent:v1.2.3 \
 ```
 
 Agent 运行时配置位于 Agent YAML 中，包括 `mode`、`http_addr`、身份信息、
-注册 token、HTTP token、能力列表、协议、TLS 和测速限制。
+注册 token、HTTP 入站鉴权、能力列表、协议、TLS 和测速限制。
 `protocols` 是一个位掩码：`1` 表示 IPv4，`2` 表示 IPv6，`3` 表示同时支持两者。
 任务可将 `ip_version` 设置为 `4` 或 `6`；任务只会被分发给协议掩码支持目标协议的 Agent。
+`protocols` 和 `capabilities` 都必须显式配置且不能为空；`0` 或空列表会直接被拒绝，不会被
+扩展成更宽的权限。
+
+Agent 控制协议按整代版本管理，不进行逐 feature 协商。hello、健康响应和每个任务请求都必须
+携带 `protocol_version: 1`；UDP 探测和所有已公布的 HTTP 版本都是该协议版本的固定能力。
+Server、Agent 和 Web 必须一起升级。
 
 Server 进程配置和 Agent 配置字段也都可以通过环境变量提供。环境变量使用 YAML 路径，
 加上 `MTR_` 前缀并转换为大写下划线格式，例如 `tls.ca_files` 对应
 `MTR_TLS_CA_FILES`，`speedtest.max_bytes` 对应 `MTR_SPEEDTEST_MAX_BYTES`。
 当配置文件和环境变量同时设置同一字段时，配置文件优先。字符串列表可以使用逗号分隔，
 也可以使用 YAML/JSON 数组。
+未知 YAML 字段、结构化子字段和 `MTR_` 环境变量名都会被拒绝，避免安全配置拼写错误后
+静默回落。
 当 Server 位于反向代理后面时，将 `trusted_proxies` 设置为允许提供标准代理 header 的
-代理 IP 或 CIDR；否则 `X-Forwarded-For` 和 `X-Real-IP` 不会用于日志和限流。
-`client_ip_headers` 是一个自定义单 IP header 的有序列表，会在代理 header 之前被无条件信任，
-例如较长的私有 header 名或 `Eo-Connecting-Ip`。
+代理 IP 或 CIDR；否则 `X-Forwarded-For`、`X-Real-IP` 和 `client_ip_headers` 都不会用于
+日志和限流。`client_ip_headers` 是一个自定义单 IP header 的有序列表，会在标准代理 header
+之前检查，但只有直连 peer 命中 `trusted_proxies` 时才生效。除非防火墙或 NetworkPolicy 已保证
+只有代理能访问监听端口，否则不要扩大 `trusted_proxies`。
 
 Server 运行时策略保存在持久化托管配置（managed settings）中，而不是 `server.yaml` 中。
 这包括 API token、Agent 注册 token、限流、全局和按标签生效的工具策略、
-按标签生效的调度/运行参数、探测次数、超时以及托管 HTTP Agent。节点级调整通过标签完成：
+按标签生效的调度/运行参数、探测次数、超时以及出站 Agent。节点级调整通过标签完成：
 每个节点都会自动带有保留标签 `agent` 和 `id:<agent-id>`，因此全局、分组和单节点规则可以使用同一套标签机制。
-空数据库首次启动时，Server 会创建一个 admin API token 并打印到日志。使用这个 token 通过管理页，
-或调用 `/v1/manage/tokens`、`/v1/manage/register-tokens`、`/v1/manage/rate-limit`、
+空存储只会使用 `bootstrap_admin_token_file`（或
+`MTR_BOOTSTRAP_ADMIN_TOKEN_FILE`）所指文件中的 token 完成初始化。该路径必须是普通文件，
+大小不得超过 4 KiB，不得可执行或允许 group 写入，也不能允许 world 用户访问；`0600`
+和 `0440` 均可使用。Server
+绝不会把 token 写入日志。持久化存储初始化完成后，应删除该文件并取消此配置；内存存储
+不保留状态，因此每次启动都需要该文件。通过可信的运维客户端使用这个 token 调用
+`/v1/manage/tokens`、`/v1/manage/register-tokens`、`/v1/manage/rate-limit`、
 `/v1/manage/labels` 和 `/v1/manage/agents` 来创建需要的 token 和策略。
 每个 Agent 注册 token 都有 `remaining_uses`（剩余新节点次数，新 token 默认为 `1`）。
 只有首次出现的 Agent ID 创建记录时才会在事务内扣减次数；已有 Agent 重连不扣减，
@@ -81,22 +109,88 @@ Server 运行时策略保存在持久化托管配置（managed settings）中，
 请使用新的 Agent ID。
 在 Server 或 Agent 配置中设置 `log_level: debug` 可开启更详细的调度和执行日志。
 
-Server 也可以主动调用通过 `/v1/manage/agents` 创建的托管 HTTP Agent；记录中需要
-`transport`、`id`、`base_url` 和 `http_token`。当 Agent 的 mode 包含 `http` 时，
-会暴露 `/invoke` 端点；HTTP 模式必须配置 `http_token`。可以设置 Agent 的
-`http_path_prefix`，把这些 HTTP 端点挂到 `/api` 或 `/v1` 之类的前缀下；托管 Agent
-的 `base_url` 也要包含同样的前缀。Server 启动时会探测一次 `/healthz`，获取版本、
-地域、服务商、能力、协议和网络权限诊断；之后只会在连接失败恢复过程中再次探测。HTTP Agent 的监听 TLS
-由 Agent 配置里的 `http_tls` 控制；调用侧 TLS 参数保存在托管 HTTP Agent 记录上。
-客户端 TLS 校验只检查配置的 CA 链，因此集群内访问地址不需要和证书 SAN 一致。
+Server 可以主动调用通过 `/v1/manage/agents` 创建的出站 Agent。必填字段 `transport`
+选择两种调用契约之一：
+
+- `http`：`url` 是基础 URL。Server 请求 `GET <url>/healthz`，并从
+  `POST <url>/invoke` 流式读取 NDJSON。
+- `event`：`url` 是云函数的完整同步调用 URL。Server 向同一 URL 发送
+  `action: healthz` 或 `action: invoke`，并读取一个完整 JSON 响应。
+
+鉴权与传输类型相互独立。`auth.type` 必须显式选择 `none`、`bearer`、`header` 或
+`huaweicloud_aksk`。前三种分别表示无鉴权、静态 Bearer Token 和静态自定义请求头 Token。
+`huaweicloud_aksk` 是华为云 FunctionGraph 无人值守调用的原生方式：Server 会根据最终确定的
+method、URL、headers 和 JSON body，为每次健康检查与函数调用重新计算
+`SDK-HMAC-SHA256` 签名。该类型需要填写 `access_key`、`secret` 和 `project_id`，其中
+`secret` 表示 Secret Key，管理接口不会回传。编辑时，只有传输类型、URL、鉴权字段、附加请求头
+和 TLS 配置均未改变，Secret Key 留空才会保留原值；该凭据作用域任一部分变化时都必须重新填写。
+
+出站 URL 可以使用 `http://` 或 `https://`；选择明文 HTTP 属于部署方决策，它会让网络路径
+看到鉴权请求头和请求内容，因此只能用于经过审慎保护的可信链路。非敏感的服务商参数可放入
+独立的 `headers` map；鉴权信息及其他敏感值必须放在 `auth` 中，不应写入 `headers`。
+函数结果直接作为 HTTP body 时使用 `event_response: direct`；服务商把函数结果包装在顶层
+`result` 对象或 JSON 字符串中时，使用 `result_field`，华为云 FunctionGraph 的同步调用属于
+后者。这里有意不接受 API Gateway 的 `statusCode`、`body`、`isBase64Encoded` 包装。
+
+FunctionGraph 也接受静态请求头 `X-Auth-Token` 中的 IAM Token，但它只有 24 小时有效期，
+因此这里只适合手工测试，或由外部组件负责刷新。内置 AK/SK 鉴权目前只支持长期 AK/SK，
+不支持携带 security token 的临时凭据，也不支持通过 IAM 用户名/密码自动刷新 Token。
+华为云会校验动态生成的 `X-Sdk-Date`，因此 Server 必须通过 NTP 保持系统时间准确。详细规则见
+[FunctionGraph 鉴权说明](https://support.huaweicloud.com/api-functiongraph/functiongraph_06_0230.html)
+和 [API 请求签名算法](https://support.huaweicloud.com/intl/zh-cn/devg-apisign/api-sign-algorithm-001.html)。
+
+出站 Agent 地址属于受信的控制面配置，可以使用公网或私网地址，因此 VPC 或集群内的 Agent
+仍可访问。Server 会自行解析并固定每次连接，拒绝跳转和环境代理，并限制所有响应大小。
+Agent 端点仍禁止环回、链路本地/metadata、未指定和组播地址。这不会放宽任务目标：用户提交的
+探测目标仍始终拒绝私网、环回、链路本地、metadata 及其他
+特殊地址。Event 调用始终只尝试一次；HTTP 调用只会重试
+发生在取得连接之前的 DNS、dial 或 TLS 错误，请求一旦可能已经开始就绝不重放。`429` 被
+视为临时背压，任务会通过原子状态转换重新入队。
+
+Server 启动时探测一次出站 Agent，之后按配置的最大健康间隔刷新元数据；只有故障恢复阶段
+才使用指数退避的健康探测。队列轮询与健康探测相互独立，因此不会在每次调度 tick 都计费调用
+Event 函数。Agent 监听侧 TLS 由 `http_tls` 控制；出站 TLS 参数保存在出站 Agent 记录中。
+未配置 `tls.ca_files` 时，TLS 使用系统根，并按 URL hostname 校验证书 hostname/SAN。显式
+配置 `tls.ca_files` 后，Server 改为仅针对该专用信任集合校验证书链、有效期和 ServerAuth
+用途，并有意忽略证书 SAN。这里应使用 Agent 专用 CA 或严格受控的共享证书 pin，不能放入
+通用信任根。`tls.server_name` 只是可选的 SNI 路由提示，绝不会改变证书身份校验规则。配置
+自定义 CA、客户端证书或 SNI 提示时，必须同时设置 `tls.enabled: true` 并使用 `https://` URL。
+
+华为云 FunctionGraph Event Agent 示例：
+
+```json
+{
+  "id": "edge-event-1",
+  "transport": "event",
+  "enabled": true,
+  "url": "https://functiongraph.cn-north-4.myhuaweicloud.com/v2/<project-id>/fgs/functions/<function-urn>/invocations",
+  "auth": {
+    "type": "huaweicloud_aksk",
+    "access_key": "<access-key>",
+    "secret": "<secret-key>",
+    "project_id": "<project-id>"
+  },
+  "headers": {"X-CFF-Request-Version": "v1"},
+  "event_response": "result_field",
+  "labels": ["apac"]
+}
+```
+
+当 Agent 的 mode 包含 `http` 时会暴露流式调用端点。HTTP 模式必须显式启用应用层鉴权：
+将 `http_auth.type` 设置为 `bearer` 或 `header`，并提供非空的 `secret`。可以设置
+`http_path_prefix`，把端点挂到 `/api` 或 `/v1` 之类的前缀下，并在出站 Agent 的 `url`
+中包含相同前缀。
 
 HTTP Agent 配置示例：
 
-```sh
+```yaml
 mode: "http"
 id: "edge-fc-1"
 http_addr: ":9000"
-http_token: "change-me-http-token"
+http_auth:
+  type: "bearer"
+  header: ""
+  secret: "change-me-http-auth-secret"
 http_path_prefix: ""
 http_tls:
   enabled: true
@@ -110,11 +204,27 @@ http_tls:
 
 ```sh
 curl -N -X POST http://localhost:9000/invoke \
-  -H 'Authorization: Bearer change-me-http-token' \
+  -H 'Authorization: Bearer change-me-http-auth-secret' \
   -H 'Accept: application/x-ndjson' \
   -H 'Content-Type: application/json' \
-  -d '{"id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4}'
+  -d '{"protocol_version":1,"id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4}'
 ```
+
+若服务商或网关使用静态自定义请求头，需要让 Agent 与 Server 出站配置使用完全相同的请求头名
+和 secret。例如 Agent 可以配置为：
+
+```yaml
+http_auth:
+  type: "header"
+  header: "X-MTR-Agent-Token"
+  secret: "change-me-shared-secret"
+```
+
+对应的 Server 出站 Agent 记录应包含
+`"auth":{"type":"header","header":"X-MTR-Agent-Token","secret":"change-me-shared-secret"}`。
+若选择 `bearer`，Server 会改为发送 `Authorization: Bearer <secret>`。Server 也允许在明文
+HTTP 上使用这两种鉴权形式，但这会把凭据和请求内容暴露给网络路径；除非链路确实可信，默认
+仍应使用 HTTPS。
 
 响应是紧凑的换行分隔 JSON（`application/x-ndjson`）：每一行都是结构化的进度、
 跳点、指标事件或最终汇总事件。Server outbound 模式只恢复浏览器路由和回放需要的外层字段，
@@ -123,37 +233,55 @@ gRPC 模式在 Agent 到 Server 的路径上也使用同样的紧凑事件格式
 
 ### 事件函数模式
 
-当云函数平台以单次请求调用 Agent，并同步等待完整结果时，可以使用 `event` 模式。该模式只提供
-`POST /invoke`，默认监听 `:8000`，鉴权交给平台的调用接口或 IAM。它不使用 `http_token`、路径
-前缀、监听 TLS 和流式响应。
+当云函数平台以单次请求调用 Agent，并同步等待完整结果时，可以使用 `event` 模式。该模式默认监听
+`:8000`，`POST /invoke` 会一次性返回一个 JSON 文档而不是 NDJSON 流。它还提供轻量且无需鉴权的
+`POST /init`，返回 `{"status":"ok"}`，供启用了容器初始化调用的平台使用；没有这一生命周期的
+平台可以忽略。事件模式必须显式配置 `http_auth.type`：只有在函数平台的调用 API 或 IAM 边界已经
+鉴权每个请求时才使用 `none`。`bearer` 要求 `Authorization: Bearer <secret>`；`header` 要求配置的
+请求头和 secret。两种鉴权形式都会覆盖每个 `POST /invoke` 请求，包括 `healthz` action。事件模式
+不支持路径前缀和监听 TLS。
 
 `configs/agent.event.yaml` 提供了一份完整示例：
 
 ```yaml
 mode: "event"
 id: "edge-event-1"
+country: "CN"
+region: "edge"
+provider: "faas"
 http_addr: ":8000"
+http_auth:
+  type: "none" # 仅在调用入口已有鉴权时使用
+  header: ""
+  secret: ""
 http_path_prefix: ""
+protocols: 1
+capabilities: [ping, traceroute, mtr, http, dns, port]
 http_tls:
   enabled: false
 speedtest:
   max_bytes: 0
 ```
 
+下面的 curl 示例假设端点未对外暴露，并使用 `http_auth.type: none`。需要纵深防护时，可以设置
+`MTR_HTTP_AUTH_TYPE=bearer` 与 `MTR_HTTP_AUTH_SECRET=<secret>`；若选择 `header`，还要设置
+`MTR_HTTP_AUTH_HEADER`。健康检查和任务请求都必须添加相匹配的请求头。鉴权发生在 event action
+分派之前，因此 `healthz` 无法绕过鉴权。
+
 发送 `action: healthz` 可以查看 Agent 信息和运行环境的网络权限：
 
 ```sh
 curl -X POST http://localhost:8000/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"action":"healthz"}'
+  -d '{"protocol_version":1,"action":"healthz"}'
 ```
 
-任务请求沿用现有 `JobSpec` 字段；`action` 可以省略，也可以设为 `invoke` 或 `job`：
+任务请求沿用现有 `JobSpec` 字段，并且必须设置 `action: invoke`：
 
 ```sh
 curl -X POST http://localhost:8000/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
+  -d '{"protocol_version":1,"action":"invoke","id":"job-1","tool":"ping","target":"1.1.1.1","ip_version":4,"args":{"protocol":"udp"},"timeout_seconds":20}'
 ```
 
 任务结束后，函数会一次性返回一个 `application/json` 文档。过程事件放在 `events`，最终汇总放在
@@ -180,7 +308,7 @@ curl -X POST http://localhost:8000/invoke \
 
 `Dockerfile.agent` 构建的同一个镜像支持 `grpc`、`http` 和 `event` 三种模式。镜像只包含 Agent
 二进制和 CA 证书；运行参数可以来自挂载的 YAML、`MTR_*` 环境变量，或两者组合。默认配置文件
-不是必需的。
+不是必需的。Agent 和 Server 的 scratch 镜像默认使用非特权 UID/GID `65532:65532`。
 
 下面的命令会构建镜像，并以 event 模式在本地启动：
 
@@ -191,24 +319,29 @@ docker buildx build \
   -f Dockerfile.agent \
   -t mtr-agent:latest .
 
-docker run --rm -p 8000:8000 \
-  --user 65532:65532 \
+docker run --rm -p 127.0.0.1:8000:8000 \
   -e MTR_MODE=event \
+  -e MTR_HTTP_AUTH_TYPE=none \
   -e MTR_HTTP_ADDR=:8000 \
   -e MTR_ID=edge-event-1 \
   -e MTR_COUNTRY=CN \
   -e MTR_REGION=edge \
   -e MTR_PROVIDER=faas \
+  -e MTR_PROTOCOLS=1 \
+  -e MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port \
   mtr-agent:latest
 ```
 
-部署时，需要让平台把 `POST /invoke` 转发到 8000 端口。Agent 没有实现 `/init`；如果平台强制
-要求初始化入口，需要增加一层简单适配。函数超时应大于任务的 `timeout_seconds`，并为冷启动留出
-余量。平台在容器外添加的响应封装，应由调用方或 Server 适配器处理。
+部署时，需要让平台把调用请求发送到 8000 端口的 `POST /invoke`。同一个监听器还提供轻量的
+`POST /init`，启用独立容器初始化调用的平台无需再增加适配层；不使用初始化流程的平台可以忽略。
+函数超时应大于任务的 `timeout_seconds`，并为冷启动留出余量。平台在容器外添加的响应封装，应由
+调用方或 Server 适配器处理。
 
-推送镜像时，把 `--load` 换成 `--push`，并替换成目标仓库的镜像标签。只有当仓库不接受 Buildx
-attestation manifest 时，才需要添加 `--provenance=false --sbom=false`。构建架构应与函数运行
-环境一致，通常是 `linux/amd64` 或 `linux/arm64`。
+推送镜像时，把 `--load` 换成 `--push`，并替换成目标仓库的镜像标签。新版 Buildx 可能会把
+provenance 或 SBOM attestation 作为 image index 中的额外 manifest 一并推送。若旧仓库报错无法
+解析 manifest，可以在同一个单架构构建命令中重试添加 `--provenance=false --sbom=false`。这两个
+兼容开关会移除相应的供应链元数据，不应作为默认选项，也不能解决架构不匹配或所有仓库端 manifest
+错误。构建架构应与函数运行环境一致，通常是 `linux/amd64` 或 `linux/arm64`。
 
 #### 网络权限
 
@@ -216,8 +349,8 @@ attestation manifest 时，才需要添加 `--provenance=false --sbom=false`。�
 bounding set 移除的权限；强行给二进制写入 `cap_net_raw` 还可能导致程序无法启动。实际权限应以
 `healthz` 返回的 `network.cap_net_raw` 为准。
 
-没有 `NET_RAW` 时，ping 可以使用 `udp`、`tcp` 或 `auto`。ICMP traceroute/MTR 仍然需要
-`NET_RAW`，但可以改用 TCP 模式。
+没有 `NET_RAW` 时，ping 可以使用 `udp`、`tcp` 或 `auto`。traceroute/MTR 应改用
+`udp`；ICMP 探测和需要发现中间跳的 TCP 探测都需要 `NET_RAW`。
 
 UDP ping 会发送真实 UDP 数据报；收到 UDP 回复或 ICMP Port Unreachable 都判定为目标可达。
 默认目标端口为 `33434`，也可通过 `args.port` 指定。防火墙可能静默丢弃 UDP，因此显式 `udp`
@@ -236,9 +369,13 @@ docker run --rm -p 8000:8000 \
   --user 0:0 \
   --cap-drop ALL \
   --cap-add NET_RAW \
+  --security-opt no-new-privileges:true \
   -e MTR_ID=edge-docker-1 \
   -e MTR_MODE=event \
+  -e MTR_HTTP_AUTH_TYPE=none \
   -e MTR_HTTP_ADDR=:8000 \
+  -e MTR_PROTOCOLS=1 \
+  -e MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port \
   mtr-agent:latest
 ```
 
@@ -248,11 +385,11 @@ docker run --rm -p 8000:8000 \
 Agent 测速端点：
 
 ```sh
-curl -o /dev/null 'http://localhost:9000/speedtest/random?bytes=10485760&token=change-me-http-token'
+curl -H 'Authorization: Bearer change-me-http-auth-secret' -o /dev/null 'http://localhost:9000/speedtest/random?bytes=10485760'
 ```
 
-测速端点只在 HTTP 模式启用时可用，监听在 `http_addr` 上。它由 Agent 的 `http_token` 保护，
-token 通过查询参数 `token` 传入。可在 Agent 配置的 `speedtest` 下配置限制；设置
+测速端点只在 HTTP 模式启用时可用，监听在 `http_addr` 上。它由 Agent 的 `http_auth` 保护，
+使用已配置的 Bearer 或自定义请求头。可在 Agent 配置的 `speedtest` 下配置限制；设置
 `speedtest.max_bytes: 0` 可禁用该端点。测速端点限流使用直连的远端地址，并忽略
 `X-Forwarded-For`。
 
@@ -265,9 +402,16 @@ curl -X POST http://localhost:8080/v1/jobs \
   -d '{"tool":"ping","target":"1.1.1.1"}'
 ```
 
-`ping` 的 `args.protocol` 可选 `icmp`、`udp`、`tcp` 或 `auto`；默认严格使用 `icmp`，只有显式
-选择 `auto` 才允许降级。UDP 默认端口为 `33434`，TCP 默认端口为 `80`，均可通过 `args.port`
-覆盖。`traceroute` 和 `mtr` 仍只接受 `icmp` 或 `tcp`；
+`ping`、`traceroute` 和 `mtr` 的 `args.protocol` 均可选 `icmp`、`udp`、`tcp` 或 `auto`。
+默认严格使用 `icmp`；显式选择 `auto` 时，依次尝试 `icmp`、`udp`、`tcp`，并锁定第一个有响应的
+协议。UDP 默认端口为 `33434`，TCP 默认端口为 `80`，均可通过 `args.port` 覆盖。UDP 路由探测
+使用 Linux socket error queue，无需 raw socket；目前 UDP 路由探测只支持 Linux。
+TCP 路由探测会从 raw ICMP Time Exceeded 中关联被引用的 TCP 流，并把连接成功或目标返回
+RST 都视为到达。该实现目前仅支持 Linux，收集中间跳时需要 `NET_RAW`。
+`http` 的 `args.http_version` 可选 `1.1`、`2`、`3` 或 `auto`。默认严格使用 HTTP/1.1；选择
+`auto` 时依次尝试 HTTP/3、HTTP/2、HTTP/1.1，且只会在尚未收到响应时回落。HTTP/2 和 HTTP/3
+要求 HTTPS，HTTP/3 还要求允许出站 UDP。结果中的 `protocol` 或 `http_version` 表示实际协议；
+请求 `auto` 时还会返回 `requested_protocol` 或 `requested_http_version`。
 `count` 和 `max_hops` 由 Server 运行时配置控制，用户不可直接指定。`dns` 替代旧的
 `nslookup` 工具名。`port` 执行原生 TCP 连接探测，并要求提供 `args.port`。默认情况下，
 Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent: true` 可将 DNS 解析和解析后 IP
@@ -290,7 +434,7 @@ curl -X POST http://localhost:8080/v1/schedules \
 `agent` 标签和 `id:<agent-id>` 标签；`agent` 表示全部节点，自定义标签表示节点组，
 `id:<agent-id>` 表示单个节点。`cron_expression` 使用标准 5 段格式
 `分 时 日 月 周`，统一按 UTC 解释；每个触发点会同时运行全部所选节点。自定义标签可来自
-Agent 配置、托管 HTTP Agent 配置或部署生成器。服务端会把创建者的 Agent scope
+Agent 配置、出站 Agent 配置或部署生成器。服务端会把创建者的 Agent scope
 以选择规则保存到 schedule target；每次触发时都会根据当前节点重新计算标签和无限制范围，
 因此后续新增的匹配节点也会运行，同时固定 allowlist 和 deny 规则仍然生效。计划任务和任务
 读取接口有意允许被具备对应读权限的 token 共享读取。
@@ -305,12 +449,16 @@ curl -H 'Authorization: Bearer developer-token' \
 为浏览器 UI 流式接收结构化任务事件：
 
 ```js
-const events = new EventSource('/v1/jobs/<job-id>/stream?access_token=developer-token')
-events.addEventListener('hop', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('metric', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('progress', (event) => console.log(JSON.parse(event.data)))
-events.addEventListener('parsed', (event) => console.log(JSON.parse(event.data)))
+const response = await fetch('/v1/jobs/<job-id>/stream', {
+  headers: {Authorization: 'Bearer developer-token', Accept: 'text/event-stream'}
+})
+for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+  console.log(chunk) // 按标准 SSE frame 增量解析
+}
 ```
+
+API token 只允许通过 Bearer header 提交。原生 `EventSource` 无法附加该 header，因此 Web
+工作台使用带鉴权 header 的 `fetch` 流式读取，token 不会再进入 stream URL。
 
 ## Web 工作台
 
@@ -328,13 +476,16 @@ pnpm --dir web install
 ```json
 {
   "apiBaseUrl": "",
-  "apiToken": "frontend-token",
+  "apiToken": "REPLACE_WITH_PUBLIC_API_TOKEN",
   "brand": "QwQ MTR",
   "brandUrl": null
 }
 ```
 
-空的 `apiBaseUrl` 可配合 Vite 开发代理使用。请在两个终端中分别启动 Go Server 和前端：
+空的 `apiBaseUrl` 可配合 Vite 开发代理使用。打开工作台前，应把
+`REPLACE_WITH_PUBLIC_API_TOKEN` 替换成 Server 签发的公共诊断 token。新 Server 需先按
+“快速开始”中的 bootstrap token 流程初始化（已初始化的存储不再需要该文件），然后在两个终端中
+分别启动 Server 和前端：
 
 ```sh
 go run ./cmd/server -config configs/server.sqlite.yaml
@@ -363,15 +514,16 @@ docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
   --build-arg COMMIT=$(git rev-parse HEAD) .
 ```
 
-前端镜像使用 Caddy 在 `80` 端口提供 Vite 构建产物。运行时会读取
-`/config.json`，因此部署时可以只替换这个文件，而不需要重新构建镜像。
-只有当前端公开访问域名也把 `/v1` 反向代理到 Server 时，`apiBaseUrl`
-才适合留空。否则请设置为浏览器可以访问到的 Server API 地址：
+前端镜像使用 UID/GID `65532:65532` 运行 Caddy，并在非特权端口 `8080` 提供 Vite 构建产物。
+运行时会读取 `/config.json`，因此部署时可以只替换这个文件，而不需要重新构建镜像。
+镜像会把同源 `/v1` 请求反向代理到 `MTR_SERVER_URL`，其默认值是
+`http://mtr-server:8080`。推荐使用这种布局并把 `apiBaseUrl` 留空；也可以把它设置为浏览器
+能访问且已配置相应跨域策略的 Server API 地址：
 
 ```json
 {
   "apiBaseUrl": "https://mtr-api.example.com",
-  "apiToken": "frontend-token",
+  "apiToken": "REPLACE_WITH_PUBLIC_API_TOKEN",
   "brand": "QwQ MTR",
   "brandUrl": "https://mtr.example.com"
 }
@@ -380,30 +532,56 @@ docker build -f Dockerfile.web -t mtr-web:v1.2.3 \
 不配置 `brandUrl` 时，页首 brand 保持为应用内首页链接；设置为 URL 时，不同部署地址
 都会跳到同一个 canonical brand 地址；设置为 `null` 或 `""` 时则关闭 brand 链接。
 
+Web 客户端会从 `config.json` 读取 `apiToken`，并自动在 API 请求和流式请求中发送
+`Authorization: Bearer` 请求头，因此访客不需要输入 token。这个值是公开客户端凭据：任何浏览器
+用户都能从 `/config.json` 或开发者工具中读取它。它只能拥有公开诊断所需的最小工具和 Agent
+范围，并设置 `all: false`、`schedule_access: none`、`manage_access: none`。绝不能在这里配置
+bootstrap/admin token、管理 token 或 schedule-write token。部署时必须假设公共 token 会被复制和
+滥用；真正的安全边界是 Server 的权限校验和限流。
+
+容器部署时，应在仓库外准备这份 JSON，并覆盖镜像内的默认文件；该文件需要允许 UID `65532`
+读取：
+
+```sh
+docker run --rm -p 8081:8080 \
+  --mount type=bind,src=/absolute/path/config.json,dst=/usr/share/caddy/config.json,readonly \
+  ghcr.io/ztelliot/mtr-web:0.1.0
+```
+
 Kubernetes 示例包含 `deploy/k8s/web.yaml`，会部署
-`ghcr.io/ztelliot/mtr-web:latest`，创建 `mtr-web` Service，并通过
-`mtr-web-config` 覆盖容器内的 `/usr/share/caddy/config.json`。本地集群可用
-下面的方式快速验证：先按 Kubernetes 部署小节创建 Secrets，再应用基础资源：
+`ghcr.io/ztelliot/mtr-web:0.1.0`，创建 `mtr-web` Service，并通过
+`mtr-web-config` 覆盖容器内的 `/usr/share/caddy/config.json`。这里的 `0.1.0`
+是发布目标，并不表示公开 registry 当前一定已有这些镜像；请先发布镜像，或把本地构建的镜像
+加载到集群节点。公开 Web 前，必须把 ConfigMap 中的 `REPLACE_WITH_PUBLIC_API_TOKEN` 替换成
+公共诊断 token。这里有意使用 ConfigMap 而不是 Secret，因为浏览器必须取得该值，无法替它保密。
+本地集群可按下面的方式快速验证：随后按 Kubernetes 部署小节创建 Secrets，再应用基础资源：
 
 ```sh
 kubectl apply -k deploy/k8s
-kubectl -n mtr port-forward svc/mtr-server 8080:8080
 kubectl -n mtr port-forward svc/mtr-web 8081:80
 ```
 
-如果通过 `http://localhost:8081` 访问工作台，请把 `mtr-web-config` 中的
-`apiBaseUrl` 设置为 `http://localhost:8080`，并把 `apiToken` 设置为有效的
-API token。公开部署时应使用权限受限的前端 token，而不是初始 admin token。
-也可以在两个服务前放置 Ingress 或网关，将 `/v1` 路由到 `mtr-server`，将
-`/` 路由到 `mtr-web`。
+如果通过 `http://localhost:8081` 访问工作台，请把 `apiBaseUrl` 留空；Web Pod 会把 `/v1`
+代理到集群内的 `mtr-server` Service，客户端会自动使用预置的公共 token。如果 Server 的
+集群内地址不同，请覆盖 Web 容器的 `MTR_SERVER_URL`。
+
+基线 Caddy 会用直连 peer 地址覆盖 `X-Mtr-Proxy-Client-Ip`；Server 之所以信任这个 header，
+是因为 `mtr-server-ingress` 只允许 Web Pod 访问 HTTP 端口。该信任模型仅在集群 CNI 确实支持并
+执行 NetworkPolicy 时才安全；如果 CNI 不执行策略，部署前必须把 `0.0.0.0/0` 和 `::/0`
+替换为真实 Web Pod CIDR 或其他严格受限的代理范围。如果增加 Ingress、集群外 Agent 或其他
+Server 客户端，必须同时调整 NetworkPolicy 和可信代理链；失去网络隔离后，不能继续使用基线中的
+宽泛 trusted-proxy 设置。Ingress 也不是直接添加即可：基线策略会阻止 controller 直连 Server，
+Caddy 默认只从它的直连 peer 生成客户端 header。要在 Ingress 后保留终端用户 IP，应先把 Caddy
+配置成只信任该 controller 的转发 header，再扩展 NetworkPolicy。
 
 `deploy/k8s/agent.yaml` DaemonSet 可以从 Kubernetes Node annotations 生成每个节点的
 Agent 元数据，但这个逻辑只在部署层完成，Agent 二进制本身并不知道 Kubernetes。
 示例使用 initContainer 读取当前 Node 的 annotations，把普通的 `agent.yaml` 渲染到
 `emptyDir`，主容器再读取这个生成后的配置文件。ServiceAccount 只需要给
-initContainer 使用的只读 `get nodes` 权限。initContainer 通过 manifest 中显式配置的
-`MTR_KUBERNETES_API_SERVER` 访问 apiserver；如果集群的 Kubernetes Service IP 不是
-`https://10.96.0.1:443`，请修改这个环境变量。默认映射这些 annotations：
+initContainer 使用的只读 `get nodes` 权限。默认情况下，initContainer 使用 Kubernetes
+自动注入的 `KUBERNETES_SERVICE_HOST` 和 `KUBERNETES_SERVICE_PORT_HTTPS` 组成
+apiserver 地址；只有集群确实需要其他地址时，才设置可选的
+`MTR_KUBERNETES_API_SERVER` 覆盖值。默认映射这些 annotations：
 
 ```sh
 kubectl annotate node <node> \
@@ -443,8 +621,8 @@ API、鉴权拒绝、限流请求、未匹配路由、`/metrics`；长连接和�
 - `panicked` 标记，便于发现由 HTTP Server 在路由外层恢复的异常。
 
 Server 会接受安全的 `X-Request-ID` 并在响应头中返回；缺失或格式不安全时自动生成 UUID。
-由于 API 支持通过 `access_token` 查询参数鉴权，访问日志有意不记录查询字符串，避免泄露
-凭据。将 `log_level` 设置为 `info` 或 `debug` 即可输出访问日志。
+访问日志有意不记录查询字符串，因为任意业务参数都可能包含敏感值。将 `log_level` 设置为
+`info` 或 `debug` 即可输出访问日志。
 
 ## Prometheus Watch 指标
 
@@ -593,22 +771,30 @@ tls:
 
 Agent 使用原生 Go 实现执行诊断，只上传结构化结果事件。
 
-解析到 loopback、private、link-local、multicast、运营商级 NAT、文档地址、基准测试地址或其他特殊用途地址段的目标，
-会同时被 Server 和 Agent 拒绝。
+需要建立网络连接的探测如果解析到 loopback、private、link-local、multicast、运营商级 NAT、
+文档地址、基准测试地址或其他特殊用途地址段，会同时被 Server 和 Agent 拒绝。`dns` 工具有意采用
+不同语义：它只查询指定记录，并不连接返回地址，因此可以看到 Agent 所用解析器可见的私有记录。
+给 token 开放 DNS 工具就等于允许访问该解析器的命名空间；公开 token 应据此收敛权限。
 
 Agent 镜像只需要编译后的 Agent 二进制和 CA 证书；诊断工具均由 Go 实现。
 
 ## Docker 部署加固
 
 容器运行时建议优先使用非 root 用户、只读根文件系统、禁用提权并显式收敛 Linux capabilities。
-Server 不需要额外 capability；只有 Agent 的 ICMP `ping`、`traceroute`、`mtr` 需要
-`NET_RAW`，UDP/TCP ping 不需要。
+Server 不需要额外 capability；Agent 的 ICMP ping，以及 ICMP/TCP traceroute/MTR 需要
+`NET_RAW`；UDP 探测和 TCP ping 不需要。
 
 Server 示例使用容器内非特权 UID/GID `65532:65532`。ICMP Agent 示例使用 UID 0，但丢弃除
 `NET_RAW` 外的全部 capability；原因是 Docker 不会把单独通过 `--cap-add NET_RAW` 添加的权限
-放入非 root 进程的 permitted/effective 集合。若 Agent 只使用 UDP/TCP ping，可以改回
+放入非 root 进程的 permitted/effective 集合。若 Agent 只使用 UDP/TCP ping，可以使用镜像默认的
 `65532:65532` 并移除 `--cap-add`。挂载的配置和证书需要对实际 UID/GID 可读；私钥建议使用
 `0640` 并匹配 group，或使用 Docker/Compose secret。发布镜像不内置运行配置，请显式挂载。
+Server 首次启动前，还需把随机 token 写入 `/etc/mtr/bootstrap/admin-token`，确保 UID/GID
+65532 可读且其他用户不可读；持久化存储初始化完成后即可删除该文件。示例
+`configs/server.yaml` 的 PostgreSQL DSN 将
+`/var/run/mtr/postgres/ca.crt` 指定为 `sslrootcert`，所以下面的命令也把数据库 CA 挂载到
+这个准确路径；宿主机文件必须允许 UID/GID 65532 读取。只有改用 SQLite，或 PostgreSQL
+DSN 已指向其他经过验证的 CA 路径时，才能省略这个挂载。
 
 ```sh
 docker network create mtr-net
@@ -625,9 +811,12 @@ docker run -d --name mtr-server \
   --memory 512m \
   -p 8080:8080 \
   -p 8443:8443 \
+  -e MTR_BOOTSTRAP_ADMIN_TOKEN_FILE=/var/run/mtr/bootstrap/admin-token \
   -v /etc/mtr/server.yaml:/etc/mtr/server.yaml:ro \
+  -v /etc/mtr/bootstrap:/var/run/mtr/bootstrap:ro \
+  -v /etc/mtr/postgres/ca.crt:/var/run/mtr/postgres/ca.crt:ro \
   -v /etc/mtr/tls/server:/var/run/mtr/tls:ro \
-  ghcr.io/ztelliot/mtr-server:latest
+  ghcr.io/ztelliot/mtr-server:0.1.0
 
 docker run -d --name mtr-agent \
   --network mtr-net \
@@ -642,7 +831,7 @@ docker run -d --name mtr-agent \
   --memory 512m \
   -v /etc/mtr/agent.yaml:/etc/mtr/agent.yaml:ro \
   -v /etc/mtr/tls/agent:/var/run/mtr/tls:ro \
-  ghcr.io/ztelliot/mtr-agent:latest
+  ghcr.io/ztelliot/mtr-agent:0.1.0
 ```
 
 如果 Server 使用 SQLite，需要额外挂载可写状态目录，并把 `database_url` 指向该目录中的文件：
@@ -670,7 +859,7 @@ Agent 默认以 gRPC 长连接主动连 Server，不需要暴露端口。请在 
 ```sh
 useradd --system --home /var/lib/mtr --shell /usr/sbin/nologin mtr
 install -d -o mtr -g mtr -m 0750 /var/lib/mtr
-install -d -o root -g mtr -m 0750 /etc/mtr /etc/mtr/tls
+install -d -o root -g mtr -m 0750 /etc/mtr /etc/mtr/tls /etc/mtr/bootstrap
 install -o root -g mtr -m 0640 configs/server.yaml /etc/mtr/server.yaml
 install -o root -g mtr -m 0640 configs/agent.yaml /etc/mtr/agent.yaml
 install -o root -g mtr -m 0644 certs/ca.crt /etc/mtr/tls/ca.crt
@@ -682,10 +871,17 @@ install -o root -g root -m 0755 mtr-server /usr/local/bin/mtr-server
 install -o root -g root -m 0755 mtr-agent /usr/local/bin/mtr-agent
 install -o root -g root -m 0644 systemd/mtr-server.service /etc/systemd/system/mtr-server.service
 install -o root -g root -m 0644 systemd/mtr-agent.service /etc/systemd/system/mtr-agent.service
+umask 0077
+openssl rand -hex 32 > /etc/mtr/bootstrap/admin-token
+chown root:mtr /etc/mtr/bootstrap/admin-token
+chmod 0640 /etc/mtr/bootstrap/admin-token
 systemctl daemon-reload
 systemctl enable --now mtr-server
 systemctl enable --now mtr-agent
 ```
+
+Server unit 已指向这个 bootstrap 文件。持久化存储初始化完成且所需托管 token 已安全保存后，
+应删除 `/etc/mtr/bootstrap/admin-token`；已初始化的存储仍可在文件不存在时正常启动。
 
 若 Server 使用 SQLite，建议把数据库放在 `/var/lib/mtr/`。服务文件已设置
 `WorkingDirectory=/var/lib/mtr` 和 `StateDirectory=mtr`，该目录会作为唯一持久可写状态目录使用。
@@ -703,39 +899,53 @@ systemd-analyze security mtr-agent.service
 
 - `server.yaml`：单副本 Server `Deployment` 与 `Service`。
 - `agent.yaml`：`DaemonSet` 形式的 Agent，每个 Pod 自动用自身 Pod 名作为 `MTR_ID`。
-- `networkpolicy.yaml`：拒绝进入 Agent Pod 的入站流量。
+- `networkpolicy.yaml`：拒绝进入 Agent Pod 的入站流量，并把 Server 的 HTTP/gRPC 入站来源
+  限制为基线 Web/Agent Pod。
 - `secrets.example.yaml`：需要替换占位符后再应用的 Secret 模板。
 - `kustomization.yaml`：用于 `kubectl apply -k deploy/k8s` 的基础资源；它有意不包含
   `secrets.example.yaml`。
 
 这套清单默认假设：
 
-- PostgreSQL 由外部服务提供，`database-url` 通过 Secret 注入。
+- PostgreSQL 由外部服务提供；启用完整 TLS 校验的 `database-url` 通过
+  `mtr-server-env` 注入，数据库 CA 则从 `mtr-server-postgres-ca` 挂载。
 - gRPC 控制面走 `mtr-server.mtr.svc.cluster.local:8443`，因此 Server 证书 SAN 已按这个域名示例生成。
 - 所有 Agent 共享同一张客户端证书，但每个 Pod 通过 `MTR_ID=metadata.name` 保持唯一逻辑身份。
 - Agent Pod 从 `mtr-agent-env` Secret 读取注册 token，且该值必须匹配 Server
   托管配置中保存的 Agent 注册 token。
 - Server 保持 `replicas: 1`。当前调度 Hub 维护的是进程内连接状态，因此这份基础清单不直接做多副本控制面。
 - API token、Agent 注册 token、限流、全局配置、按标签生效的调度/运行参数、
-  标签策略和托管 HTTP Agent 都存储在 Server 托管配置中，不再从 Kubernetes
+  标签策略和出站 Agent 都存储在 Server 托管配置中，不再从 Kubernetes
   Server ConfigMap 或 Secret 读取。
+- 空存储首次启动时，只从可选的 `mtr-server-bootstrap` Secret 读取一次初始
+  admin API token；Server 日志不会输出该 token。
+- CNI 必须支持并实际执行 NetworkPolicy；如果没有这项保证，应用清单前必须把 Server
+  ConfigMap 中的宽泛可信代理范围改成真实 Web Pod CIDR 或其他严格受限的代理范围。
 
-创建 Secret 时，可以先编辑 `deploy/k8s/secrets.example.yaml` 中的占位符并单独应用该文件，
-也可以用命令行生成：
+bootstrap 流程需要分阶段进行：先只创建 Server 的前置 Secret 并启动 Server，再从可信的本地
+客户端使用初始 admin token 创建公共 Web 诊断 token 和 Agent 注册 token，之后才配置 Web 并
+部署 Web 与 Agent。这样既不会把 admin token 公开给浏览器，也不会在 Server 尚未启动时就要求
+托管 token。可以按需改写 `deploy/k8s/secrets.example.yaml` 的占位符，也可以先用命令行创建
+第一阶段 Secret：
 
 ```sh
 kubectl apply -f deploy/k8s/namespace.yaml
 
 kubectl -n mtr create secret generic mtr-server-env \
-  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=disable'
+  --from-literal=database-url='postgres://mtr:mtr@postgres:5432/mtr?sslmode=verify-full&sslrootcert=/var/run/mtr/postgres/ca.crt'
+
+kubectl -n mtr create secret generic mtr-server-postgres-ca \
+  --from-file=ca.crt=certs/postgres-ca.crt
+
+umask 077
+openssl rand -hex 32 > admin-token
+kubectl -n mtr create secret generic mtr-server-bootstrap \
+  --from-file=admin-token=admin-token
 
 kubectl -n mtr create secret generic mtr-server-tls \
   --from-file=ca.crt=certs/ca.crt \
   --from-file=tls.crt=certs/server.crt \
   --from-file=tls.key=certs/server.key
-
-kubectl -n mtr create secret generic mtr-agent-env \
-  --from-literal=register-token='<managed-register-token>'
 
 kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=ca.crt=certs/ca.crt \
@@ -743,16 +953,52 @@ kubectl -n mtr create secret generic mtr-agent-tls \
   --from-file=tls.key=certs/agent-shared.key
 ```
 
-`<managed-register-token>` 是管理页或 `/v1/manage/register-tokens` 返回的 token
-值。空数据库首次启动时，Server 会在日志中打印初始 admin API token；使用该 token
-创建 Agent 注册 token，设置本次上线允许的 Agent ID 和对应的剩余次数后，
-再把返回值写入 `mtr-agent-env`。
-
-然后应用基础清单：
+第一阶段只应用 Server，然后在一个终端中保持本地端口转发：
 
 ```sh
-kubectl apply -k deploy/k8s
+kubectl apply -f deploy/k8s/server.yaml
+kubectl -n mtr rollout status deployment/mtr-server
+kubectl -n mtr port-forward service/mtr-server 8080:8080
 ```
+
+本地 `admin-token` 文件中的值就是初始 admin API token。在另一个终端创建严格收窄的公共 token
+（下面的示例只允许 `ping`）以及本次上线使用的 Agent 注册 token：
+
+```sh
+ADMIN_TOKEN="$(tr -d '\r\n' < admin-token)"
+
+curl --fail-with-body -X POST http://127.0.0.1:8080/v1/manage/tokens \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"public-web","all":false,"schedule_access":"none","manage_access":"none","agents":["*"],"tools":{"ping":{}}}' \
+  > /tmp/mtr-public-web-token.json
+
+curl --fail-with-body -X POST http://127.0.0.1:8080/v1/manage/register-tokens \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"k8s-agents","remaining_uses":3}' \
+  > /tmp/mtr-agent-register-token.json
+unset ADMIN_TOKEN
+```
+
+两个响应只会分别在 `.token.secret` 和 `.token.token` 中展示一次新值。应按部署需要继续收窄
+公共 token 的工具和 Agent 范围，并按实际规模设置 `remaining_uses` 与 `allowed_agent_ids`。
+把公共值写入 `mtr-web-config` 的私有副本或 overlay，绝不能写入 admin token；把注册值保存到
+Agent Secret，然后部署其余工作负载：
+
+```sh
+kubectl -n mtr create secret generic mtr-agent-env \
+  --from-literal=register-token='<managed-register-token>'
+kubectl apply -f '<private-web-manifest>' \
+  -f deploy/k8s/agent.yaml \
+  -f deploy/k8s/networkpolicy.yaml
+kubectl -n mtr rollout status deployment/mtr-web
+```
+
+持久化数据库初始化完成且所需托管 token 已安全保存后，应删除本地文件以及
+一次性响应文件和 `mtr-server-bootstrap` Secret；后续重启时可选卷可以保持不存在。后续整体更新
+应使用基于 `deploy/k8s` 的私有 Kustomize overlay，不能让仓库中的 Web 占位值覆盖已部署的
+公共 token。
 
 Agent 的权限在清单里被刻意压到很窄：
 
@@ -760,6 +1006,7 @@ Agent 的权限在清单里被刻意压到很窄：
 - 不使用 host network/PID/IPC，`privileged: false`
 - 根文件系统只读，只额外挂载只读配置、只读证书和一个 `emptyDir` 类型的 `/tmp`
 - 默认丢弃全部 Linux capabilities，只额外保留 `NET_RAW`
+- 禁用提权，并启用运行时默认 seccomp profile
 - 附带 NetworkPolicy 拒绝进入 Agent Pod 的入站流量
 
 之所以保留 `NET_RAW`，是因为当前 `ping`、`traceroute`、`mtr` 的 ICMP 实现需要原始 socket。Agent 主容器使用 UID 0 运行，以便 `NET_RAW` 能进入 permitted/effective capability sets；但它不是 privileged，且仍然丢弃除 `NET_RAW` 之外的全部 capabilities。若你的集群启用了严格的 Pod Security Admission，需要为这个 Agent securityContext 显式放行。Agent 启动时会打印 `CapEff`、`CapBnd`、`NoNewPrivs` 和 `Seccomp`，便于确认实际权限。
@@ -772,6 +1019,9 @@ DaemonSet 示例额外包含一条很窄的 RBAC：initContainer 需要 `get nod
 
 FaaS 部署文件位于 `deploy/fc/`。仓库提交的 `targets.json` 只描述可公开的目标元数据
 和占位运行参数；`generate.mjs` 会根据它生成各云厂商需要的部署模板。
+
+公共模板默认使用 `header` 鉴权，请求头名为 `X-MTR-Agent-Token`。只在本地 targets 文件中
+填写 secret，并让 Server 出站 Agent 的 `auth` 使用完全相同的请求头名和 secret。
 
 目前支持：
 
@@ -833,13 +1083,13 @@ FaaS Agent 不读取 `config.yaml`，所有运行参数都通过环境变量注�
 ```json
 {
   "binary": {
-    "path": ".cache/mtr-agent",
-    "fromImage": {
-      "image": "ghcr.io/ztelliot/mtr-agent:dev"
-    }
+    "path": ".cache/mtr-agent"
   }
 }
 ```
+
+`binary.path` 与 `binary.fromImage` 互斥。镜像提取的可执行文件固定暂存在
+`output/binary` 下，所有 provider 输出也必须位于 `output/` 内。
 
 如果镜像已经在本地构建或加载，可以把 `binary.fromImage.pull` 设为 `false`。
 
@@ -886,7 +1136,9 @@ gcloud/deploy.sh
   "env": {
     "MTR_MODE": "http",
     "MTR_LOG_LEVEL": "info",
-    "MTR_HTTP_TOKEN": "<http-token>",
+    "MTR_HTTP_AUTH_TYPE": "header",
+    "MTR_HTTP_AUTH_HEADER": "X-MTR-Agent-Token",
+    "MTR_HTTP_AUTH_SECRET": "<http-auth-secret>",
     "MTR_HTTP_ADDR": ":9000",
     "MTR_HTTP_PATH_PREFIX": "/<path-prefix>",
     "MTR_PROTOCOLS": 1,
@@ -1037,7 +1289,9 @@ gcloud alpha run deploy mob-hongkong \
   --set-env-vars=MTR_MODE=http \
   --set-env-vars=MTR_LOG_LEVEL=info \
   --set-env-vars=MTR_HTTP_ADDR=:9000 \
-  --set-env-vars=MTR_HTTP_TOKEN=<http-token> \
+  --set-env-vars=MTR_HTTP_AUTH_TYPE=header \
+  --set-env-vars=MTR_HTTP_AUTH_HEADER=X-MTR-Agent-Token \
+  --set-env-vars=MTR_HTTP_AUTH_SECRET=<http-auth-secret> \
   --set-env-vars=MTR_HTTP_PATH_PREFIX=/<path-prefix> \
   --set-env-vars='^#^MTR_CAPABILITIES=ping,traceroute,mtr,http,dns,port' \
   --set-env-vars=MTR_PROTOCOLS=3 \
@@ -1053,7 +1307,8 @@ Cloud Run 默认端口为 `9000`，并发为 `1`，超时为 `60`，CPU 为 `0.0
 `--allow-unauthenticated`、`--public` 和 `--no-cpu-boost`。可通过
 `providers.gcloud.run` 或 `target.run` 覆盖。
 
-腾讯云 SCF 也可以使用容器镜像部署，而不是上传复制出的二进制包。给
+腾讯云 SCF 也可以使用容器镜像部署，而不是上传复制出的二进制包。
+部署生成器不会代为发布源镜像，因此应先构建并发布所引用的 tag。给
 `providers.qcloud.image` 设置值后，所有腾讯云目标都会启用镜像模式：
 
 ```json
@@ -1063,7 +1318,7 @@ Cloud Run 默认端口为 `9000`，并发为 `1`，超时为 `60`，CPU 为 `0.0
       "name": "mtr-agent-qcloud",
       "output": "qcloud",
       "image": {
-        "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:0.1.0",
         "imageType": "personal",
         "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
         "containerImageAccelerate": true
@@ -1096,7 +1351,7 @@ provider 级别的 image 配置，也可以设置 `"image": false` 回退到代�
 ```json
 {
   "image": {
-    "sourceImage": "ghcr.io/ztelliot/mtr-agent:latest",
+    "sourceImage": "ghcr.io/ztelliot/mtr-agent:0.1.0",
     "imageUrl": "{registry}/sls-scf/mtr-agent:latest",
     "registries": {
       "ap-hongkong": "hkccr.ccs.tencentyun.com",
@@ -1118,8 +1373,8 @@ image:
 `output/qcloud/deploy.sh` 会在部署前把源镜像同步到选定的腾讯云 registry：
 
 ```bash
-docker pull ghcr.io/ztelliot/mtr-agent:latest
-docker tag ghcr.io/ztelliot/mtr-agent:latest ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
+docker pull ghcr.io/ztelliot/mtr-agent:0.1.0
+docker tag ghcr.io/ztelliot/mtr-agent:0.1.0 ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
 docker push ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
 ```
 

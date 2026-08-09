@@ -16,7 +16,7 @@ import (
 )
 
 func TestWatchMetricsExposeNumericAndTextResults(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	if err := st.UpsertAgent(ctx, model.Agent{
@@ -123,7 +123,7 @@ func TestWatchMetricsExposeNumericAndTextResults(t *testing.T) {
 func TestWatchMetricsReconstructRouteHopsFromStreamEvents(t *testing.T) {
 	for _, tool := range []model.Tool{model.ToolTraceroute, model.ToolMTR} {
 		t.Run(string(tool), func(t *testing.T) {
-			st := store.NewMemory()
+			st := store.NewTestMemory()
 			ctx := context.Background()
 			now := time.Unix(1_700_000_000, 0).UTC()
 			schedule := watchMetricsSchedule(string(tool)+"-watch", tool, "1.0.0.1", now)
@@ -199,7 +199,7 @@ func TestWatchMetricsReconstructRouteHopsFromStreamEvents(t *testing.T) {
 }
 
 func TestWatchMetricsKeepLatestCompletedResultWhileNextRunIsActive(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	schedule := watchMetricsSchedule("ping-watch", model.ToolPing, "1.1.1.1", now)
@@ -231,7 +231,7 @@ func TestWatchMetricsKeepLatestCompletedResultWhileNextRunIsActive(t *testing.T)
 }
 
 func TestWatchMetricsRequireScheduleReadAccess(t *testing.T) {
-	st := store.NewMemory()
+	st := store.NewTestMemory()
 	handler := New(st, policy.DefaultPolicies(), nil, nil, "", slog.Default(),
 		TokenConfig{Token: "reader", Scope: TokenScope{ScheduleAccess: ScheduleAccessRead}},
 		TokenConfig{Token: "manage-only", Scope: TokenScope{ManageAccess: ScheduleAccessRead}},

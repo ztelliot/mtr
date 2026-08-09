@@ -11,11 +11,13 @@ ENV VITE_APP_VERSION=${VERSION}
 ENV VITE_APP_COMMIT=${COMMIT}
 RUN pnpm build && \
     printf '%s\n' \
-      ':80 {' \
+      ':8080 {' \
       '  root * /usr/share/caddy' \
       '  encode zstd gzip' \
       '  header {' \
       '    Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data:; font-src '\''self'\'' data:; connect-src '\''self'\'' http: https: ws: wss:; object-src '\''none'\''; base-uri '\''self'\''; frame-ancestors '\''none'\''; form-action '\''self'\''"' \
+      '    Cross-Origin-Opener-Policy "same-origin"' \
+      '    Cross-Origin-Resource-Policy "same-origin"' \
       '    Referrer-Policy "no-referrer"' \
       '    X-Content-Type-Options "nosniff"' \
       '    X-Frame-Options "DENY"' \
@@ -33,12 +35,28 @@ RUN pnpm build && \
       '  }' \
       '}' > /tmp/Caddyfile
 
-FROM caddy:alpine
+FROM caddy:alpine AS caddy-runtime
+RUN setcap -r /usr/bin/caddy && chown -R 65532:65532 /config /data
+
+FROM scratch
 ARG VERSION=dev
 ARG COMMIT=
+ARG BUILT_AT=
 LABEL org.opencontainers.image.title="mtr-web" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${COMMIT}"
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILT_AT}"
+ENV XDG_CONFIG_HOME=/config \
+    XDG_DATA_HOME=/data \
+    HOME=/config
+COPY --from=caddy-runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=caddy-runtime /etc/mime.types /etc/mime.types
+COPY --from=caddy-runtime /usr/bin/caddy /usr/bin/caddy
+COPY --from=caddy-runtime --chown=65532:65532 /config /config
+COPY --from=caddy-runtime --chown=65532:65532 /data /data
 COPY --from=build /tmp/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /app/dist /usr/share/caddy
-EXPOSE 80
+EXPOSE 8080
+USER 65532:65532
+ENTRYPOINT ["/usr/bin/caddy"]
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   USERNAME: ztelliot
@@ -33,6 +32,7 @@ jobs:
           filters: |
             go:
               - ".github/workflows/image.yml"
+              - ".dockerignore"
               - "Dockerfile.agent"
               - "Dockerfile.server"
               - "cmd/**"
@@ -41,6 +41,7 @@ jobs:
               - "internal/**"
             web:
               - ".github/workflows/image.yml"
+              - ".dockerignore"
               - "Dockerfile.web"
               - "web/**"
 
@@ -48,8 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.go == 'true'
-    env:
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         component: [agent, server]
@@ -61,6 +63,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Detect optional registries
+        id: registries
+        env:
+          DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          if [ "$DOCKERHUB_ENABLED" = "true" ]; then
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -69,11 +82,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: steps.registries.outputs.dockerhub == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ env.USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set image names
         id: image-names
@@ -84,7 +97,7 @@ jobs:
             echo "images<<EOF"
             echo "ghcr.io/${USERNAME}/${REPO}-${COMPONENT}"
 
-            if [ -n "$DOCKERHUB_TOKEN" ]; then
+            if [ "${{ steps.registries.outputs.dockerhub }}" = "true" ]; then
               echo "${USERNAME}/${REPO}-${COMPONENT}"
             fi
 
@@ -99,16 +112,19 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
-            type=match,pattern=(v\d+\.\d+\.\d+),group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=match,pattern=(v\d+\.\d+)\.\d+,group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=match,pattern=(v\d+)\.\d+\.\d+,group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Set build args
         id: build-args
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
-          echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
-          echo "COMMIT=${{ github.sha }}" >> $GITHUB_ENV
-          echo "BUILT_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+          printf '%s\n' "VERSION=$VERSION" >> "$GITHUB_ENV"
+          printf '%s\n' "COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          printf '%s\n' "BUILT_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
@@ -128,8 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.web == 'true'
-    env:
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout repository
@@ -137,6 +154,17 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Detect optional registries
+        id: registries
+        env:
+          DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          if [ "$DOCKERHUB_ENABLED" = "true" ]; then
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -146,11 +174,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: steps.registries.outputs.dockerhub == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ env.USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set image names
         id: image-names
@@ -161,7 +189,7 @@ jobs:
             echo "images<<EOF"
             echo "ghcr.io/${USERNAME}/${REPO}-${COMPONENT}"
 
-            if [ -n "$DOCKERHUB_TOKEN" ]; then
+            if [ "${{ steps.registries.outputs.dockerhub }}" = "true" ]; then
               echo "${USERNAME}/${REPO}-${COMPONENT}"
             fi
 
@@ -176,14 +204,18 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
-            type=match,pattern=(v\d+\.\d+\.\d+),group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=match,pattern=(v\d+\.\d+)\.\d+,group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=match,pattern=(v\d+)\.\d+\.\d+,group=1,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Set build args
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
-          echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
-          echo "COMMIT=${{ github.sha }}" >> $GITHUB_ENV
+          printf '%s\n' "VERSION=$VERSION" >> "$GITHUB_ENV"
+          printf '%s\n' "COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          printf '%s\n' "BUILT_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
@@ -197,3 +229,4 @@ jobs:
           build-args: |
             VERSION=${{ env.VERSION }}
             COMMIT=${{ env.COMMIT }}
+            BUILT_AT=${{ env.BUILT_AT }}
