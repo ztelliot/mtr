@@ -72,6 +72,7 @@ describe("ping rows", () => {
             packets_transmitted: 10,
             packets_received: 9,
             packet_loss_pct: 10,
+            protocol: "tcp",
             rtt_min_ms: 4.2,
             rtt_avg_ms: 4.5,
             rtt_max_ms: 5.1,
@@ -89,6 +90,7 @@ describe("ping rows", () => {
         provider: "Misaka",
         isp: "ExampleNet",
         target: "1.1.1.1",
+        actualProtocol: "tcp",
         ip: "-",
         sent: 10,
         bestMS: 4.2,
@@ -480,6 +482,36 @@ describe("ping rows", () => {
     });
   });
 
+  it("uses the actual protocol from route summaries", () => {
+    const events: JobEvent[] = [
+      {
+        id: "event-1",
+        job_id: "route-job",
+        agent_id: "edge-1",
+        stream: "hop_summary",
+        created_at: "2026-04-25T00:00:00Z",
+        event: {
+          type: "hop_summary",
+          hop: { index: 1, ip: "10.0.0.1", sent: 1, loss_pct: 0, avg_ms: 2 }
+        }
+      },
+      {
+        id: "event-2",
+        job_id: "route-job",
+        agent_id: "edge-1",
+        stream: "summary",
+        created_at: "2026-04-25T00:00:01Z",
+        event: {
+          type: "summary",
+          exit_code: 0,
+          metric: { protocol: "udp" }
+        }
+      }
+    ];
+
+    expect(buildMtrRows(agents, "edge-1", events)[0]).toMatchObject({ actualProtocol: "udp" });
+  });
+
   it("fills all-timeout MTR summary chart samples from sent count", () => {
     const events: JobEvent[] = [
       {
@@ -562,6 +594,7 @@ describe("ping rows", () => {
           exit_code: 0,
           metric: {
             http_code: 204,
+            http_version: "2",
             remote_addr: "93.184.216.34:443",
             time_total_ms: 20
           }
@@ -571,6 +604,7 @@ describe("ping rows", () => {
 
     expect(buildNodeRows("http", agents, [httpJob], { "http-job": events })[0]).toMatchObject({
       ip: "93.184.216.34",
+      actualProtocol: "2",
       httpCode: 204,
       status: "204",
       totalMS: 20

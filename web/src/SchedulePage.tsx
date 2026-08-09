@@ -23,7 +23,7 @@ import { agentLocationProviderLabel, agentRegionLabel, agentSelectLabel, ispProt
 import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
-import { formatBytes, formatDateTime, formatHistoryDateTime, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
+import { formatActualProtocol, formatBytes, formatDateTime, formatHistoryDateTime, formatMS, formatPercent, formatShortDateTime, formatSpeed } from "./formatters";
 import { fetchGeoIPQueued, ipFromDNSRecord, uniqueIPAddresses } from "./geoip";
 import { buildCreateJobRequest, defaultFormState, navTools, normalizeFormTarget, normalizeTargetForTool, parseHostPort } from "./jobForm";
 import { canReadSchedules, canWriteSchedules, formWithPermissionDefaults, ipVersionOptions, localizedFormError, permissionFormError, requiresAgentForTool, resolveOnAgentValue, toolAllowed, toolAllowedForAgent } from "./permissions";
@@ -54,6 +54,9 @@ export const __schedulePageTest = {
   agentsForScheduleLabel,
   agentsForScheduleLabels,
   cronExpressionIsValid,
+  effectiveScheduleForm,
+  scheduleChartTooltipLines,
+  scheduleFormState,
   scheduleIPVersionOptions,
   schedulePermissionFormError
 };
@@ -145,9 +148,9 @@ export function SchedulePage({
   );
   const cronError = cronExpressionIsValid(cronExpression) ? null : t("errors.cronRequired");
   const scheduleTargetError = scheduleTargetFormError(scheduleLabels, scheduleLabelOptions, t);
-  const schedulePermissionForm = { ...form, agentId: "" };
+  const schedulePermissionForm = effectiveScheduleForm(form, permissions);
   const validationForm = requiresAgentForTool(permissions, form.tool) ? { ...schedulePermissionForm, agentId: schedulePermissionForm.agentId || "schedule-target" } : schedulePermissionForm;
-  const formError = localizedFormError(validationForm, permissions, t) || schedulePermissionFormError(form, permissions, routeAgents, scheduleLabels, t);
+  const formError = localizedFormError(validationForm, permissions, t) || schedulePermissionFormError(schedulePermissionForm, permissions, routeAgents, scheduleLabels, t);
   const showFormError = attemptedSubmit && (formError || scheduleTargetError || cronError);
 
   useEffect(() => {
@@ -368,7 +371,7 @@ export function SchedulePage({
   }
 
   function schedulePayload(): CreateScheduledJobRequest {
-    const requestForm = formWithPermissionDefaults({ ...form, agentId: "" }, permissions);
+    const requestForm = effectiveScheduleForm(form, permissions);
     const jobRequest = buildCreateJobRequest(requestForm);
     return {
       ...jobRequest,
@@ -736,6 +739,7 @@ export function SchedulePage({
 }
 
 interface ScheduleMetricPoint {
+  actualProtocol?: string;
   agentId: string;
   agentLabel: string;
   agentTooltipLabel: string;
@@ -822,6 +826,9 @@ function scheduleHeaderParameters(schedule: ScheduledJob, t: Translate, agent?: 
   if (schedule.tool === "http" && args.method) {
     details.push(args.method.toUpperCase());
   }
+  if (schedule.tool === "http" && args.http_version) {
+    details.push(args.http_version === "auto" ? "HTTP Auto" : `HTTP/${args.http_version}`);
+  }
   if (schedule.tool === "dns" && args.type) {
     details.push(args.type.toUpperCase());
   }
@@ -893,6 +900,10 @@ function schedulePermissionFormError(
     }
   }
   return null;
+}
+
+function effectiveScheduleForm(form: JobFormState, permissions: Permissions | null): JobFormState {
+  return formWithPermissionDefaults({ ...form, agentId: "" }, permissions);
 }
 
 function scheduleIPVersionOptions(
@@ -1443,12 +1454,13 @@ function scheduleChartTooltipLines(
 ): string[] {
   const ip = chartTooltipIP(point.targetIP);
   const httpCode = chartTooltipHTTPCode(tool, point.status);
-  const ipLine = tool === "http" && httpCode ? [ip, httpCode].filter(Boolean).join(" · ") : ip;
+  const actualProtocol = tool && point.actualProtocol ? formatActualProtocol(tool, point.actualProtocol) : undefined;
+  const endpointLine = [ip, actualProtocol, httpCode].filter(Boolean).join(" · ") || undefined;
   const status = chartTooltipStatus(tool, point.status);
   const metricLine = status || formatValue(point.value);
   return [
     label,
-    ipLine,
+    endpointLine,
     metricLine,
     formatDateTime(new Date(point.timestamp).toISOString())
   ].filter((line): line is string => Boolean(line));
@@ -1543,6 +1555,7 @@ function buildScheduleMetricSeries(
         : ispProtocolProviderLabel({ isp: row.isp, provider: row.provider, fallback: agentId, protocols: row.protocols, t });
       const targetIP = chartTooltipIP(row.ip) || chartTooltipIP(job.resolved_target);
       const point: ScheduleMetricPoint = {
+        actualProtocol: row.actualProtocol,
         agentId,
         agentLabel: agentName,
         agentTooltipLabel,
@@ -1839,7 +1852,9 @@ function scheduleFormState(schedule: ScheduledJob): JobFormState {
     ipVersion: (schedule.ip_version ?? 0) as IPVersion,
     agentId: "",
     protocol: args.protocol === "auto" || args.protocol === "udp" || args.protocol === "tcp" ? args.protocol : "icmp",
-    method: args.method === "GET" ? "GET" : "HEAD",
+    port: schedule.tool === "ping" || schedule.tool === "traceroute" || schedule.tool === "mtr" ? args.port ?? "" : defaultFormState.port,
+    method: args.method === "HEAD" ? "HEAD" : "GET",
+    httpVersion: scheduleHTTPVersion(args.http_version),
     dnsType: scheduleDNSType(args.type),
     resolveOnAgent: schedule.resolve_on_agent ?? defaultFormState.resolveOnAgent
   };
@@ -1851,7 +1866,7 @@ function scheduleTargetForForm(schedule: ScheduledJob): string {
   }
   const parsed = parseHostPort(schedule.target);
   const host = parsed?.host || schedule.target;
-  const port = schedule.args?.port || parsed?.port || defaultFormState.port;
+  const port = schedule.args?.port || parsed?.port || "443";
   const formattedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
   return normalizeTargetForTool(`${formattedHost}:${port}`, "port");
 }
@@ -1908,4 +1923,9 @@ function isJobStatus(value: string | undefined): value is Job["status"] {
 function scheduleDNSType(value: string | undefined): JobFormState["dnsType"] {
   const allowed: JobFormState["dnsType"][] = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
   return allowed.includes(value as JobFormState["dnsType"]) ? (value as JobFormState["dnsType"]) : "A";
+}
+
+function scheduleHTTPVersion(value: string | undefined): JobFormState["httpVersion"] {
+  const allowed: JobFormState["httpVersion"][] = ["auto", "3", "2", "1.1"];
+  return allowed.includes(value as JobFormState["httpVersion"]) ? (value as JobFormState["httpVersion"]) : "1.1";
 }

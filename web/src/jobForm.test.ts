@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, supportsAgentTags, validateForm } from "./jobForm";
+import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, parseProbePort, supportsAgentTags, validateForm } from "./jobForm";
 
 describe("job form", () => {
+  it("defaults new HTTP diagnostics and schedules to automatic version negotiation", () => {
+    expect(defaultFormState.httpVersion).toBe("auto");
+    expect(buildCreateJobRequest({ ...defaultFormState, tool: "http", target: "https://example.com" })).toMatchObject({
+      args: { method: "HEAD", http_version: "auto" }
+    });
+  });
+
+  it("accepts only canonical probe ports", () => {
+    expect(parseProbePort("80")).toBe("80");
+    expect(parseProbePort("080")).toBeUndefined();
+    expect(parseProbePort("+80")).toBeUndefined();
+  });
+
   it("builds ping payload with optional network args", () => {
     expect(
       buildCreateJobRequest({
@@ -18,8 +31,18 @@ describe("job form", () => {
       ip_version: 4,
       resolve_on_agent: true,
       args: {
-        protocol: "tcp"
+        protocol: "tcp",
+        port: "443"
       }
+    });
+  });
+
+  it("does not submit a stale port for ICMP", () => {
+    expect(buildCreateJobRequest({ ...defaultFormState, target: "1.1.1.1", protocol: "icmp", port: "443" })).toEqual({
+      tool: "ping",
+      target: "1.1.1.1",
+      resolve_on_agent: true,
+      args: { protocol: "icmp" }
     });
   });
 
@@ -91,12 +114,23 @@ describe("job form", () => {
 
   it("can disable agent-side DNS resolution for non-DNS tools", () => {
     expect(
-      buildCreateJobRequest({ ...defaultFormState, tool: "http", target: "https://example.com", method: "GET", resolveOnAgent: false })
+      buildCreateJobRequest({ ...defaultFormState, tool: "http", target: "https://example.com", method: "GET", httpVersion: "auto", resolveOnAgent: false })
     ).toEqual({
       tool: "http",
       target: "https://example.com",
-      args: { method: "GET" },
+      args: { method: "GET", http_version: "auto" },
       resolve_on_agent: false
+    });
+  });
+
+  it("always submits the selected HTTP version", () => {
+    expect(
+      buildCreateJobRequest({ ...defaultFormState, tool: "http", target: "https://example.com", httpVersion: "1.1" })
+    ).toEqual({
+      tool: "http",
+      target: "https://example.com",
+      args: { method: "HEAD", http_version: "1.1" },
+      resolve_on_agent: true
     });
   });
 
@@ -162,7 +196,7 @@ describe("job form", () => {
   });
 
   it("builds form state from path and query parameters", () => {
-    const url = new URL("https://mtr.test/mtr?target=2606:4700:20::681a:c1f&agent_id=edge-1&ip_version=6&protocol=tcp&resolve_on_agent=0");
+    const url = new URL("https://mtr.test/mtr?target=2606:4700:20::681a:c1f&agent_id=edge-1&ip_version=6&protocol=tcp&port=8443&resolve_on_agent=0");
 
     expect(formStateFromLocation(url)).toMatchObject({
       tool: "mtr",
@@ -170,6 +204,7 @@ describe("job form", () => {
       agentId: "edge-1",
       ipVersion: 6,
       protocol: "tcp",
+      port: "8443",
       resolveOnAgent: false
     });
   });
@@ -187,7 +222,19 @@ describe("job form", () => {
   it("detects explicit tool URLs for readonly shared views", () => {
     expect(locationHasExplicitTool(new URL("https://mtr.test/traceroute?target=ipv6.ip.sb&job_id=job-1"))).toBe(true);
     expect(locationHasExplicitTool(new URL("https://mtr.test/jobs/job-1"))).toBe(false);
-    expect(locationHasExplicitTool(new URL("https://mtr.test/?tool=mtr&target=1.1.1.1"))).toBe(true);
+    expect(locationHasExplicitTool(new URL("https://mtr.test/?tool=mtr&target=1.1.1.1"))).toBe(false);
+  });
+
+  it("ignores removed URL aliases", () => {
+    expect(formStateFromLocation(new URL("https://mtr.test/ping?host=example.com&ipVersion=6&agentId=edge-1&httpVersion=3&dns_type=AAAA&remote_dns=0"))).toMatchObject({
+      tool: "ping",
+      target: "",
+      ipVersion: 0,
+      agentId: "",
+      httpVersion: "auto",
+      dnsType: "A",
+      resolveOnAgent: true
+    });
   });
 
   it("detects whether a share URL pins the target", () => {
@@ -215,18 +262,20 @@ describe("job form", () => {
         agentId: "edge-1",
         ipVersion: 4,
         protocol: "tcp",
+        port: "8443",
         resolveOnAgent: false
       })
-    ).toBe("/mtr?target=1.1.1.1&ip_version=4&agent_id=edge-1&protocol=tcp&resolve_on_agent=0");
+    ).toBe("/mtr?target=1.1.1.1&ip_version=4&agent_id=edge-1&protocol=tcp&port=8443&resolve_on_agent=0");
 
     expect(
       formStatePath({
         ...defaultFormState,
         tool: "http",
         target: "https://example.com",
-        method: "GET"
+        method: "GET",
+        httpVersion: "auto"
       })
-    ).toBe("/http?target=https%3A%2F%2Fexample.com&method=GET&resolve_on_agent=1");
+    ).toBe("/http?target=https%3A%2F%2Fexample.com&method=GET&http_version=auto&resolve_on_agent=1");
 
     expect(
       formStatePath({
@@ -265,5 +314,66 @@ describe("job form", () => {
       target: "example.com:8443",
       ipVersion: 4
     });
+
+    expect(
+      formStateFromJob({
+        id: "job-2",
+        tool: "traceroute",
+        target: "example.com",
+        args: { protocol: "udp", port: "33440" },
+        agent_id: "edge-1",
+        status: "succeeded",
+        created_at: "2026-04-28T00:00:00Z",
+        updated_at: "2026-04-28T00:00:01Z"
+      })
+    ).toMatchObject({
+      tool: "traceroute",
+      protocol: "udp",
+      port: "33440"
+    });
+  });
+
+  it("uses execution defaults for missing arguments instead of the current form", () => {
+    const current = {
+      ...defaultFormState,
+      protocol: "tcp" as const,
+      method: "HEAD" as const,
+      httpVersion: "2" as const,
+      dnsType: "AAAA" as const
+    };
+
+    expect(
+      formStateFromJob({
+        id: "missing-http-args",
+        tool: "http",
+        target: "https://example.com",
+        status: "succeeded",
+        created_at: "2026-04-28T00:00:00Z",
+        updated_at: "2026-04-28T00:00:01Z"
+      }, current)
+    ).toMatchObject({ method: "GET", httpVersion: "1.1" });
+
+    expect(
+      formStateFromJob({
+        id: "missing-route-args",
+        tool: "traceroute",
+        target: "1.1.1.1",
+        agent_id: "edge-1",
+        status: "succeeded",
+        created_at: "2026-04-28T00:00:00Z",
+        updated_at: "2026-04-28T00:00:01Z"
+      }, current)
+    ).toMatchObject({ protocol: "icmp" });
+
+    expect(
+      formStateFromJob({
+        id: "missing-dns-args",
+        tool: "dns",
+        target: "example.com",
+        status: "succeeded",
+        created_at: "2026-04-28T00:00:00Z",
+        updated_at: "2026-04-28T00:00:01Z"
+      }, current)
+    ).toMatchObject({ dnsType: "A" });
   });
 });

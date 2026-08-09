@@ -1,4 +1,5 @@
 import type { JobEvent, StreamEvent } from "./types";
+import type { JobStreamMessage } from "./api";
 
 const jobErrorTypeSet = new Set([
   "target_blocked",
@@ -22,7 +23,7 @@ export function mergeEvent(events: JobEvent[], event: JobEvent): JobEvent[] {
   );
 }
 
-export function jobEventFromStreamMessage(message: MessageEvent<string>, jobID: string, fallbackAgentID?: string): JobEvent {
+export function jobEventFromStreamMessage(message: JobStreamMessage, jobID: string, fallbackAgentID?: string): JobEvent {
   const payload = JSON.parse(message.data) as StreamPayload;
   const { agent_id: rawAgentID, ...eventPayload } = payload;
   const stream = typeof eventPayload.type === "string" && eventPayload.type ? eventPayload.type : message.type || "message";

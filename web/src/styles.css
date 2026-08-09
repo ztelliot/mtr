@@ -969,18 +969,20 @@ th.manage-table-actions {
 .query-grid {
   --query-agent-column: clamp(190px, 15vw, 260px);
   --query-action-column: clamp(96px, 8vw, 128px);
-  --query-small-column: clamp(108px, 9vw, 144px);
-  --query-target-column: minmax(260px, 1fr);
+  --query-option-column: clamp(108px, 6.5vw, 116px);
+  --query-switch-column: clamp(92px, 5vw, 100px);
+  --query-target-column: minmax(220px, 1fr);
   align-items: end;
   display: grid;
-  column-gap: 24px;
+  column-gap: clamp(10px, 1vw, 16px);
   row-gap: 20px;
   grid-template-columns:
     var(--query-target-column)
-    var(--query-small-column)
-    var(--query-small-column)
+    var(--query-option-column)
+    var(--query-option-column)
+    var(--query-option-column)
     var(--query-agent-column)
-    var(--query-small-column)
+    var(--query-switch-column)
     var(--query-action-column);
   margin-bottom: 0;
 }
@@ -1001,13 +1003,23 @@ th.manage-table-actions {
   grid-column: 3;
 }
 
+.http-version-field,
+.probe-port-field {
+  grid-column: 4;
+}
+
 .query-grid.tool-dns .dynamic-field {
   grid-column: 2;
 }
 
 .agent-field,
 .agent-tags-field {
-  grid-column: 4;
+  grid-column: 5;
+}
+
+.query-grid :is(.ip-version-field, .dynamic-field) .mantine-Select-input {
+  padding-left: 10px;
+  padding-right: 26px;
 }
 
 .target-input input,
@@ -1074,7 +1086,7 @@ th.manage-table-actions {
   color: light-dark(#111827, #f4f7fb);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 20px;
-  grid-column: 6;
+  grid-column: 7;
   justify-self: end;
   height: 56px;
   min-width: 0;
@@ -1084,7 +1096,7 @@ th.manage-table-actions {
 
 .remote-dns-field {
   align-self: end;
-  grid-column: 5;
+  grid-column: 6;
 }
 
 .remote-dns-field .mantine-InputWrapper-input {
@@ -1238,6 +1250,11 @@ th.manage-table-actions {
   width: 38px;
 }
 
+.result-table .compact-result-table .protocol-column {
+  min-width: 64px;
+  width: 72px;
+}
+
 .result-table .compact-result-table .time-column {
   min-width: 64px;
   width: 72px;
@@ -1309,6 +1326,11 @@ th.manage-table-actions {
 .result-table .sent-column {
   min-width: 52px;
   width: 58px;
+}
+
+.result-table .protocol-column {
+  min-width: 84px;
+  width: 96px;
 }
 
 .result-table .time-column {
@@ -1422,12 +1444,12 @@ th.manage-table-actions {
 .schedule-form-grid {
   --schedule-name-column: clamp(100px, 8vw, 140px);
   --schedule-tool-column: clamp(82px, 6vw, 104px);
-  --schedule-target-column: clamp(156px, 13vw, 240px);
-  --schedule-small-column: clamp(88px, 6vw, 112px);
+  --schedule-target-column: minmax(220px, 1fr);
+  --schedule-small-column: clamp(84px, 5.5vw, 104px);
   --schedule-agent-column: clamp(160px, 12vw, 220px);
   align-items: end;
   display: grid;
-  column-gap: 10px;
+  column-gap: 8px;
   row-gap: 16px;
   grid-template-columns:
     var(--schedule-name-column)
@@ -1436,9 +1458,8 @@ th.manage-table-actions {
     var(--schedule-small-column)
     var(--schedule-small-column)
     var(--schedule-small-column)
-    var(--schedule-agent-column)
-    minmax(0, 1fr)
-    max-content;
+    var(--schedule-small-column)
+    var(--schedule-agent-column);
 }
 
 .schedule-form-grid > * {
@@ -1474,7 +1495,7 @@ th.manage-table-actions {
 }
 
 .schedule-label-field {
-  grid-column: 7 / span 1;
+  grid-column: 8;
 }
 
 .schedule-label-field {
@@ -1569,13 +1590,10 @@ th.manage-table-actions {
 
 .schedule-controls-group {
   gap: 18px;
+  grid-column: 1 / -1;
   justify-content: flex-end;
   justify-self: end;
   max-width: 100%;
-}
-
-.schedule-controls-group.dns-controls {
-  gap: 18px;
 }
 
 .schedule-switch-stack {
@@ -1656,22 +1674,16 @@ th.manage-table-actions {
   min-height: 56px;
 }
 
-@media (min-width: 1081px) {
-  .schedule-controls-group {
-    grid-column: 9;
-  }
-}
-
 @container (max-width: 1900px) {
   .schedule-form-grid {
+    column-gap: 6px;
     grid-template-columns:
-      minmax(96px, 1fr)
-      minmax(82px, 1fr)
-      minmax(150px, 2fr)
-      minmax(82px, 1fr)
-      minmax(82px, 1fr)
-      minmax(82px, 1fr)
-      minmax(180px, 240px);
+      minmax(76px, 0.9fr)
+      minmax(68px, 0.72fr)
+      minmax(180px, 2.6fr)
+      minmax(84px, 0.8fr)
+      repeat(3, minmax(92px, 0.75fr))
+      minmax(132px, 1.5fr);
   }
 
   .schedule-name-field {
@@ -1703,11 +1715,52 @@ th.manage-table-actions {
   }
 
   .schedule-label-field {
-    grid-column: 7;
+    grid-column: 8;
+  }
+
+  .schedule-controls-group {
+    gap: 10px;
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
+  .schedule-switch-stack {
+    min-width: 120px;
+  }
+
+  .schedule-switch-field {
+    column-gap: 8px;
+    grid-template-columns: minmax(64px, max-content) max-content;
+  }
+}
+
+.schedule-form-grid .http-version-field,
+.schedule-form-grid .probe-port-field {
+  grid-column: 7;
+}
+
+@container (max-width: 1180px) {
+  .schedule-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedule-name-field,
+  .schedule-tool-field,
+  .schedule-cron-field,
+  .schedule-ip-field,
+  .schedule-form-grid .dynamic-field,
+  .schedule-form-grid.tool-dns .dynamic-field,
+  .schedule-label-field {
+    grid-column: auto;
+  }
+
+  .schedule-target-field {
+    grid-column: span 2;
   }
 
   .schedule-controls-group {
     grid-column: 1 / -1;
+    justify-content: flex-end;
     justify-self: end;
   }
 }
@@ -2133,6 +2186,29 @@ th.manage-table-actions {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 18px;
   line-height: 1.35;
+}
+
+.mtr-target-value {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.mtr-target-value .geoip-cell {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.mtr-target-protocol {
+  border-left: 1px solid light-dark(#e5e7eb, #343943);
+  color: inherit;
+  flex: 0 0 auto;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  margin-left: auto;
+  padding-left: 14px;
+  white-space: nowrap;
 }
 
 .mtr-agent-value {
@@ -2894,7 +2970,7 @@ body.debug-pixel-theme .page {
   }
 
   .schedule-controls-group {
-    grid-column: 2;
+    grid-column: 1 / -1;
     justify-content: flex-end;
     justify-self: end;
   }
@@ -3202,6 +3278,7 @@ body.debug-pixel-theme .page {
 
   .schedule-controls-group {
     grid-column: auto;
+    flex-wrap: wrap;
     gap: 12px;
     justify-content: flex-end;
     width: 100%;

@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { defaultFormState } from "./jobForm";
-import { dnsTypeOptions, filterAgentsByPermissions, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, toolAllowed, toolAllowedForAgent } from "./permissions";
+import { dnsTypeOptions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, httpVersionOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, toolAllowed, toolAllowedForAgent } from "./permissions";
 import type { Agent, Permissions } from "./types";
 
 const fullPermissions: Permissions = {
   tools: {
     dns: { allowed_args: { type: "A,AAAA,CNAME,MX,TXT,NS" }, ip_versions: [0, 4, 6], requires_agent: false },
-    http: { allowed_args: { method: "GET,HEAD" }, ip_versions: [0, 4, 6], requires_agent: false },
-    mtr: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true },
+    http: { allowed_args: { method: "GET,HEAD", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false },
+    mtr: { allowed_args: { port: "1-65535", protocol: "auto,icmp,udp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true },
     ping: { allowed_args: { port: "1-65535", protocol: "auto,icmp,udp,tcp" }, ip_versions: [0, 4, 6], requires_agent: false },
     port: { allowed_args: { port: "1-65535" }, ip_versions: [0, 4, 6], requires_agent: false },
-    traceroute: { allowed_args: { port: "1-65535", protocol: "icmp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
+    traceroute: { allowed_args: { port: "1-65535", protocol: "auto,icmp,udp,tcp" }, ip_versions: [0, 4, 6], requires_agent: true }
   },
   schedule_access: "write",
   manage_access: "write"
@@ -25,6 +25,8 @@ describe("permission helpers", () => {
   it("treats allowed args as backend CSV rules", () => {
     expect(protocolOptions(fullPermissions, "ping").map((option) => option.value)).toEqual(["auto", "icmp", "udp", "tcp"]);
     expect(httpMethodOptions(fullPermissions).map((option) => option.value)).toEqual(["HEAD", "GET"]);
+    expect(httpVersionOptions(fullPermissions).map((option) => option.value)).toEqual(["auto", "3", "2", "1.1"]);
+    expect(httpVersionOptions(fullPermissions).map((option) => option.label)).toEqual(["Auto", "H3", "H2", "H1"]);
     expect(dnsTypeOptions(fullPermissions)).toEqual(["A", "AAAA", "CNAME", "MX", "TXT", "NS"]);
   });
 
@@ -39,6 +41,34 @@ describe("permission helpers", () => {
 
     expect(httpMethodOptions(inherited).map((option) => option.value)).toEqual(["HEAD", "GET"]);
     expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", method: "GET" }, inherited, agents, testTranslate)).toBeNull();
+  });
+
+  it("requires HTTP version permission explicitly", () => {
+    const methodOnly = {
+      ...fullPermissions,
+      tools: {
+        ...fullPermissions.tools,
+        http: { allowed_args: { method: "GET,HEAD" }, ip_versions: [0, 4, 6], requires_agent: false }
+      }
+    } satisfies Permissions;
+
+    expect(httpVersionOptions(methodOnly)).toEqual([]);
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", httpVersion: "1.1" }, methodOnly, agents, testTranslate)).toBe("errors.optionNotAllowed");
+    expect(permissionFormError({ ...defaultFormState, tool: "http", target: "https://example.com", httpVersion: "auto" }, methodOnly, agents, testTranslate)).toBe("errors.optionNotAllowed");
+  });
+
+  it("only exposes auto when every concrete fallback is allowed", () => {
+    const restricted = {
+      ...fullPermissions,
+      tools: {
+        ...fullPermissions.tools,
+        ping: { allowed_args: { protocol: "auto,icmp,udp", port: "1-65535" }, ip_versions: [0, 4, 6], requires_agent: false },
+        http: { allowed_args: { method: "GET,HEAD", http_version: "auto,3,2" }, ip_versions: [0, 4, 6], requires_agent: false }
+      }
+    } satisfies Permissions;
+
+    expect(protocolOptions(restricted, "ping").map((option) => option.value)).toEqual(["icmp", "udp"]);
+    expect(httpVersionOptions(restricted).map((option) => option.value)).toEqual(["3", "2"]);
   });
 
   it("allows a ping form with CSV protocol permissions", () => {
@@ -71,6 +101,29 @@ describe("permission helpers", () => {
     ).toBe("errors.optionNotAllowed");
   });
 
+  it("validates network probe ports including protocol defaults", () => {
+    const tcp443Only = {
+      ...fullPermissions,
+      tools: {
+        ...fullPermissions.tools,
+        ping: { allowed_args: { protocol: "tcp", port: "443" }, ip_versions: [0, 4, 6], requires_agent: false }
+      }
+    } satisfies Permissions;
+
+    expect(permissionFormError(
+      { ...defaultFormState, tool: "ping", target: "1.1.1.1", protocol: "tcp" },
+      tcp443Only,
+      agents,
+      testTranslate
+    )).toBe("errors.optionNotAllowed");
+    expect(permissionFormError(
+      { ...defaultFormState, tool: "ping", target: "1.1.1.1", protocol: "tcp", port: "443" },
+      tcp443Only,
+      agents,
+      testTranslate
+    )).toBeNull();
+  });
+
   it("does not allow tools before permissions load", () => {
     expect(toolAllowed(null, "ping")).toBe(false);
   });
@@ -93,7 +146,7 @@ describe("permission helpers", () => {
   it("uses per-agent effective tool permissions when an agent is selected", () => {
     const scopedAgents = [
       testAgent("edge-1", ["blue"], {
-        http: { allowed_args: { method: "HEAD" }, ip_versions: [0, 4, 6], requires_agent: false }
+        http: { allowed_args: { method: "HEAD", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
       })
     ];
     expect(toolAllowedForAgent(fullPermissions, "http", scopedAgents[0])).toBe(true);
@@ -154,6 +207,17 @@ describe("permission helpers", () => {
     }, 1);
 
     expect(ipVersionOptions(fullPermissions, "ping", v4OnlyAgent).map((option) => option.value)).toEqual(["0", "4"]);
+
+    const invalidAgent = testAgent("edge-zero", ["blue"], {
+      ping: { allowed_args: { protocol: "icmp,tcp" }, requires_agent: false }
+    }, 0);
+    expect(ipVersionOptions(fullPermissions, "ping", invalidAgent)).toEqual([]);
+    expect(permissionFormError(
+      { ...defaultFormState, tool: "ping", target: "1.1.1.1", ipVersion: 0, agentId: "edge-zero" },
+      fullPermissions,
+      [invalidAgent],
+      testTranslate
+    )).toBe("errors.ipVersionNotAllowed");
   });
 
   it("aligns target validation with backend policy rules", () => {

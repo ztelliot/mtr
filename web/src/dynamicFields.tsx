@@ -1,5 +1,5 @@
-import { Input, Select, Switch } from "@mantine/core";
-import { dnsTypeOptions, effectivePermissions, httpMethodOptions, protocolOptions, resolveOnAgentValue } from "./permissions";
+import { Input, Select, Switch, TextInput } from "@mantine/core";
+import { dnsTypeOptions, effectivePermissions, httpMethodOptions, httpVersionOptions, protocolOptions, resolveOnAgentValue } from "./permissions";
 import type { Agent, JobFormState, Permissions, Tool } from "./types";
 
 export function DynamicFields({
@@ -33,36 +33,65 @@ export function DynamicFields({
   }
   if (form.tool === "http") {
     const methods = httpMethodOptions(permissions, selectedAgent);
-    if (methods.length <= 1) {
-      return null;
-    }
+    const versions = httpVersionOptions(permissions, selectedAgent);
     return (
-      <Select
-        className="dynamic-field"
-        checkIconPosition="left"
-        disabled={disabled}
-        label={t("form.method")}
-        data={methods}
-        value={form.method}
-        onChange={(value) => updateForm("method", (value ?? "HEAD") as JobFormState["method"])}
-      />
+      <>
+        {methods.length > 0 && (
+          <Select
+            className="dynamic-field http-method-field"
+            checkIconPosition="left"
+            disabled={disabled || methods.length === 1}
+            label={t("form.method")}
+            data={methods}
+            value={form.method}
+            onChange={(value) => updateForm("method", (value ?? methods[0].value) as JobFormState["method"])}
+          />
+        )}
+        {versions.length > 0 && (
+          <Select
+            className="dynamic-field http-version-field"
+            checkIconPosition="left"
+            disabled={disabled || versions.length === 1}
+            label={t("form.httpVersion")}
+            data={versions}
+            value={form.httpVersion}
+            onChange={(value) => updateForm("httpVersion", (value ?? versions[0].value) as JobFormState["httpVersion"])}
+          />
+        )}
+      </>
     );
   }
   if (form.tool === "port") {
     return null;
   }
   const protocols = protocolOptions(permissions, form.tool, selectedAgent);
-  return protocols.length > 1 ? (
-    <Select
-      className="dynamic-field"
-      checkIconPosition="left"
-      disabled={disabled}
-      label={t("form.protocol")}
-      data={protocols}
-      value={form.protocol}
-      onChange={(value) => updateForm("protocol", (value ?? "icmp") as JobFormState["protocol"])}
-    />
-  ) : null;
+  if (protocols.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      <Select
+        className="dynamic-field protocol-field"
+        checkIconPosition="left"
+        disabled={disabled || protocols.length === 1}
+        label={t("form.protocol")}
+        data={protocols}
+        value={form.protocol}
+        onChange={(value) => updateForm("protocol", (value ?? protocols[0].value) as JobFormState["protocol"])}
+      />
+      {form.protocol !== "icmp" && (
+        <TextInput
+          className="dynamic-field probe-port-field"
+          disabled={disabled}
+          inputMode="numeric"
+          label={t("form.port")}
+          placeholder={form.protocol === "udp" ? "33434" : form.protocol === "tcp" ? "80" : "80 / 33434"}
+          value={form.port}
+          onChange={(event) => updateForm("port", event.currentTarget.value)}
+        />
+      )}
+    </>
+  );
 }
 
 export function RemoteDNSSwitch({

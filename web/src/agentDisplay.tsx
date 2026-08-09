@@ -52,7 +52,7 @@ export function agentLocationLabel(label: string, protocols?: number): string {
 }
 
 function agentProtocolSuffix(protocols?: number): "v4" | "v6" | null {
-  const mask = protocols || 3;
+  const mask = protocols ?? 0;
   const hasV4 = (mask & 1) !== 0;
   const hasV6 = (mask & 2) !== 0;
   if (hasV4 && !hasV6) {

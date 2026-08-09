@@ -1,4 +1,5 @@
-import { parseHostPort, requiresAgent } from "./jobForm";
+import { formatHTTPVersion } from "./formatters";
+import { parseHostPort, parseProbePort, requiresAgent } from "./jobForm";
 import type { Agent, IPVersion, JobFormState, PermissionTool, Permissions, Tool } from "./types";
 
 const hostnamePattern = /^[a-zA-Z0-9.-]{1,253}$/;
@@ -77,7 +78,7 @@ function intersectPermissionTool(tool: Tool, tokenTool: PermissionTool, agentToo
   if (resolveOnAgent === "conflict") {
     return null;
   }
-  const allowedArgs = intersectAllowedArgs(tokenTool.allowed_args, agentTool.allowed_args);
+  const allowedArgs = intersectAllowedArgs(tool, tokenTool.allowed_args, agentTool.allowed_args);
   const ipVersions = intersectIPVersions(tokenTool.ip_versions, agentTool.ip_versions);
   const merged: PermissionTool = {
     requires_agent: tokenTool.requires_agent || agentTool.requires_agent,
@@ -108,7 +109,7 @@ function intersectIPVersions(left: IPVersion[] | undefined, right: IPVersion[] |
   return left.filter((version) => right.includes(version));
 }
 
-function intersectAllowedArgs(left: Record<string, string> | undefined, right: Record<string, string> | undefined): Record<string, string> | undefined {
+function intersectAllowedArgs(_tool: Tool, left: Record<string, string> | undefined, right: Record<string, string> | undefined): Record<string, string> | undefined {
   if (left === undefined) {
     return right ? { ...right } : undefined;
   }
@@ -183,11 +184,20 @@ export function permissionFormError(
   if ((form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") && !permissionAllowsArg(effective, form.tool, "protocol", form.protocol)) {
     return t("errors.optionNotAllowed", { option: t("form.protocol") });
   }
+  if (form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") {
+    const ports = probePortsForForm(form);
+    if (ports === null || ports.some((port) => !permissionAllowsArg(effective, form.tool, "port", port))) {
+      return t("errors.optionNotAllowed", { option: t("form.port") });
+    }
+  }
   if (form.tool === "dns" && !permissionAllowsArg(effective, "dns", "type", form.dnsType)) {
     return t("errors.optionNotAllowed", { option: t("form.recordType") });
   }
   if (form.tool === "http" && !permissionAllowsArg(effective, "http", "method", form.method)) {
     return t("errors.optionNotAllowed", { option: t("form.method") });
+  }
+  if (form.tool === "http" && !permissionAllowsArg(effective, "http", "http_version", form.httpVersion)) {
+    return t("errors.optionNotAllowed", { option: t("form.httpVersion") });
   }
   if (form.tool === "port") {
     const parsed = parseHostPort(form.target);
@@ -210,6 +220,9 @@ export function localizedFormError(
   if (form.tool === "port" && !parseHostPort(form.target)) {
     return t("errors.portRequired");
   }
+  if ((form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") && form.protocol !== "icmp" && form.port.trim() && !parseProbePort(form.port)) {
+    return t("errors.optionNotAllowed", { option: t("form.port") });
+  }
   const targetError = targetFormError(form, t);
   if (targetError) {
     return targetError;
@@ -221,8 +234,32 @@ export function localizedFormError(
 }
 
 export function formWithPermissionDefaults(form: JobFormState, permissions: Permissions | null, agents: Agent[] = []): JobFormState {
-  const forcedRemoteDNS = effectivePermissions(permissions, findAgent(agents, form.agentId))?.tools?.[form.tool]?.resolve_on_agent;
-  return forcedRemoteDNS === undefined ? form : { ...form, resolveOnAgent: forcedRemoteDNS };
+  const agent = findAgent(agents, form.agentId);
+  const effective = effectivePermissions(permissions, agent);
+  const forcedRemoteDNS = effective?.tools?.[form.tool]?.resolve_on_agent;
+  let next = forcedRemoteDNS === undefined ? form : { ...form, resolveOnAgent: forcedRemoteDNS };
+
+  if (form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") {
+    const options = protocolOptions(effective, form.tool);
+    if (options.length > 0 && !options.some((option) => option.value === form.protocol)) {
+      next = { ...next, protocol: options[0].value };
+    }
+  } else if (form.tool === "dns") {
+    const options = dnsTypeOptions(effective);
+    if (options.length > 0 && !options.includes(form.dnsType)) {
+      next = { ...next, dnsType: options[0] as JobFormState["dnsType"] };
+    }
+  } else if (form.tool === "http") {
+    const methods = httpMethodOptions(effective);
+    const versions = httpVersionOptions(effective);
+    if (methods.length > 0 && !methods.some((option) => option.value === form.method)) {
+      next = { ...next, method: methods[0].value };
+    }
+    if (versions.length > 0 && !versions.some((option) => option.value === form.httpVersion)) {
+      next = { ...next, httpVersion: versions[0].value };
+    }
+  }
+  return next;
 }
 
 export function resolveOnAgentValue(permissions: Permissions | null, form: JobFormState, agents: Agent[] = []): boolean {
@@ -265,6 +302,16 @@ export function httpMethodOptions(permissions: Permissions | null, agent?: Agent
     { value: "GET", label: "GET" }
   ];
   return options.filter((option) => permissionAllowsArg(effectivePermissions(permissions, agent), "http", "method", option.value));
+}
+
+export function httpVersionOptions(permissions: Permissions | null, agent?: Agent | null): Array<{ value: JobFormState["httpVersion"]; label: string }> {
+  const options: Array<{ value: JobFormState["httpVersion"]; label: string }> = [
+    { value: "auto", label: formatHTTPVersion("auto") },
+    { value: "3", label: formatHTTPVersion("3") },
+    { value: "2", label: formatHTTPVersion("2") },
+    { value: "1.1", label: formatHTTPVersion("1.1") }
+  ];
+  return options.filter((option) => permissionAllowsArg(effectivePermissions(permissions, agent), "http", "http_version", option.value));
 }
 
 function agentAllowedByPermissions(permissions: Permissions | null, agentID: string, agents: Agent[] = []): boolean {
@@ -383,10 +430,13 @@ function literalTargetFormError(
 }
 
 function agentSupportsIPVersion(agent: Agent, version: IPVersion): boolean {
+  const protocols = agent.protocols ?? 0;
+  if (protocols === 0) {
+    return false;
+  }
   if (version === 0) {
     return true;
   }
-  const protocols = agent.protocols || 3;
   const required = version === 4 ? 1 : 2;
   return (protocols & required) !== 0;
 }
@@ -545,7 +595,42 @@ function permissionAllowsArg(permissions: Permissions | null, tool: Tool, arg: s
     return false;
   }
   const rule = toolPermission.allowed_args[arg];
-  return arg === "port" ? portAllowed(rule, value) : csvValueAllowed(rule, value);
+  if (arg === "port") {
+    return portAllowed(rule, value);
+  }
+  if (!csvValueAllowed(rule, value)) {
+    return false;
+  }
+  if (value !== "auto") {
+    return true;
+  }
+  const candidates = arg === "protocol" && (tool === "ping" || tool === "mtr" || tool === "traceroute")
+    ? ["icmp", "udp", "tcp"]
+    : tool === "http" && arg === "http_version"
+      ? ["3", "2", "1.1"]
+      : [];
+  const values = csvValues(rule);
+  return candidates.length === 0 || candidates.every((candidate) => values.includes(candidate));
+}
+
+function probePortsForForm(form: JobFormState): string[] | null {
+  if (form.protocol === "icmp") {
+    return [];
+  }
+  if (form.port.trim()) {
+    const port = parseProbePort(form.port);
+    return port ? [port] : null;
+  }
+  switch (form.protocol) {
+    case "tcp":
+      return ["80"];
+    case "udp":
+      return ["33434"];
+    case "auto":
+      return ["33434", "80"];
+    default:
+      return [];
+  }
 }
 
 function csvValueAllowed(rule: string | undefined, value: string): boolean {

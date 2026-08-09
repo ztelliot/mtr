@@ -69,8 +69,8 @@ export interface RuntimeSettings {
   http_timeout_sec: number;
   dns_timeout_sec: number;
   resolve_timeout_sec: number;
-  http_invoke_attempts: number;
-  http_max_health_interval_sec: number;
+  outbound_invoke_attempts: number;
+  outbound_max_health_interval_sec: number;
 }
 
 export interface SchedulerSettings {
@@ -169,14 +169,25 @@ export interface TLSSettings {
   ca_files?: string[];
   cert_file?: string;
   key_file?: string;
+  server_name?: string;
 }
 
-export interface HTTPAgentConfig {
+export interface OutboundAgentAuth {
+  type: "none" | "bearer" | "header" | "huaweicloud_aksk";
+  header?: string;
+  access_key?: string;
+  project_id?: string;
+  secret?: string;
+}
+
+export interface OutboundAgentConfig {
   id: string;
-  transport?: "http";
+  transport: "http" | "event";
   enabled: boolean;
-  base_url: string;
-  http_token?: string;
+  url: string;
+  auth: OutboundAgentAuth;
+  headers?: Record<string, string>;
+  event_response?: "direct" | "result_field";
   labels?: string[];
   tls?: TLSSettings;
   created_at?: string;
@@ -195,9 +206,9 @@ export interface AgentConfig {
 export type ManagedAgent = Omit<Agent, "tools"> & {
   tools?: Partial<Record<Tool, PermissionTool>>;
   capabilities?: Tool[];
-  transport: "grpc" | "http";
+  transport: "grpc" | "http" | "event";
   config?: AgentConfig;
-  http?: HTTPAgentConfig;
+  outbound?: OutboundAgentConfig;
 };
 
 export interface ManagedAgentLabelUpdate {
@@ -375,6 +386,7 @@ export interface JobFormState {
   protocol: "auto" | "icmp" | "udp" | "tcp";
   port: string;
   method: "HEAD" | "GET";
+  httpVersion: "auto" | "3" | "2" | "1.1";
   dnsType: "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "NS";
   resolveOnAgent: boolean;
 }

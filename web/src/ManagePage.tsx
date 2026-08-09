@@ -18,6 +18,7 @@ import {
   Tabs,
   TagsInput,
   Text,
+  Textarea,
   TextInput,
   Tooltip
 } from "@mantine/core";
@@ -27,14 +28,15 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { ApiClient } from "./api";
 import { errorMessage } from "./errors";
-import { formatDateTime } from "./formatters";
+import { formatDateTime, formatHTTPVersion } from "./formatters";
 import { canReadManage, canWriteManage } from "./permissions";
-import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, HTTPAgentConfig, Permissions, PolicySettings, RateLimitConfig, RegisterToken, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
+import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, OutboundAgentAuth, OutboundAgentConfig, Permissions, PolicySettings, RateLimitConfig, RegisterToken, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
 
 const tools: Tool[] = ["ping", "traceroute", "mtr", "http", "dns", "port"];
 const pingProtocolOptions = ["auto", "icmp", "udp", "tcp"];
-const routeProtocolOptions = ["icmp", "tcp"];
+const routeProtocolOptions = ["auto", "icmp", "udp", "tcp"];
 const methodOptions = ["GET", "HEAD"];
+const httpVersionOptions = ["auto", "3", "2", "1.1"];
 const dnsTypeOptions = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
 const ipVersionOptions: IPVersion[] = [0, 4, 6];
 const defaultPortRange = "1-65535";
@@ -47,8 +49,8 @@ const emptyRuntime: RuntimeSettings = {
   http_timeout_sec: 5,
   dns_timeout_sec: 5,
   resolve_timeout_sec: 3,
-  http_invoke_attempts: 3,
-  http_max_health_interval_sec: 300
+  outbound_invoke_attempts: 3,
+  outbound_max_health_interval_sec: 300
 };
 
 const emptyScheduler: SchedulerSettings = {
@@ -73,14 +75,16 @@ const emptySettings: ManagedSettings = {
   register_tokens: []
 };
 
-const emptyHTTPAgent: HTTPAgentConfig = {
+const emptyOutboundAgent: OutboundAgentConfig = {
   id: "",
   transport: "http",
   enabled: true,
-  base_url: "",
-  http_token: "",
+  url: "",
+  auth: { type: "bearer", secret: "" },
+  headers: {},
+  event_response: "direct",
   labels: [],
-  tls: { enabled: false, ca_files: [], cert_file: "", key_file: "" },
+  tls: { enabled: false, ca_files: [], cert_file: "", key_file: "", server_name: "" },
 };
 
 const emptyAPIToken: APITokenPermission = {
@@ -110,59 +114,69 @@ const emptyLabelConfig: LabelConfigSettings = {
 };
 
 export const __managePageTest = {
+  outboundAgentAuthForSave,
+  outboundCredentialScopeEqual,
   changedLabelAgents,
   customLabels,
   displayTokenToolScope,
+  effectiveAllowedArgs,
   effectiveAgentStatus,
-  httpAgentRequiredFieldsMissing,
+  outboundAgentRequiredFieldsMissing,
   labelSummaries,
-  managedHTTPAgentFromConfig,
+  managedOutboundAgentFromConfig,
   normalizeIPVersions,
+  parseOutboundHeaders,
   normalizeRegisterAgentIDs,
   registerTokenDraftChanged,
   normalizeToken,
   normalizeTokenToolScope,
   setPolicyEnabled,
   selectTokenTools,
+  updateAllowedArg,
+  withPolicyDefaults,
   withTokenDefaults
 };
 
 export function ManagePage({ client, permissions, t }: { client: ApiClient | null; permissions: Permissions | null; t: (key: string, options?: Record<string, unknown>) => string }) {
   const [settings, setSettings] = useState<ManagedSettings>(emptySettings);
   const [agents, setAgents] = useState<ManagedAgent[]>([]);
-  const [httpAgents, setHTTPAgents] = useState<ManagedAgent[]>([]);
+  const [outboundAgents, setOutboundAgents] = useState<ManagedAgent[]>([]);
   const [agentConfigForm, setAgentConfigForm] = useState<AgentConfig>(emptyAgentConfig);
-  const [httpAgentForm, setHTTPAgentForm] = useState<HTTPAgentConfig>(emptyHTTPAgent);
+  const [outboundAgentForm, setOutboundAgentForm] = useState<OutboundAgentConfig>(emptyOutboundAgent);
+  const [outboundHeadersJSON, setOutboundHeadersJSON] = useState("{}");
   const [tokenForm, setTokenForm] = useState<APITokenPermission>(emptyAPIToken);
   const [labelForm, setLabelForm] = useState<LabelConfigSettings>(emptyLabelConfig);
   const [labelNodes, setLabelNodes] = useState<string[]>([]);
   const [selectionLabels, setSelectionLabels] = useState<string[]>([]);
   const [editingAgentId, setEditingAgentId] = useState("");
-  const [editingHTTPAgentId, setEditingHTTPAgentId] = useState("");
+  const [editingOutboundAgentId, setEditingOutboundAgentId] = useState("");
+  const [editingOutboundAgentOriginal, setEditingOutboundAgentOriginal] = useState<OutboundAgentConfig | null>(null);
   const [editingTokenIndex, setEditingTokenIndex] = useState<number | null>(null);
   const [editingLabel, setEditingLabel] = useState("");
   const [editingOriginalLabel, setEditingOriginalLabel] = useState("");
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [httpAgentModalOpen, setHTTPAgentModalOpen] = useState(false);
+  const [outboundAgentModalOpen, setOutboundAgentModalOpen] = useState(false);
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [labelModalOpen, setLabelModalOpen] = useState(false);
   const [savingRegisterTokenID, setSavingRegisterTokenID] = useState<string | null>(null);
-  const [section, setSection] = useState("httpAgents");
+  const [section, setSection] = useState("outboundAgents");
   const [loading, setLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAgentConfig, setSavingAgentConfig] = useState(false);
-  const [savingHTTPAgent, setSavingHTTPAgent] = useState(false);
+  const [savingOutboundAgent, setSavingOutboundAgent] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const writable = canWriteManage(permissions);
-  const enabledHTTPAgents = useMemo(() => httpAgents.filter((agent) => agent.http?.enabled).length, [httpAgents]);
+  const enabledOutboundAgents = useMemo(() => outboundAgents.filter((agent) => agent.outbound?.enabled).length, [outboundAgents]);
   const enabledAgents = useMemo(() => agents.filter((agent) => !agent.config?.disabled).length, [agents]);
-  const allManagedAgents = useMemo(() => [...agents, ...httpAgents].sort((a, b) => a.id.localeCompare(b.id)), [agents, httpAgents]);
+  const allManagedAgents = useMemo(() => [...agents, ...outboundAgents].sort((a, b) => a.id.localeCompare(b.id)), [agents, outboundAgents]);
   const labelRows = useMemo(() => labelSummaries(allManagedAgents, settings.label_configs ?? {}), [allManagedAgents, settings.label_configs]);
   const nodeOptions = useMemo(() => allManagedAgents.map((agent) => ({ value: agent.id, label: nodeOptionLabel(agent) })), [allManagedAgents]);
   const labelOptions = useMemo(() => labelRows.map((row) => ({ value: row.label, label: `${row.label} (${row.count})` })), [labelRows]);
-  const httpAgentMissingFields = httpAgentRequiredFieldsMissing(httpAgentForm, editingHTTPAgentId, httpAgentModalOpen);
-  const httpAgentSubmitDisabled = !writable || httpAgentMissingFields.id || httpAgentMissingFields.baseURL || httpAgentMissingFields.token;
+  const outboundHeaders = parseOutboundHeaders(outboundHeadersJSON);
+  const outboundAgentCandidate = outboundAgentForSave(outboundAgentForm, outboundHeaders ?? outboundAgentForm.headers ?? {});
+  const outboundAgentMissingFields = outboundAgentRequiredFieldsMissing(outboundAgentCandidate, editingOutboundAgentId, outboundAgentModalOpen, editingOutboundAgentOriginal);
+  const outboundAgentSubmitDisabled = !writable || outboundHeaders === null || Object.values(outboundAgentMissingFields).some(Boolean);
   const accessOptions = useMemo(() => localizedAccessOptions(t), [t]);
 
   useEffect(() => {
@@ -173,7 +187,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
 
   useEffect(() => {
     if (!writable && section === "tokens") {
-      setSection("httpAgents");
+      setSection("outboundAgents");
     }
   }, [section, writable]);
 
@@ -202,7 +216,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         register_tokens: registerTokens.tokens ?? []
       }));
       setAgents(nextAgents.filter((agent) => managedAgentType(agent) === "grpc"));
-      setHTTPAgents(nextAgents.filter((agent) => managedAgentType(agent) === "http"));
+      setOutboundAgents(nextAgents.filter((agent) => managedAgentType(agent) !== "grpc"));
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -228,43 +242,47 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
   }
 
-  async function saveHTTPAgent(event: FormEvent) {
+  async function saveOutboundAgent(event: FormEvent) {
     event.preventDefault();
     if (!client || !writable) {
       return;
     }
-    const id = (editingHTTPAgentId || httpAgentForm.id).trim();
-    const baseURL = httpAgentForm.base_url.trim();
-    const httpToken = httpAgentForm.http_token?.trim() ?? "";
-    if (!id || !baseURL || !httpToken) {
+    const headers = parseOutboundHeaders(outboundHeadersJSON);
+    if (headers === null) {
       return;
     }
-    setSavingHTTPAgent(true);
+    const payload = outboundAgentForSave({
+      ...outboundAgentForm,
+      id: editingOutboundAgentId || outboundAgentForm.id
+    }, headers);
+    if (Object.values(outboundAgentRequiredFieldsMissing(payload, editingOutboundAgentId, true, editingOutboundAgentOriginal)).some(Boolean)) {
+      return;
+    }
+    setSavingOutboundAgent(true);
     try {
-      const payload = { ...httpAgentForm, id, transport: "http" as const, base_url: baseURL, http_token: httpToken };
-      const saved = withHTTPAgentDefaults(editingHTTPAgentId ? await client.updateHTTPAgent(editingHTTPAgentId, payload) : await client.createHTTPAgent(payload));
-      setHTTPAgents((current) => upsertManagedHTTPAgent(current, saved));
-      closeHTTPAgentModal();
-      notifications.show({ color: "green", message: t("manage.httpAgentSaved") });
+      const saved = withOutboundAgentDefaults(editingOutboundAgentId ? await client.updateOutboundAgent(editingOutboundAgentId, payload) : await client.createOutboundAgent(payload));
+      setOutboundAgents((current) => upsertManagedOutboundAgent(current, saved));
+      closeOutboundAgentModal();
+      notifications.show({ color: "green", message: t("manage.outboundAgentSaved") });
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setSavingHTTPAgent(false);
+      setSavingOutboundAgent(false);
     }
   }
 
-  async function deleteHTTPAgent(id: string) {
+  async function deleteOutboundAgent(id: string) {
     if (!client || !writable) {
       return;
     }
     try {
       await client.deleteManagedAgent(id);
-      setHTTPAgents((current) => current.filter((agent) => agent.id !== id));
-      if (editingHTTPAgentId === id) {
-        closeHTTPAgentModal();
+      setOutboundAgents((current) => current.filter((agent) => agent.id !== id));
+      if (editingOutboundAgentId === id) {
+        closeOutboundAgentModal();
       }
-      notifications.show({ color: "green", message: t("manage.httpAgentDeleted") });
+      notifications.show({ color: "green", message: t("manage.outboundAgentDeleted") });
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -469,22 +487,29 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
   }
 
-  function openNewHTTPAgentModal() {
-    setEditingHTTPAgentId("");
-    setHTTPAgentForm(withHTTPAgentDefaults(emptyHTTPAgent));
-    setHTTPAgentModalOpen(true);
+  function openNewOutboundAgentModal() {
+    setEditingOutboundAgentId("");
+    setEditingOutboundAgentOriginal(null);
+    setOutboundAgentForm(withOutboundAgentDefaults(emptyOutboundAgent));
+    setOutboundHeadersJSON(formatOutboundHeaders({}));
+    setOutboundAgentModalOpen(true);
   }
 
-  function editHTTPAgent(node: HTTPAgentConfig) {
-    setEditingHTTPAgentId(node.id);
-    setHTTPAgentForm(withHTTPAgentDefaults(node));
-    setHTTPAgentModalOpen(true);
+  function editOutboundAgent(node: OutboundAgentConfig) {
+    const original = withOutboundAgentDefaults(node);
+    setEditingOutboundAgentId(node.id);
+    setEditingOutboundAgentOriginal(original);
+    setOutboundAgentForm(withOutboundAgentDefaults(node));
+    setOutboundHeadersJSON(formatOutboundHeaders(node.headers));
+    setOutboundAgentModalOpen(true);
   }
 
-  function closeHTTPAgentModal() {
-    setHTTPAgentModalOpen(false);
-    setEditingHTTPAgentId("");
-    setHTTPAgentForm(withHTTPAgentDefaults(emptyHTTPAgent));
+  function closeOutboundAgentModal() {
+    setOutboundAgentModalOpen(false);
+    setEditingOutboundAgentId("");
+    setEditingOutboundAgentOriginal(null);
+    setOutboundAgentForm(withOutboundAgentDefaults(emptyOutboundAgent));
+    setOutboundHeadersJSON(formatOutboundHeaders({}));
   }
 
   function editAgent(agent: ManagedAgent) {
@@ -570,9 +595,9 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
       }
     };
     const nextAgents = applyLabelMembership(agents, normalizedLabel, labelNodes);
-    const nextHTTPAgents = applyLabelMembership(httpAgents, normalizedLabel, labelNodes);
+    const nextOutboundAgents = applyLabelMembership(outboundAgents, normalizedLabel, labelNodes);
     try {
-      await persistLabelChanges(nextSettings, nextAgents, nextHTTPAgents, t("manage.labelSaved"));
+      await persistLabelChanges(nextSettings, nextAgents, nextOutboundAgents, t("manage.labelSaved"));
       closeLabelModal();
     } catch {
       // persistLabelChanges already surfaced the error.
@@ -585,9 +610,9 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
     const { [label]: _removed, ...labelConfigs } = settings.label_configs ?? {};
     const nextAgents = applyLabelMembership(agents, label, []);
-    const nextHTTPAgents = applyLabelMembership(httpAgents, label, []);
+    const nextOutboundAgents = applyLabelMembership(outboundAgents, label, []);
     try {
-      await persistLabelChanges({ ...settings, label_configs: labelConfigs }, nextAgents, nextHTTPAgents, t("manage.labelDeleted"));
+      await persistLabelChanges({ ...settings, label_configs: labelConfigs }, nextAgents, nextOutboundAgents, t("manage.labelDeleted"));
       if (editingLabel === label) {
         closeLabelModal();
       }
@@ -596,27 +621,27 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
     }
   }
 
-  async function persistLabelChanges(nextSettings: ManagedSettings, nextAgents: ManagedAgent[], nextHTTPAgents: ManagedAgent[], message: string) {
+  async function persistLabelChanges(nextSettings: ManagedSettings, nextAgents: ManagedAgent[], nextOutboundAgents: ManagedAgent[], message: string) {
     if (!client || !writable) {
       return;
     }
     setSavingSettings(true);
     try {
       const changedAgents = changedLabelAgents(agents, nextAgents);
-      const changedHTTPAgents = changedLabelHTTPAgents(httpAgents, nextHTTPAgents);
+      const changedOutboundAgents = changedLabelOutboundAgents(outboundAgents, nextOutboundAgents);
       const labelUpdates: ManagedAgentLabelUpdate[] = [
         ...changedAgents.map((agent) => ({ id: agent.id, labels: customLabels(agent.labels) })),
-        ...changedHTTPAgents.map((agent) => ({ id: agent.id, labels: customLabels(agent.labels) }))
+        ...changedOutboundAgents.map((agent) => ({ id: agent.id, labels: customLabels(agent.labels) }))
       ];
       const saved = await client.updateManagedLabelsAndAgents({
         revision: nextSettings.revision,
         label_configs: nextSettings.label_configs ?? {},
         agents: labelUpdates
       });
-      const savedAgents = saved.agents.length > 0 ? saved.agents : [...nextAgents, ...nextHTTPAgents];
+      const savedAgents = saved.agents.length > 0 ? saved.agents : [...nextAgents, ...nextOutboundAgents];
       setSettings((current) => withSettingsDefaults({ ...current, revision: saved.revision, updated_at: saved.updated_at, label_configs: saved.label_configs ?? {} }));
       setAgents(savedAgents.filter((agent) => managedAgentType(agent) === "grpc"));
-      setHTTPAgents(savedAgents.filter((agent) => managedAgentType(agent) === "http"));
+      setOutboundAgents(savedAgents.filter((agent) => managedAgentType(agent) !== "grpc"));
       notifications.show({ color: "green", message });
       setError(null);
     } catch (err) {
@@ -641,7 +666,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
             <ResponsiveActionLabel full={t("manage.enabledAgents", { count: enabledAgents })} compact={t("manage.enabledAgentsCompact", { count: enabledAgents })} />
           </Badge>
           <Badge color="teal" variant="light">
-            <ResponsiveActionLabel full={t("manage.enabledHTTPAgents", { count: enabledHTTPAgents })} compact={t("manage.enabledHTTPAgentsCompact", { count: enabledHTTPAgents })} />
+            <ResponsiveActionLabel full={t("manage.enabledOutboundAgents", { count: enabledOutboundAgents })} compact={t("manage.enabledOutboundAgentsCompact", { count: enabledOutboundAgents })} />
           </Badge>
         </Group>
         <Button
@@ -660,7 +685,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         value={section}
         onChange={setSection}
         data={[
-          { value: "httpAgents", label: t("manage.nodesTab") },
+          { value: "outboundAgents", label: t("manage.nodesTab") },
           { value: "labels", label: t("manage.labelsTab") },
           ...(writable ? [{ value: "tokens", label: t("manage.tokensTab") }] : []),
           { value: "settings", label: t("manage.rateLimitTab") }
@@ -683,7 +708,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         </Stack>
       )}
 
-      {section === "httpAgents" && (
+      {section === "outboundAgents" && (
         <Stack gap="lg">
           <Paper className="manage-agent-box" withBorder p="md">
             <Stack gap="md">
@@ -722,12 +747,13 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
           </Paper>
           <Paper className="manage-agent-box" withBorder p="md">
             <Stack gap="md">
-              <SectionHeader title={t("manage.httpAgents")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewHTTPAgentModal}><ResponsiveActionLabel full={t("manage.addHTTPAgent")} compact={t("actions.add")} /></GuardedButton>} />
+              <SectionHeader title={t("manage.outboundAgents")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewOutboundAgentModal}><ResponsiveActionLabel full={t("manage.addOutboundAgent")} compact={t("actions.add")} /></GuardedButton>} />
               <Table.ScrollContainer minWidth={920}>
                 <Table className="manage-table" verticalSpacing="xs">
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>{t("manage.id")}</Table.Th>
+                      <Table.Th>{t("manage.transport")}</Table.Th>
                       <Table.Th>{t("manage.url")}</Table.Th>
                       <Table.Th>{t("manage.labels")}</Table.Th>
                       <Table.Th className="manage-http-status-column">{t("manage.status")}</Table.Th>
@@ -736,25 +762,26 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
-                    {httpAgents.map((agent) => {
-                      const node = withHTTPAgentDefaults(agent.http ?? { ...emptyHTTPAgent, id: agent.id });
+                    {outboundAgents.map((agent) => {
+                      const node = withOutboundAgentDefaults(agent.outbound ?? { ...emptyOutboundAgent, id: agent.id, transport: agent.transport === "event" ? "event" : "http" });
                       return (
                         <Table.Tr key={agent.id}>
                           <Table.Td><Text fw={600}>{agent.id}</Text></Table.Td>
-                          <Table.Td>{node.base_url}</Table.Td>
+                          <Table.Td><Badge variant="light">{node.transport}</Badge></Table.Td>
+                          <Table.Td>{node.url}</Table.Td>
                           <Table.Td><LabelBadges labels={agent.labels ?? node.labels} /></Table.Td>
-                          <Table.Td className="manage-http-status-column"><HTTPAgentBadges agent={agent} node={node} t={t} /></Table.Td>
+                          <Table.Td className="manage-http-status-column"><OutboundAgentBadges agent={agent} node={node} t={t} /></Table.Td>
                           <Table.Td className="manage-date-column">{formatDateTime(node.updated_at || agent.last_seen_at)}</Table.Td>
                           <Table.Td className="manage-table-actions">
                             <Group gap="xs" justify="flex-end">
-                              <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editHTTPAgent(node)}><Pencil size={16} /></ActionIcon></Tooltip>
-                              <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => deleteHTTPAgent(agent.id)}><Trash2 size={16} /></GuardedActionIcon>
+                              <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editOutboundAgent(node)}><Pencil size={16} /></ActionIcon></Tooltip>
+                              <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => deleteOutboundAgent(agent.id)}><Trash2 size={16} /></GuardedActionIcon>
                             </Group>
                           </Table.Td>
                         </Table.Tr>
                       );
                     })}
-                    {httpAgents.length === 0 && <EmptyRow colSpan={6} label={t("manage.noHTTPAgentConfigs")} />}
+                    {outboundAgents.length === 0 && <EmptyRow colSpan={7} label={t("manage.noOutboundAgentConfigs")} />}
                   </Table.Tbody>
                 </Table>
               </Table.ScrollContainer>
@@ -903,31 +930,103 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         </form>
       </Modal>
 
-      <Modal centered size="xl" opened={httpAgentModalOpen} title={editingHTTPAgentId ? t("manage.editHTTPAgent") : t("manage.newHTTPAgent")} onClose={closeHTTPAgentModal}>
-        <form className="manage-modal-scope" onSubmit={saveHTTPAgent}>
+      <Modal centered size="xl" opened={outboundAgentModalOpen} title={editingOutboundAgentId ? t("manage.editOutboundAgent") : t("manage.newOutboundAgent")} onClose={closeOutboundAgentModal}>
+        <form className="manage-modal-scope" onSubmit={saveOutboundAgent}>
           <Stack gap="md">
             <Stack className="manage-node-fields" gap="md">
               <SimpleGrid cols={{ base: 1, md: 2 }}>
-                <TextInput label={t("manage.id")} value={httpAgentForm.id} disabled={!writable || Boolean(editingHTTPAgentId)} error={httpAgentMissingFields.id} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, id: event.currentTarget.value })} />
-                <TextInput label={t("manage.url")} value={httpAgentForm.base_url} disabled={!writable} error={httpAgentMissingFields.baseURL} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, base_url: event.currentTarget.value })} />
-                <PasswordInput label={t("manage.token")} value={httpAgentForm.http_token ?? ""} disabled={!writable} error={httpAgentMissingFields.token} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, http_token: event.currentTarget.value })} />
+                <TextInput label={t("manage.id")} value={outboundAgentForm.id} disabled={!writable || Boolean(editingOutboundAgentId)} error={outboundAgentMissingFields.id} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, id: event.currentTarget.value })} />
+                <Select
+                  label={t("manage.transport")}
+                  data={[
+                    { value: "http", label: t("manage.transportHTTP") },
+                    { value: "event", label: t("manage.transportEvent") }
+                  ]}
+                  value={outboundAgentForm.transport}
+                  disabled={!writable}
+                  allowDeselect={false}
+                  onChange={(value) => setOutboundAgentForm({ ...outboundAgentForm, transport: value === "event" ? "event" : "http" })}
+                />
+                <TextInput label={t("manage.url")} value={outboundAgentForm.url} disabled={!writable} error={outboundAgentMissingFields.url} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, url: event.currentTarget.value })} />
+                <Select
+                  label={t("manage.authType")}
+                  data={[
+                    { value: "none", label: t("manage.authNone") },
+                    { value: "bearer", label: t("manage.authBearer") },
+                    { value: "header", label: t("manage.authHeaderType") },
+                    { value: "huaweicloud_aksk", label: t("manage.authHuaweiCloudAKSK") }
+                  ]}
+                  value={outboundAgentForm.auth.type}
+                  disabled={!writable}
+                  allowDeselect={false}
+                  onChange={(value) => setOutboundAgentForm({ ...outboundAgentForm, auth: outboundAgentAuthForType(value, outboundAgentForm.auth) })}
+                />
+                {outboundAgentForm.auth.type === "header" && (
+                  <TextInput label={t("manage.authHeader")} value={outboundAgentForm.auth.header ?? ""} disabled={!writable} error={outboundAgentMissingFields.header} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, auth: { ...outboundAgentForm.auth, header: event.currentTarget.value } })} />
+                )}
+                {(outboundAgentForm.auth.type === "bearer" || outboundAgentForm.auth.type === "header") && (
+                  <PasswordInput
+                    label={t("manage.authSecret")}
+                    value={outboundAgentForm.auth.secret ?? ""}
+                    disabled={!writable}
+                    error={outboundAgentMissingFields.secret}
+                    onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, auth: { ...outboundAgentForm.auth, secret: event.currentTarget.value } })}
+                  />
+                )}
+                {outboundAgentForm.auth.type === "huaweicloud_aksk" && (
+                  <>
+                    <TextInput label={t("manage.accessKey")} value={outboundAgentForm.auth.access_key ?? ""} disabled={!writable} error={outboundAgentMissingFields.accessKey} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, auth: { ...outboundAgentForm.auth, access_key: event.currentTarget.value } })} />
+                    <TextInput label={t("manage.projectID")} value={outboundAgentForm.auth.project_id ?? ""} disabled={!writable} error={outboundAgentMissingFields.projectID} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, auth: { ...outboundAgentForm.auth, project_id: event.currentTarget.value } })} />
+                    <PasswordInput
+                      label={t("manage.secretKey")}
+                      value={outboundAgentForm.auth.secret ?? ""}
+                      disabled={!writable}
+                      error={outboundAgentMissingFields.secret}
+                      onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, auth: { ...outboundAgentForm.auth, secret: event.currentTarget.value } })}
+                    />
+                  </>
+                )}
+                <Textarea
+                  autosize
+                  minRows={1}
+                  label={t("manage.requestHeaders")}
+                  value={outboundHeadersJSON}
+                  disabled={!writable}
+                  error={outboundHeaders === null ? t("manage.invalidRequestHeaders") : undefined}
+                  onChange={(event) => setOutboundHeadersJSON(event.currentTarget.value)}
+                />
+                {outboundAgentForm.transport === "event" && (
+                  <Select
+                    label={t("manage.eventResponse")}
+                    data={[
+                      { value: "direct", label: t("manage.eventResponseDirect") },
+                      { value: "result_field", label: t("manage.eventResponseResult") }
+                    ]}
+                    value={outboundAgentForm.event_response ?? "direct"}
+                    disabled={!writable}
+                    error={outboundAgentMissingFields.eventResponse}
+                    allowDeselect={false}
+                    onChange={(value) => setOutboundAgentForm({ ...outboundAgentForm, event_response: value === "result_field" ? "result_field" : "direct" })}
+                  />
+                )}
                 <Box className="manage-node-labels-field">
-                  <TagsInput label={t("manage.labels")} value={httpAgentForm.labels ?? []} disabled={!writable} onChange={(labels) => setHTTPAgentForm({ ...httpAgentForm, labels })} />
+                  <TagsInput label={t("manage.labels")} value={outboundAgentForm.labels ?? []} disabled={!writable} onChange={(labels) => setOutboundAgentForm({ ...outboundAgentForm, labels })} />
                 </Box>
               </SimpleGrid>
               <Group justify="space-between">
-                <Switch label={t("manage.mtls")} checked={Boolean(httpAgentForm.tls?.enabled)} disabled={!writable} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, tls: { ...httpAgentForm.tls, enabled: event.currentTarget.checked } })} />
-                <Switch className="manage-node-enable-switch" label={t("manage.enabled")} checked={httpAgentForm.enabled} disabled={!writable} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, enabled: event.currentTarget.checked })} />
+                <Switch label={t("manage.mtls")} checked={Boolean(outboundAgentForm.tls?.enabled)} disabled={!writable} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, tls: { ...outboundAgentForm.tls, enabled: event.currentTarget.checked } })} />
+                <Switch className="manage-node-enable-switch" label={t("manage.enabled")} checked={outboundAgentForm.enabled} disabled={!writable} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, enabled: event.currentTarget.checked })} />
               </Group>
-              {httpAgentForm.tls?.enabled && (
-                <SimpleGrid cols={{ base: 1, md: 3 }}>
-                  <TagsInput label={t("manage.caFiles")} value={httpAgentForm.tls?.ca_files ?? []} disabled={!writable} onChange={(caFiles) => setHTTPAgentForm({ ...httpAgentForm, tls: { ...httpAgentForm.tls, ca_files: caFiles } })} />
-                  <TextInput label={t("manage.certFile")} value={httpAgentForm.tls?.cert_file ?? ""} disabled={!writable} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, tls: { ...httpAgentForm.tls, cert_file: event.currentTarget.value } })} />
-                  <TextInput label={t("manage.keyFile")} value={httpAgentForm.tls?.key_file ?? ""} disabled={!writable} onChange={(event) => setHTTPAgentForm({ ...httpAgentForm, tls: { ...httpAgentForm.tls, key_file: event.currentTarget.value } })} />
+              {outboundAgentForm.tls?.enabled && (
+                <SimpleGrid cols={{ base: 1, md: 2 }}>
+                  <TagsInput label={t("manage.caFiles")} value={outboundAgentForm.tls?.ca_files ?? []} disabled={!writable} onChange={(caFiles) => setOutboundAgentForm({ ...outboundAgentForm, tls: { ...outboundAgentForm.tls, ca_files: caFiles } })} />
+                  <TextInput label={t("manage.certFile")} value={outboundAgentForm.tls?.cert_file ?? ""} disabled={!writable} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, tls: { ...outboundAgentForm.tls, cert_file: event.currentTarget.value } })} />
+                  <TextInput label={t("manage.keyFile")} value={outboundAgentForm.tls?.key_file ?? ""} disabled={!writable} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, tls: { ...outboundAgentForm.tls, key_file: event.currentTarget.value } })} />
+                  <TextInput label={t("manage.serverName")} value={outboundAgentForm.tls?.server_name ?? ""} disabled={!writable} onChange={(event) => setOutboundAgentForm({ ...outboundAgentForm, tls: { ...outboundAgentForm.tls, server_name: event.currentTarget.value } })} />
                 </SimpleGrid>
               )}
             </Stack>
-            <ModalActions loading={savingHTTPAgent} disabled={httpAgentSubmitDisabled} disabledReason={!writable ? t("manage.writeRequired") : t("manage.requiredFields")} onCancel={closeHTTPAgentModal} submitLabel={editingHTTPAgentId ? t("manage.saveHTTPAgent") : t("manage.addHTTPAgent")} t={t} />
+            <ModalActions loading={savingOutboundAgent} disabled={outboundAgentSubmitDisabled} disabledReason={!writable ? t("manage.writeRequired") : t("manage.requiredFields")} onCancel={closeOutboundAgentModal} submitLabel={editingOutboundAgentId ? t("manage.saveOutboundAgent") : t("manage.addOutboundAgent")} t={t} />
           </Stack>
         </form>
       </Modal>
@@ -1218,8 +1317,8 @@ function RuntimeEditor({ value, disabled, onChange, t }: { value: RuntimeSetting
       <NumberField label={t("manage.httpTimeout")} value={value.http_timeout_sec} disabled={disabled} onChange={(next) => onChange({ ...value, http_timeout_sec: next })} />
       <NumberField label={t("manage.dnsTimeout")} value={value.dns_timeout_sec} disabled={disabled} onChange={(next) => onChange({ ...value, dns_timeout_sec: next })} />
       <NumberField label={t("manage.resolveTimeout")} value={value.resolve_timeout_sec} disabled={disabled} onChange={(next) => onChange({ ...value, resolve_timeout_sec: next })} />
-      <NumberField label={t("manage.invokeAttempts")} value={value.http_invoke_attempts} disabled={disabled} onChange={(next) => onChange({ ...value, http_invoke_attempts: next })} />
-      <NumberField label={t("manage.healthInterval")} value={value.http_max_health_interval_sec} disabled={disabled} onChange={(next) => onChange({ ...value, http_max_health_interval_sec: next })} />
+      <NumberField label={t("manage.invokeAttempts")} value={value.outbound_invoke_attempts} disabled={disabled} onChange={(next) => onChange({ ...value, outbound_invoke_attempts: next })} />
+      <NumberField label={t("manage.healthInterval")} value={value.outbound_max_health_interval_sec} disabled={disabled} onChange={(next) => onChange({ ...value, outbound_max_health_interval_sec: next })} />
     </SimpleGrid>
   );
 }
@@ -1313,7 +1412,15 @@ function ToolPolicySections({ value, disabled, onChange, t }: { value: Partial<R
 }
 
 function ToolPolicyEditor({ tool, value, disabled, onChange, t }: { tool: Tool; value: PolicySettings; disabled: boolean; onChange: (value: PolicySettings) => void; t: (key: string) => string }) {
-  return <ToolArgsEditor tool={tool} args={value.allowed_args ?? {}} disabled={disabled || value.enabled === false} t={t} onChange={(allowedArgs) => onChange({ ...value, allowed_args: allowedArgs })} />;
+  return (
+    <ToolArgsEditor
+      tool={tool}
+      args={effectiveAllowedArgs(tool, value.allowed_args)}
+      disabled={disabled || value.enabled === false}
+      t={t}
+      onChange={(key, pattern) => onChange({ ...value, allowed_args: updateAllowedArg(tool, value.allowed_args, key, pattern) })}
+    />
+  );
 }
 
 function TokenToolPolicySections({ value, disabled, onChange, t }: { value: Partial<Record<Tool, TokenToolScope>>; disabled: boolean; onChange: (tool: Tool, value: TokenToolScope) => void; t: (key: string) => string }) {
@@ -1329,7 +1436,13 @@ function TokenToolPolicySections({ value, disabled, onChange, t }: { value: Part
         return (
           <ManageSection key={tool} title={tool} marker={false}>
             <Stack gap="md">
-              <ToolArgsEditor tool={tool} args={scope.allowed_args ?? {}} disabled={disabled} t={t} onChange={(allowedArgs) => onChange(tool, { ...rawScope, allowed_args: allowedArgs })} />
+              <ToolArgsEditor
+                tool={tool}
+                args={scope.allowed_args ?? {}}
+                disabled={disabled}
+                t={t}
+                onChange={(key, pattern) => onChange(tool, { ...rawScope, allowed_args: updateAllowedArg(tool, rawScope.allowed_args, key, pattern) })}
+              />
               <SimpleGrid cols={{ base: 1, md: tool === "dns" ? 1 : 2 }}>
                 {tool !== "dns" && (
                   <MultiSelect
@@ -1370,7 +1483,7 @@ function AgentBadges({ agent, t }: { agent: ManagedAgent; t: (key: string) => st
   );
 }
 
-function HTTPAgentBadges({ agent, node, t }: { agent: ManagedAgent; node: HTTPAgentConfig; t: (key: string) => string }) {
+function OutboundAgentBadges({ agent, node, t }: { agent: ManagedAgent; node: OutboundAgentConfig; t: (key: string) => string }) {
   return (
     <Group gap="xs">
       <AgentStatusBadge status={agent.status} disabled={!node.enabled} t={t} />
@@ -1463,38 +1576,134 @@ function ToolBadges({ selected }: { selected: Tool[] }) {
   );
 }
 
-function upsertManagedHTTPAgent(httpAgents: ManagedAgent[], node: HTTPAgentConfig): ManagedAgent[] {
-  const next = httpAgents.filter((item) => item.id !== node.id);
-  next.push(managedHTTPAgentFromConfig(node, httpAgents.find((item) => item.id === node.id)));
+function upsertManagedOutboundAgent(outboundAgents: ManagedAgent[], node: OutboundAgentConfig): ManagedAgent[] {
+  const next = outboundAgents.filter((item) => item.id !== node.id);
+  next.push(managedOutboundAgentFromConfig(node, outboundAgents.find((item) => item.id === node.id)));
   return next.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function httpAgentRequiredFieldsMissing(node: HTTPAgentConfig, editingID = "", active = true): { id: boolean; baseURL: boolean; token: boolean } {
-  if (!active) {
-    return { id: false, baseURL: false, token: false };
+type OutboundAgentMissingFields = {
+  id: boolean;
+  url: boolean;
+  header: boolean;
+  accessKey: boolean;
+  projectID: boolean;
+  secret: boolean;
+  eventResponse: boolean;
+};
+
+function outboundAgentAuthForType(value: string | null, current: OutboundAgentAuth): OutboundAgentAuth {
+  switch (value) {
+    case "none":
+      return { type: "none" };
+    case "header":
+      return { type: "header", header: current.type === "header" ? current.header : undefined, secret: current.type === "header" ? current.secret : undefined };
+    case "huaweicloud_aksk":
+      return {
+        type: "huaweicloud_aksk",
+        access_key: current.type === "huaweicloud_aksk" ? current.access_key : undefined,
+        project_id: current.type === "huaweicloud_aksk" ? current.project_id : undefined,
+        secret: current.type === "huaweicloud_aksk" ? current.secret : undefined
+      };
+    default:
+      return { type: "bearer", secret: current.type === "bearer" ? current.secret : undefined };
   }
+}
+
+function outboundAgentAuthForSave(auth: OutboundAgentAuth): OutboundAgentAuth {
+  const secret = auth.secret?.trim() || undefined;
+  switch (auth.type) {
+    case "none":
+      return { type: "none" };
+    case "header":
+      return { type: "header", header: auth.header?.trim() || undefined, secret };
+    case "huaweicloud_aksk":
+      return {
+        type: "huaweicloud_aksk",
+        access_key: auth.access_key?.trim() || undefined,
+        project_id: auth.project_id?.trim() || undefined,
+        secret
+      };
+    default:
+      return { type: "bearer", secret };
+  }
+}
+
+function outboundAgentForSave(node: OutboundAgentConfig, headers: Record<string, string>): OutboundAgentConfig {
   return {
-    id: !editingID && !node.id.trim(),
-    baseURL: !node.base_url.trim(),
-    token: !node.http_token?.trim()
+    ...node,
+    id: node.id.trim(),
+    url: node.url.trim(),
+    auth: outboundAgentAuthForSave(node.auth),
+    headers,
+    ...(node.transport === "event" ? { event_response: node.event_response ?? "direct" } : { event_response: undefined })
   };
 }
 
-function managedAgentType(agent: ManagedAgent): "grpc" | "http" {
+function outboundCredentialScopeEqual(current: OutboundAgentConfig, next: OutboundAgentConfig): boolean {
+  const currentAuth = outboundAgentAuthForSave(current.auth);
+  const nextAuth = outboundAgentAuthForSave(next.auth);
+  const currentTLS = withOutboundAgentDefaults(current).tls;
+  const nextTLS = withOutboundAgentDefaults(next).tls;
+  return current.transport === next.transport
+    && current.url === next.url
+    && currentAuth.type === nextAuth.type
+    && (currentAuth.header ?? "") === (nextAuth.header ?? "")
+    && (currentAuth.access_key ?? "") === (nextAuth.access_key ?? "")
+    && (currentAuth.project_id ?? "") === (nextAuth.project_id ?? "")
+    && stringRecordEqual(current.headers, next.headers)
+    && Boolean(currentTLS?.enabled) === Boolean(nextTLS?.enabled)
+    && stringArraysEqual(currentTLS?.ca_files, nextTLS?.ca_files)
+    && (currentTLS?.cert_file ?? "") === (nextTLS?.cert_file ?? "")
+    && (currentTLS?.key_file ?? "") === (nextTLS?.key_file ?? "")
+    && (currentTLS?.server_name ?? "") === (nextTLS?.server_name ?? "");
+}
+
+function stringRecordEqual(current?: Record<string, string>, next?: Record<string, string>): boolean {
+  const currentEntries = Object.entries(current ?? {});
+  const nextRecord = next ?? {};
+  return currentEntries.length === Object.keys(nextRecord).length
+    && currentEntries.every(([key, value]) => nextRecord[key] === value);
+}
+
+function stringArraysEqual(current?: string[], next?: string[]): boolean {
+  const currentValues = current ?? [];
+  const nextValues = next ?? [];
+  return currentValues.length === nextValues.length
+    && currentValues.every((value, index) => value === nextValues[index]);
+}
+
+function outboundAgentRequiredFieldsMissing(node: OutboundAgentConfig, editingID = "", active = true, existing: OutboundAgentConfig | null = null): OutboundAgentMissingFields {
+  if (!active) {
+    return { id: false, url: false, header: false, accessKey: false, projectID: false, secret: false, eventResponse: false };
+  }
+  const canRetainSecret = Boolean(editingID && existing && outboundCredentialScopeEqual(existing, node));
+  return {
+    id: !editingID && !node.id.trim(),
+    url: !node.url.trim(),
+    header: node.auth.type === "header" && !node.auth.header?.trim(),
+    accessKey: node.auth.type === "huaweicloud_aksk" && !node.auth.access_key?.trim(),
+    projectID: node.auth.type === "huaweicloud_aksk" && !node.auth.project_id?.trim(),
+    secret: node.auth.type !== "none" && !canRetainSecret && !node.auth.secret?.trim(),
+    eventResponse: node.transport === "event" && node.event_response !== "direct" && node.event_response !== "result_field"
+  };
+}
+
+function managedAgentType(agent: ManagedAgent): ManagedAgent["transport"] {
   return agent.transport;
 }
 
-function managedHTTPAgentFromConfig(node: HTTPAgentConfig, previous?: ManagedAgent): ManagedAgent {
+function managedOutboundAgentFromConfig(node: OutboundAgentConfig, previous?: ManagedAgent): ManagedAgent {
   return {
     ...previous,
     id: node.id,
-    labels: normalizedManagedLabels(node.id, "http", node.labels),
+    labels: normalizedManagedLabels(node.id, node.transport, node.labels),
     capabilities: previous?.capabilities ?? [],
     protocols: previous?.protocols ?? 0,
     status: node.enabled ? previous?.status ?? "offline" : "offline",
     last_seen_at: previous?.last_seen_at ?? node.updated_at ?? "",
     created_at: previous?.created_at ?? node.created_at ?? "",
-    transport: "http",
+    transport: node.transport,
     config: {
       id: node.id,
       disabled: !node.enabled,
@@ -1502,7 +1711,7 @@ function managedHTTPAgentFromConfig(node: HTTPAgentConfig, previous?: ManagedAge
       created_at: node.created_at,
       updated_at: node.updated_at
     },
-    http: { ...node, transport: "http" }
+    outbound: { ...node }
   };
 }
 
@@ -1533,14 +1742,35 @@ function withSettingsDefaults(settings: ManagedSettings): ManagedSettings {
   };
 }
 
-function withHTTPAgentDefaults(node: HTTPAgentConfig): HTTPAgentConfig {
+function withOutboundAgentDefaults(node: OutboundAgentConfig): OutboundAgentConfig {
   return {
-    ...emptyHTTPAgent,
+    ...emptyOutboundAgent,
     ...node,
-    transport: "http",
+    auth: { ...emptyOutboundAgent.auth, ...node.auth },
+    headers: node.headers ?? {},
     labels: node.labels ?? [],
-    tls: { ...emptyHTTPAgent.tls, ...node.tls }
+    tls: { ...emptyOutboundAgent.tls, ...node.tls }
   };
+}
+
+function parseOutboundHeaders(raw: string): Record<string, string> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw || "{}");
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      return null;
+    }
+    const entries = Object.entries(parsed);
+    if (!entries.every(([name, value]) => name.trim() !== "" && typeof value === "string")) {
+      return null;
+    }
+    return Object.fromEntries(entries);
+  } catch {
+    return null;
+  }
+}
+
+function formatOutboundHeaders(headers?: Record<string, string>): string {
+  return JSON.stringify(headers ?? {}, null, 2);
 }
 
 function withAgentConfigDefaults(id: string, cfg?: AgentConfig): AgentConfig {
@@ -1589,7 +1819,7 @@ function labelSortKey(label: string): string {
   if (label === "agent") {
     return `0:${label}`;
   }
-  if (label === "agent:grpc" || label === "agent:http") {
+  if (label === "agent:grpc" || label === "agent:http" || label === "agent:event") {
     return `1:${label}`;
   }
   if (!label.startsWith("id:")) {
@@ -1622,10 +1852,11 @@ function applyLabelMembership(agents: ManagedAgent[], label: string, selectedIDs
       nextLabels = labels.filter((item) => item !== label);
     }
     const normalizedLabels = managedLabelsForAgent(agent, nextLabels);
-    if (managedAgentType(agent) === "http") {
-      const http = withHTTPAgentDefaults(agent.http ?? { ...emptyHTTPAgent, id: agent.id });
-      http.labels = nextLabels;
-      return { ...agent, labels: normalizedLabels, config: { ...(agent.config ?? { id: agent.id }), labels: nextLabels }, http };
+    if (managedAgentType(agent) !== "grpc") {
+      const transport = agent.transport === "event" ? "event" : "http";
+      const outbound = withOutboundAgentDefaults(agent.outbound ?? { ...emptyOutboundAgent, id: agent.id, transport });
+      outbound.labels = nextLabels;
+      return { ...agent, labels: normalizedLabels, config: { ...(agent.config ?? { id: agent.id }), labels: nextLabels }, outbound };
     }
     const config = withAgentConfigDefaults(agent.id, agent.config);
     config.labels = nextLabels;
@@ -1638,7 +1869,7 @@ function changedLabelAgents(before: ManagedAgent[], after: ManagedAgent[]): Mana
   return after.filter((agent) => beforeByID.get(agent.id) !== customLabels(agent.labels).join("\n"));
 }
 
-function changedLabelHTTPAgents(before: ManagedAgent[], after: ManagedAgent[]): ManagedAgent[] {
+function changedLabelOutboundAgents(before: ManagedAgent[], after: ManagedAgent[]): ManagedAgent[] {
   const beforeByID = new Map(before.map((agent) => [agent.id, customLabels(agent.labels).join("\n")]));
   return after.filter((agent) => beforeByID.get(agent.id) !== customLabels(agent.labels).join("\n"));
 }
@@ -1651,7 +1882,7 @@ function managedLabelsForAgent(agent: ManagedAgent, labels: string[]): string[] 
   return normalizedManagedLabels(agent.id, managedAgentType(agent), labels);
 }
 
-function normalizedManagedLabels(id: string, transport: "grpc" | "http", labels?: string[]): string[] {
+function normalizedManagedLabels(id: string, transport: ManagedAgent["transport"], labels?: string[]): string[] {
   return uniqueStrings(["agent", `agent:${transport}`, `id:${id}`, ...(labels ?? [])]);
 }
 
@@ -1671,7 +1902,7 @@ function uniqueStrings(values: string[]): string[] {
 
 function isReservedLabel(label: string): boolean {
   const trimmed = label.trim();
-  return trimmed === "agent" || trimmed === "agent:grpc" || trimmed === "agent:http" || trimmed.startsWith("id:");
+  return trimmed === "agent" || trimmed === "agent:grpc" || trimmed === "agent:http" || trimmed === "agent:event" || trimmed.startsWith("id:");
 }
 
 function isAgentLabel(label: string): boolean {
@@ -1823,9 +2054,9 @@ function defaultAllowedArgs(tool: Tool): Record<string, string> {
       return { protocol: "auto,icmp,udp,tcp", port: defaultPortRange };
     case "traceroute":
     case "mtr":
-      return { protocol: "icmp,tcp", port: defaultPortRange };
+      return { protocol: "auto,icmp,udp,tcp", port: defaultPortRange };
     case "http":
-      return { method: "GET,HEAD" };
+      return { method: "GET,HEAD", http_version: "auto,3,2,1.1" };
     case "dns":
       return { type: "A,AAAA,CNAME,MX,TXT,NS" };
     case "port":
@@ -1833,10 +2064,11 @@ function defaultAllowedArgs(tool: Tool): Record<string, string> {
   }
 }
 
-function withPolicyDefaults(tool: Tool, policy?: PolicySettings): PolicySettings {
+function withPolicyDefaults(_tool: Tool, policy?: PolicySettings): PolicySettings {
   return {
+    ...policy,
     enabled: policy?.enabled ?? true,
-    allowed_args: { ...defaultAllowedArgs(tool), ...(policy?.allowed_args ?? {}) }
+    ...(policy?.allowed_args === undefined ? {} : { allowed_args: { ...policy.allowed_args } })
   };
 }
 
@@ -1847,8 +2079,21 @@ function setPolicyEnabled(policy: PolicySettings | undefined, enabled: boolean):
 function displayTokenToolScope(tool: Tool, scope?: TokenToolScope): TokenToolScope {
   return {
     ...scope,
-    allowed_args: { ...defaultAllowedArgs(tool), ...(scope?.allowed_args ?? {}) }
+    allowed_args: effectiveAllowedArgs(tool, scope?.allowed_args)
   };
+}
+
+function effectiveAllowedArgs(tool: Tool, args?: Record<string, string>): Record<string, string> {
+  if (args === undefined) {
+    return defaultAllowedArgs(tool);
+  }
+  return { ...args };
+}
+
+function updateAllowedArg(tool: Tool, args: Record<string, string> | undefined, key: string, pattern: string): Record<string, string> {
+  const next = args === undefined ? defaultAllowedArgs(tool) : { ...args };
+  next[key] = pattern;
+  return next;
 }
 
 function selectTokenTools(current: Partial<Record<Tool, TokenToolScope>>, selected: Tool[]): Partial<Record<Tool, TokenToolScope>> {
@@ -1886,8 +2131,8 @@ function resolveOnAgentValue(value: string | null): boolean | undefined {
   return undefined;
 }
 
-function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; args: Record<string, string>; disabled: boolean; onChange: (value: Record<string, string>) => void; t: (key: string) => string }) {
-  const singleField = tool === "dns" || tool === "port" || tool === "http";
+function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; args: Record<string, string>; disabled: boolean; onChange: (key: string, pattern: string) => void; t: (key: string) => string }) {
+  const singleField = tool === "dns" || tool === "port";
   const availableProtocols = tool === "ping" ? pingProtocolOptions : routeProtocolOptions;
   return (
     <SimpleGrid className={singleField ? "manage-tool-args-grid manage-tool-args-grid-single" : "manage-tool-args-grid"} cols={singleField ? 1 : { base: 1, md: 2 }}>
@@ -1898,7 +2143,7 @@ function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; arg
           data={availableProtocols.map((protocol) => ({ value: protocol, label: protocol }))}
           value={valuesFromPattern(args.protocol, availableProtocols)}
           disabled={disabled}
-          onChange={(selected) => onChange({ ...args, protocol: patternFromValues(selected, availableProtocols) })}
+          onChange={(selected) => onChange("protocol", patternFromValues(selected, availableProtocols))}
         />
       )}
       {tool === "http" && (
@@ -1908,7 +2153,17 @@ function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; arg
           data={methodOptions.map((method) => ({ value: method, label: method }))}
           value={valuesFromPattern(args.method, methodOptions)}
           disabled={disabled}
-          onChange={(selected) => onChange({ ...args, method: patternFromValues(selected, methodOptions) })}
+          onChange={(selected) => onChange("method", patternFromValues(selected, methodOptions))}
+        />
+      )}
+      {tool === "http" && (
+        <MultiSelect
+          className="manage-nowrap-multiselect"
+          label={t("form.httpVersion")}
+          data={httpVersionOptions.map((version) => ({ value: version, label: formatHTTPVersion(version) }))}
+          value={valuesFromPattern(args.http_version, httpVersionOptions)}
+          disabled={disabled}
+          onChange={(selected) => onChange("http_version", patternFromValues(selected, httpVersionOptions))}
         />
       )}
       {tool === "dns" && (
@@ -1918,7 +2173,7 @@ function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; arg
           data={dnsTypeOptions.map((recordType) => ({ value: recordType, label: recordType }))}
           value={valuesFromPattern(args.type, dnsTypeOptions)}
           disabled={disabled}
-          onChange={(selected) => onChange({ ...args, type: patternFromValues(selected, dnsTypeOptions) })}
+          onChange={(selected) => onChange("type", patternFromValues(selected, dnsTypeOptions))}
         />
       )}
       {(tool === "ping" || tool === "traceroute" || tool === "mtr" || tool === "port") && (
@@ -1927,7 +2182,7 @@ function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; arg
           placeholder="1-32768,32769-65535"
           value={portsFromRule(args.port)}
           disabled={disabled}
-          onChange={(event) => onChange({ ...args, port: normalizePortRule(event.currentTarget.value) })}
+          onChange={(event) => onChange("port", normalizePortRule(event.currentTarget.value))}
         />
       )}
     </SimpleGrid>
@@ -1935,16 +2190,16 @@ function ToolArgsEditor({ tool, args, disabled, onChange, t }: { tool: Tool; arg
 }
 
 function valuesFromPattern(pattern: string | undefined, options: string[]): string[] {
-  if (!pattern) {
-    return options;
+  if (pattern === undefined) {
+    return [];
   }
   const values = pattern.split(",").map((value) => value.trim()).filter((value) => options.includes(value));
-  return values.length > 0 ? values : options;
+  return values;
 }
 
 function patternFromValues(values: string[], options: string[]): string {
   const selected = values.filter((value) => options.includes(value));
-  if (selected.length === 0 || selected.length === options.length) {
+  if (selected.length === options.length) {
     return options.join(",");
   }
   return selected.join(",");

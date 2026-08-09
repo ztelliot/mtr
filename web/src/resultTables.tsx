@@ -1,7 +1,7 @@
 import { ScrollArea, Table, Text } from "@mantine/core";
 import type React from "react";
 import { ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
-import { formatMS, formatPercent, formatSpeed, routeRTT } from "./formatters";
+import { formatActualProtocol, formatMS, formatPercent, formatSpeed, routeRTT } from "./formatters";
 import { formatASN, formatLocation, ipFromDNSRecord, normalizeIPAddress, splitDNSRecord, uniqueIPAddresses } from "./geoip";
 import { buildMtrRows, buildNodeRows } from "./pingRows";
 import type { Agent, GeoIPInfo, Tool } from "./types";
@@ -36,6 +36,7 @@ export function NodeResultTable({
               <Table.Th className="region-column">{t("results.region")}</Table.Th>
               <Table.Th className="provider-column">{t("results.provider")}</Table.Th>
               <Table.Th className="ip-column">{t("results.ip")}</Table.Th>
+              <Table.Th className="protocol-column">{t("results.protocol")}</Table.Th>
               <Table.Th className="metric-column">{t("results.loss")}</Table.Th>
               <Table.Th className="sent-column">{t("results.sent")}</Table.Th>
               <Table.Th className="time-column">{t("results.last")}</Table.Th>
@@ -46,11 +47,12 @@ export function NodeResultTable({
               <Table.Th className="chart-column">{t("results.chart")}</Table.Th>
             </Table.Tr>
           </Table.Thead>
-          <Table.Tbody>{nodeRows(rows, 11, t("results.noPingRows"), (row) => (
+          <Table.Tbody>{nodeRows(rows, 12, t("results.noPingRows"), (row) => (
             <>
               <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} t={t} /></Table.Td>
               <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} t={t} /></Table.Td>
               <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>
+              <Table.Td className="protocol-column">{formatActualProtocol(tool, row.actualProtocol)}</Table.Td>
               <Table.Td className="metric-column">{formatPercent(row.lossPct)}</Table.Td>
               <Table.Td className="sent-column">{row.sent ?? "-"}</Table.Td>
               <Table.Td className="time-column">{formatMS(row.lastMS)}</Table.Td>
@@ -90,6 +92,7 @@ export function NodeResultTable({
             {tool === "port" && <Table.Th className="time-column">{t("results.rtt")}</Table.Th>}
             {tool === "port" && <Table.Th className="status-column">{t("results.reachable")}</Table.Th>}
             {tool === "http" && <Table.Th className="ip-column">{t("results.ip")}</Table.Th>}
+            {tool === "http" && <Table.Th className="protocol-column">{t("results.protocol")}</Table.Th>}
             {tool === "http" && <Table.Th className="time-column">{t("results.dnsTime")}</Table.Th>}
             {tool === "http" && <Table.Th className="time-column">{t("results.connect")}</Table.Th>}
             {tool === "http" && <Table.Th className="time-column">{t("results.tls")}</Table.Th>}
@@ -101,7 +104,7 @@ export function NodeResultTable({
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
-          {nodeRows(rows, tool === "dns" ? 3 : tool === "port" ? 5 : showHTTPDownloadMetrics ? 11 : 9, t("results.noPingRows"), (row) => (
+          {nodeRows(rows, tool === "dns" ? 3 : tool === "port" ? 5 : showHTTPDownloadMetrics ? 12 : 10, t("results.noPingRows"), (row) => (
             <>
               <Table.Td className="region-column"><RegionCell country={row.country} region={row.region} protocols={row.protocols} t={t} /></Table.Td>
               <Table.Td className="provider-column"><ProviderCell provider={row.provider} isp={row.isp} protocols={row.protocols} t={t} /></Table.Td>
@@ -110,6 +113,7 @@ export function NodeResultTable({
               {tool === "port" && <Table.Td className="time-column">{formatMS(row.connectMS)}</Table.Td>}
               {tool === "port" && <Table.Td className="status-column"><StatusBadge status={row.status} t={t} /></Table.Td>}
               {tool === "http" && <Table.Td className="ip-column"><GeoIPValue value={row.ip} geoIPByIP={geoIPByIP} onTraceIP={(ip) => onTraceIP(ip, row.agentId)} /></Table.Td>}
+              {tool === "http" && <Table.Td className="protocol-column">{formatActualProtocol(tool, row.actualProtocol)}</Table.Td>}
               {tool === "http" && <Table.Td className="time-column">{formatMS(row.dnsMS)}</Table.Td>}
               {tool === "http" && <Table.Td className="time-column">{formatMS(row.connectMS)}</Table.Td>}
               {tool === "http" && <Table.Td className="time-column">{formatMS(row.tlsMS)}</Table.Td>}
@@ -148,13 +152,17 @@ export function MtrResultTable({
   const isTraceroute = tool === "traceroute";
   const colSpan = isTraceroute ? 3 : 10;
   const minWidth = routeTableMinWidth(isTraceroute, hasIPv6, compact);
+  const actualProtocol = rows.find((row) => row.actualProtocol)?.actualProtocol;
   return (
     <>
       <div className="mtr-summary">
         <div className="mtr-summary-item">
-          <Text className="mtr-summary-label">{t("results.targetIp")}</Text>
-          <div className="mtr-summary-value">
+          <Text className="mtr-summary-label">{t("form.target")}</Text>
+          <div className="mtr-summary-value mtr-target-value">
             <GeoIPValue value={targetIP} geoIPByIP={geoIPByIP} />
+            {actualProtocol && (
+              <span className="mtr-target-protocol">{formatActualProtocol(tool, actualProtocol)}</span>
+            )}
           </div>
         </div>
         <div className="mtr-summary-item">
@@ -421,9 +429,9 @@ function GeoIPValue({
 
 function pingTableMinWidth(hasIPv6: boolean, compact: boolean): number {
   if (compact) {
-    return hasIPv6 ? 1110 : 900;
+    return hasIPv6 ? 1180 : 970;
   }
-  return hasIPv6 ? 1490 : 1270;
+  return hasIPv6 ? 1580 : 1360;
 }
 
 function routeTableMinWidth(isTraceroute: boolean, hasIPv6: boolean, compact: boolean): string | number {
@@ -439,9 +447,9 @@ function routeTableMinWidth(isTraceroute: boolean, hasIPv6: boolean, compact: bo
 function tableMinWidth(tool: Tool, hasIPv6: boolean, showHTTPDownloadMetrics = false, compact = false): number {
   if (tool === "http") {
     if (showHTTPDownloadMetrics) {
-      return compact ? (hasIPv6 ? 1160 : 960) : (hasIPv6 ? 1540 : 1320);
+      return compact ? (hasIPv6 ? 1230 : 1030) : (hasIPv6 ? 1630 : 1410);
     }
-    return compact ? (hasIPv6 ? 980 : 800) : (hasIPv6 ? 1380 : 1180);
+    return compact ? (hasIPv6 ? 1050 : 870) : (hasIPv6 ? 1470 : 1270);
   }
   if (tool === "dns") {
     return compact ? (hasIPv6 ? 760 : 560) : (hasIPv6 ? 1120 : 880);

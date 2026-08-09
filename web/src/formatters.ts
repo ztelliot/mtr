@@ -1,4 +1,4 @@
-import type { VersionInfo } from "./types";
+import type { Tool, VersionInfo } from "./types";
 import { formatVersionLabel } from "./versionLabel";
 
 export function formatServerVersion(info: VersionInfo | null, t: (key: string) => string): string {
@@ -6,6 +6,50 @@ export function formatServerVersion(info: VersionInfo | null, t: (key: string) =
     return t("footer.versionUnknown");
   }
   return formatVersionLabel(info.version, info.commit);
+}
+
+export function formatHTTPVersion(value?: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "-";
+  }
+  switch (trimmed.toLowerCase()) {
+    case "auto":
+      return "Auto";
+    case "1":
+    case "1.0":
+    case "1.1":
+    case "h1":
+    case "http/1":
+    case "http/1.0":
+    case "http/1.1":
+      return "H1";
+    case "2":
+    case "2.0":
+    case "h2":
+    case "http/2":
+    case "http/2.0":
+      return "H2";
+    case "3":
+    case "3.0":
+    case "h3":
+    case "http/3":
+    case "http/3.0":
+      return "H3";
+    default:
+      return trimmed;
+  }
+}
+
+export function formatActualProtocol(tool: Tool, value?: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "-";
+  }
+  if (tool === "http") {
+    return formatHTTPVersion(trimmed);
+  }
+  return trimmed.toLowerCase() === "auto" ? "Auto" : trimmed.toUpperCase();
 }
 
 export function formatMS(value?: number): string {

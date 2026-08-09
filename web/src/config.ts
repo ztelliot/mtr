@@ -8,7 +8,8 @@ const fallbackConfig: RuntimeConfig = {
   apiToken: ""
 };
 
-type RuntimeConfigFile = Partial<Omit<RuntimeConfig, "brand" | "brandUrl">> & {
+type RuntimeConfigFile = Partial<Omit<RuntimeConfig, "apiToken" | "brand" | "brandUrl">> & {
+  apiToken?: unknown;
   brand?: unknown;
   brandUrl?: unknown;
 };
@@ -22,7 +23,7 @@ export async function loadConfig(fetcher: typeof fetch = fetch, storage: Pick<St
     const raw = (await response.json()) as RuntimeConfigFile;
     const next: RuntimeConfig = {
       apiBaseUrl: normalizeBaseUrl(raw.apiBaseUrl ?? ""),
-      apiToken: raw.apiToken ?? ""
+      apiToken: typeof raw.apiToken === "string" ? raw.apiToken.trim() : ""
     };
     const brand = normalizeBrand(raw.brand);
     if (brand) {
@@ -123,7 +124,7 @@ export function saveStoredApiBaseUrl(apiBaseUrl: string, storage: Pick<Storage, 
 }
 
 function browserStorage(): Storage | null {
-  return typeof window === "undefined" ? null : window.localStorage;
+  return typeof window === "undefined" ? null : window.sessionStorage;
 }
 
 function normalizePathname(pathname: string): string {

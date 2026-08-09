@@ -10,6 +10,7 @@ export interface NodeResultRow {
   protocols?: number;
   target: string;
   status: string;
+  actualProtocol?: string;
   ip?: string;
   sent?: number;
   lastMS?: number;
@@ -85,6 +86,7 @@ function nodeRowForJob(
   const agent = agentByID.get(agentID);
   const parsed = latestToolResult(events, job);
   const summary = parsed?.summary ?? {};
+  const actualProtocol = actualProtocolFromSummary(tool, summary);
   const metrics = metricSamples(events);
   const base = {
     agentId: agentID,
@@ -94,7 +96,8 @@ function nodeRowForJob(
     isp: agent?.isp,
     protocols: singleProtocolMask(agent?.protocols),
     target: parsed?.target || job.target,
-    status: parsed ? statusFromParsed(parsed.exit_code, summary.status) : metrics.length > 0 ? "running" : job.status
+    status: parsed ? statusFromParsed(parsed.exit_code, summary.status) : metrics.length > 0 ? "running" : job.status,
+    ...(actualProtocol ? { actualProtocol } : {})
   };
 
   if (tool === "ping") {
@@ -210,6 +213,7 @@ export function buildMtrRows(
   events: JobEvent[]
 ): MtrResultRow[] {
   const agent = safeAgents(agents).find((item) => item.id === agentID);
+  const actualProtocol = stringSummary(latestToolResult(events)?.summary?.protocol);
   const historicalSamples = mtrHistoricalRTTSamples(events);
   return extractHops(events).map((hop) => {
     const samples = hopSamples(hop);
@@ -226,6 +230,7 @@ export function buildMtrRows(
       isp: agent?.isp,
       protocols: singleProtocolMask(agent?.protocols),
       status: lossPct !== undefined ? (lossPct >= 100 ? "timeout" : "running") : sent > 0 && received === 0 ? "timeout" : "running",
+      ...(actualProtocol ? { actualProtocol } : {}),
       ip: hop.ip || hop.host || "*",
       sent,
       lastMS: hop.last_ms ?? live.lastMS,
@@ -413,6 +418,16 @@ function stringSummary(value: unknown): string | undefined {
     return String(value);
   }
   return typeof value === "string" ? value : undefined;
+}
+
+function actualProtocolFromSummary(tool: Tool, summary: Record<string, unknown>): string | undefined {
+  if (tool === "http") {
+    return stringSummary(summary.http_version);
+  }
+  if (tool === "ping" || tool === "traceroute" || tool === "mtr") {
+    return stringSummary(summary.protocol);
+  }
+  return undefined;
 }
 
 function remoteAddressIP(value: unknown): string | undefined {

@@ -1,6 +1,31 @@
-import type { Agent, AgentConfig, APITokenPermission, CreateJobRequest, CreateScheduledJobRequest, GeoIPInfo, HTTPAgentConfig, Job, JobEvent, ManagedAgent, ManagedAgentLabelsRequest, ManagedLabels, ManagedLabelsAndAgents, ManagedRateLimit, ManagedRegisterTokenListResponse, ManagedRegisterTokenRequest, ManagedRegisterTokenResponse, ManagedTokenListResponse, ManagedTokenRequest, ManagedTokenResponse, Permissions, RateLimitConfig, RegisterToken, RuntimeConfig, ScheduledJob, StreamEvent, VersionInfo } from "./types";
+import type { Agent, AgentConfig, CreateJobRequest, CreateScheduledJobRequest, GeoIPInfo, OutboundAgentConfig, Job, JobEvent, ManagedAgent, ManagedAgentLabelsRequest, ManagedLabels, ManagedLabelsAndAgents, ManagedRateLimit, ManagedRegisterTokenListResponse, ManagedRegisterTokenRequest, ManagedRegisterTokenResponse, ManagedTokenListResponse, ManagedTokenRequest, ManagedTokenResponse, Permissions, RuntimeConfig, ScheduledJob, StreamEvent, VersionInfo } from "./types";
 
 type EventPayload = StreamEvent & { agent_id?: string };
+
+export interface JobStreamMessage {
+  data: string;
+  type: string;
+  lastEventId: string;
+}
+
+export interface JobStream {
+  readonly closed: boolean;
+  close(): void;
+}
+
+const maxSSEBufferBytes = 4 * 1024 * 1024;
+const initialJobStreamRetryMS = 1000;
+const maxJobStreamRetryMS = 8000;
+const stableJobStreamMS = 15_000;
+
+class RetryableJobStreamError extends Error {}
+
+function requireArray<T>(value: unknown, responseName: string): T[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${responseName} response must be an array`);
+  }
+  return value as T[];
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -22,8 +47,7 @@ export class ApiClient {
   }
 
   async listAgents(): Promise<Agent[]> {
-    const agents = await this.request<Agent[] | null>("/v1/agents");
-    return Array.isArray(agents) ? agents : [];
+    return requireArray<Agent>(await this.request<unknown>("/v1/agents"), "agents");
   }
 
   async getPermissions(): Promise<Permissions> {
@@ -46,13 +70,15 @@ export class ApiClient {
   }
 
   async listJobEvents(id: string): Promise<JobEvent[]> {
-    const events = await this.request<EventPayload[] | null>(`/v1/jobs/${encodeURIComponent(id)}/events`);
-    return Array.isArray(events) ? events.map((event, index) => jobEventFromPayload(id, event, index)) : [];
+    const events = requireArray<EventPayload>(
+      await this.request<unknown>(`/v1/jobs/${encodeURIComponent(id)}/events`),
+      "job events"
+    );
+    return events.map((event, index) => jobEventFromPayload(id, event, index));
   }
 
   async listSchedules(): Promise<ScheduledJob[]> {
-    const schedules = await this.request<ScheduledJob[] | null>("/v1/schedules");
-    return Array.isArray(schedules) ? schedules : [];
+    return requireArray<ScheduledJob>(await this.request<unknown>("/v1/schedules"), "schedules");
   }
 
   async createSchedule(payload: CreateScheduledJobRequest): Promise<ScheduledJob> {
@@ -81,8 +107,10 @@ export class ApiClient {
       params.set("range", range);
     }
     const query = params.toString();
-    const history = await this.request<Job[] | null>(`/v1/schedules/${encodeURIComponent(id)}/history${query ? `?${query}` : ""}`);
-    return Array.isArray(history) ? history : [];
+    return requireArray<Job>(
+      await this.request<unknown>(`/v1/schedules/${encodeURIComponent(id)}/history${query ? `?${query}` : ""}`),
+      "schedule history"
+    );
   }
 
   async listScheduleHistorySummary(id: string, range?: string): Promise<JobEvent[]> {
@@ -91,8 +119,10 @@ export class ApiClient {
       params.set("range", range);
     }
     const query = params.toString();
-    const history = await this.request<JobEvent[] | null>(`/v1/schedules/${encodeURIComponent(id)}/summary${query ? `?${query}` : ""}`);
-    return Array.isArray(history) ? history : [];
+    return requireArray<JobEvent>(
+      await this.request<unknown>(`/v1/schedules/${encodeURIComponent(id)}/summary${query ? `?${query}` : ""}`),
+      "schedule summary"
+    );
   }
 
   async getGeoIP(ip: string): Promise<GeoIPInfo> {
@@ -100,22 +130,14 @@ export class ApiClient {
   }
 
   async getManagedRateLimit(): Promise<ManagedRateLimit> {
-    const response = await this.request<ManagedRateLimit | RateLimitConfig>("/v1/manage/rate-limit");
-    if ("rate_limit" in response) {
-      return response;
-    }
-    return { rate_limit: response };
+    return this.request<ManagedRateLimit>("/v1/manage/rate-limit");
   }
 
   async updateManagedRateLimit(payload: ManagedRateLimit): Promise<ManagedRateLimit> {
-    const response = await this.request<ManagedRateLimit | RateLimitConfig>("/v1/manage/rate-limit", {
+    return this.request<ManagedRateLimit>("/v1/manage/rate-limit", {
       method: "PUT",
       body: JSON.stringify(payload)
     });
-    if ("rate_limit" in response) {
-      return response;
-    }
-    return { rate_limit: response };
   }
 
   async getManagedLabels(): Promise<ManagedLabels> {
@@ -130,106 +152,88 @@ export class ApiClient {
   }
 
   async updateManagedLabelsAndAgents(payload: ManagedLabels & ManagedAgentLabelsRequest): Promise<ManagedLabelsAndAgents> {
-    const response = await this.request<ManagedLabelsAndAgents | null>("/v1/manage/labels/state", {
+    return this.request<ManagedLabelsAndAgents>("/v1/manage/labels/state", {
       method: "PUT",
       body: JSON.stringify(payload)
     });
-    return { revision: response?.revision, updated_at: response?.updated_at, label_configs: response?.label_configs ?? {}, agents: Array.isArray(response?.agents) ? response.agents : [] };
   }
 
   async listManagedTokens(): Promise<ManagedTokenListResponse> {
-    const response = await this.request<ManagedTokenListResponse | APITokenPermission[] | null>("/v1/manage/tokens");
-    if (Array.isArray(response)) {
-      return { tokens: response };
-    }
-    return { revision: response?.revision, updated_at: response?.updated_at, tokens: Array.isArray(response?.tokens) ? response.tokens : [] };
+    return this.request<ManagedTokenListResponse>("/v1/manage/tokens");
   }
 
   async createManagedToken(payload: ManagedTokenRequest): Promise<ManagedTokenResponse> {
-    const response = await this.request<ManagedTokenResponse | APITokenPermission>("/v1/manage/tokens", {
+    return this.request<ManagedTokenResponse>("/v1/manage/tokens", {
       method: "POST",
       body: JSON.stringify(payload)
     });
-    return tokenResponse(response);
   }
 
   async updateManagedToken(id: string, payload: ManagedTokenRequest): Promise<ManagedTokenResponse> {
-    const response = await this.request<ManagedTokenResponse | APITokenPermission>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
+    return this.request<ManagedTokenResponse>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     });
-    return tokenResponse(response);
   }
 
   async rotateManagedToken(id: string): Promise<ManagedTokenResponse> {
-    const response = await this.request<ManagedTokenResponse | APITokenPermission>(`/v1/manage/tokens/${encodeURIComponent(id)}/rotate`, {
+    return this.request<ManagedTokenResponse>(`/v1/manage/tokens/${encodeURIComponent(id)}/rotate`, {
       method: "POST"
     });
-    return tokenResponse(response);
   }
 
   async deleteManagedToken(id: string): Promise<ManagedTokenListResponse> {
-    const response = await this.request<ManagedTokenListResponse | void>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
+    return this.request<ManagedTokenListResponse>(`/v1/manage/tokens/${encodeURIComponent(id)}`, {
       method: "DELETE"
     });
-    return response ?? { tokens: [] };
   }
 
   async listManagedRegisterTokens(): Promise<ManagedRegisterTokenListResponse> {
-    const response = await this.request<ManagedRegisterTokenListResponse | RegisterToken[] | null>("/v1/manage/register-tokens");
-    if (Array.isArray(response)) {
-      return { tokens: response };
-    }
-    return { revision: response?.revision, updated_at: response?.updated_at, tokens: Array.isArray(response?.tokens) ? response.tokens : [] };
+    return this.request<ManagedRegisterTokenListResponse>("/v1/manage/register-tokens");
   }
 
   async createManagedRegisterToken(payload: ManagedRegisterTokenRequest): Promise<ManagedRegisterTokenResponse> {
-    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>("/v1/manage/register-tokens", {
+    return this.request<ManagedRegisterTokenResponse>("/v1/manage/register-tokens", {
       method: "POST",
       body: JSON.stringify(payload)
     });
-    return registerTokenResponse(response);
   }
 
   async updateManagedRegisterToken(id: string, payload: ManagedRegisterTokenRequest): Promise<ManagedRegisterTokenResponse> {
-    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
+    return this.request<ManagedRegisterTokenResponse>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     });
-    return registerTokenResponse(response);
   }
 
   async rotateManagedRegisterToken(id: string): Promise<ManagedRegisterTokenResponse> {
-    const response = await this.request<ManagedRegisterTokenResponse | RegisterToken>(`/v1/manage/register-tokens/${encodeURIComponent(id)}/rotate`, {
+    return this.request<ManagedRegisterTokenResponse>(`/v1/manage/register-tokens/${encodeURIComponent(id)}/rotate`, {
       method: "POST"
     });
-    return registerTokenResponse(response);
   }
 
   async deleteManagedRegisterToken(id: string): Promise<ManagedRegisterTokenListResponse> {
-    const response = await this.request<ManagedRegisterTokenListResponse | void>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
+    return this.request<ManagedRegisterTokenListResponse>(`/v1/manage/register-tokens/${encodeURIComponent(id)}`, {
       method: "DELETE"
     });
-    return response ?? { tokens: [] };
   }
 
-  async createHTTPAgent(payload: HTTPAgentConfig): Promise<HTTPAgentConfig> {
-    return this.request<HTTPAgentConfig>("/v1/manage/agents", {
+  async createOutboundAgent(payload: OutboundAgentConfig): Promise<OutboundAgentConfig> {
+    return this.request<OutboundAgentConfig>("/v1/manage/agents", {
       method: "POST",
-      body: JSON.stringify({ ...payload, transport: "http" })
+      body: JSON.stringify(payload)
     });
   }
 
-  async updateHTTPAgent(id: string, payload: HTTPAgentConfig): Promise<HTTPAgentConfig> {
-    return this.request<HTTPAgentConfig>(`/v1/manage/agents/${encodeURIComponent(id)}`, {
+  async updateOutboundAgent(id: string, payload: OutboundAgentConfig): Promise<OutboundAgentConfig> {
+    return this.request<OutboundAgentConfig>(`/v1/manage/agents/${encodeURIComponent(id)}`, {
       method: "PUT",
-      body: JSON.stringify({ ...payload, transport: "http" })
+      body: JSON.stringify(payload)
     });
   }
 
   async listManagedAgents(): Promise<ManagedAgent[]> {
-    const agents = await this.request<ManagedAgent[] | null>("/v1/manage/agents");
-    return Array.isArray(agents) ? agents : [];
+    return requireArray<ManagedAgent>(await this.request<unknown>("/v1/manage/agents"), "managed agents");
   }
 
   async updateAgentConfig(id: string, payload: AgentConfig): Promise<AgentConfig> {
@@ -240,11 +244,11 @@ export class ApiClient {
   }
 
   async updateManagedAgentLabels(payload: ManagedAgentLabelsRequest): Promise<ManagedAgent[]> {
-    const agents = await this.request<ManagedAgent[] | null>("/v1/manage/agents/labels", {
+    const agents = await this.request<unknown>("/v1/manage/agents/labels", {
       method: "PUT",
       body: JSON.stringify(payload)
     });
-    return Array.isArray(agents) ? agents : [];
+    return requireArray<ManagedAgent>(agents, "managed agents");
   }
 
   async deleteManagedAgent(id: string): Promise<void> {
@@ -253,25 +257,108 @@ export class ApiClient {
     });
   }
 
-  jobStreamUrl(id: string): string {
-    const url = new URL(
-      `${this.baseUrl}/v1/jobs/${encodeURIComponent(id)}/stream`,
-      window.location.origin
-    );
-    if (this.token) {
-      url.searchParams.set("access_token", this.token);
-    }
-    return url.toString();
+  openJobStream(
+    id: string,
+    onMessage: (message: JobStreamMessage) => void,
+    onError: (error: unknown) => void,
+    onRetry?: (error: unknown) => void
+  ): JobStream {
+    const controller = new AbortController();
+    let closed = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    const stream: JobStream = {
+      get closed() {
+        return closed;
+      },
+      close() {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        controller.abort();
+        if (reader) {
+          void reader.cancel().catch(() => undefined);
+        }
+      }
+    };
+
+    void (async () => {
+      let retryMS = initialJobStreamRetryMS;
+      let retryNotified = false;
+      while (!closed) {
+        try {
+          const response = await fetch(`${this.baseUrl}/v1/jobs/${encodeURIComponent(id)}/stream`, {
+            cache: "no-store",
+            credentials: "omit",
+            headers: {
+              Accept: "text/event-stream",
+              ...this.authHeaders()
+            },
+            redirect: "error",
+            signal: controller.signal
+          });
+          if (!response.ok) {
+            const error = new ApiError(response.status, await responseErrorMessage(response));
+            if (response.status >= 500) {
+              throw new RetryableJobStreamError(error.message);
+            }
+            throw error;
+          }
+          if (!response.body) {
+            throw new Error("Streaming response body is unavailable");
+          }
+          const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+          if (!contentType.startsWith("text/event-stream")) {
+            throw new Error("Streaming response has an invalid content type");
+          }
+          const connectedAt = Date.now();
+          reader = response.body.getReader();
+          await consumeSSE(reader, (message) => {
+            retryNotified = false;
+            onMessage(message);
+          }, controller.signal);
+          if (Date.now() - connectedAt >= stableJobStreamMS) {
+            retryMS = initialJobStreamRetryMS;
+          }
+          if (!closed) {
+            throw new RetryableJobStreamError("Job event stream ended unexpectedly");
+          }
+        } catch (error) {
+          if (closed || isAbortError(error)) {
+            return;
+          }
+          if (!isRetryableJobStreamError(error)) {
+            closed = true;
+            onError(error);
+            return;
+          }
+          if (!retryNotified) {
+            retryNotified = true;
+            onRetry?.(error);
+          }
+          await waitForJobStreamRetry(controller.signal, retryMS);
+          retryMS = Math.min(retryMS * 2, maxJobStreamRetryMS);
+        } finally {
+          reader?.releaseLock();
+          reader = null;
+        }
+      }
+      closed = true;
+    })();
+    return stream;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
+      cache: "no-store",
+      credentials: "omit",
       headers: {
         "Content-Type": "application/json",
         ...this.authHeaders(),
         ...init.headers
-      }
+      },
+      redirect: "error"
     });
     if (!response.ok) {
       let message = response.statusText || "Request failed";
@@ -298,6 +385,104 @@ export class ApiClient {
   }
 }
 
+async function responseErrorMessage(response: Response): Promise<string> {
+  let message = response.statusText || "Request failed";
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    if (typeof body.error === "string" && body.error) {
+      message = body.error;
+    }
+  } catch {
+    // Keep the HTTP status text when the body is not JSON.
+  }
+  return message;
+}
+
+async function consumeSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onMessage: (message: JobStreamMessage) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    if (signal.aborted) {
+      return;
+    }
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    if (new TextEncoder().encode(buffer).byteLength > maxSSEBufferBytes) {
+      throw new Error("Job event stream exceeded its buffer limit");
+    }
+    let boundary = sseBoundary(buffer);
+    while (boundary) {
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.length);
+      emitSSEBlock(block, onMessage);
+      boundary = sseBoundary(buffer);
+    }
+    if (done) {
+      return;
+    }
+  }
+}
+
+function sseBoundary(buffer: string): { index: number; length: number } | null {
+  const match = /\r?\n\r?\n/.exec(buffer);
+  return match ? { index: match.index, length: match[0].length } : null;
+}
+
+function emitSSEBlock(block: string, onMessage: (message: JobStreamMessage) => void): void {
+  let type = "message";
+  let lastEventId = "";
+  const data: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+    const separator = line.indexOf(":");
+    const field = separator < 0 ? line : line.slice(0, separator);
+    let value = separator < 0 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    if (field === "event") {
+      type = value || "message";
+    } else if (field === "id" && !value.includes("\0")) {
+      lastEventId = value;
+    } else if (field === "data") {
+      data.push(value);
+    }
+  }
+  if (data.length > 0) {
+    onMessage({ data: data.join("\n"), type, lastEventId });
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isRetryableJobStreamError(error: unknown): boolean {
+  return error instanceof RetryableJobStreamError || error instanceof TypeError || (error instanceof Error && error.name === "NetworkError");
+}
+
+function waitForJobStreamRetry(signal: AbortSignal, delayMS: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMS);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 function jobEventFromPayload(jobID: string, payload: EventPayload, index: number): JobEvent {
   const { agent_id: agentID, ...event } = payload;
   return {
@@ -307,18 +492,4 @@ function jobEventFromPayload(jobID: string, payload: EventPayload, index: number
     event,
     created_at: ""
   };
-}
-
-function tokenResponse(response: ManagedTokenResponse | APITokenPermission): ManagedTokenResponse {
-  if ("token" in response) {
-    return response;
-  }
-  return { token: response };
-}
-
-function registerTokenResponse(response: ManagedRegisterTokenResponse | RegisterToken): ManagedRegisterTokenResponse {
-  if ("revision" in response || "updated_at" in response) {
-    return response as ManagedRegisterTokenResponse;
-  }
-  return { token: response as RegisterToken };
 }

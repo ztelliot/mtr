@@ -1,5 +1,5 @@
 {
   "apiBaseUrl": "",
-  "apiToken": "frontend-token",
+  "apiToken": "REPLACE_WITH_PUBLIC_API_TOKEN",
   "brand": "QwQ MTR"
 }

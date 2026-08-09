@@ -12,8 +12,9 @@ export const defaultFormState: JobFormState = {
   agentTags: [],
   count: "4",
   protocol: "icmp",
-  port: "443",
+  port: "",
   method: "HEAD",
+  httpVersion: "auto",
   dnsType: "A",
   resolveOnAgent: true
 };
@@ -35,10 +36,9 @@ export function formStateFromLocation(
     .map((segment) => decodeURIComponent(segment));
   const toolIndex = segments.findIndex((segment) => allTools.has(segment as Tool));
   const pathTool = toolIndex >= 0 ? (segments[toolIndex] as Tool) : undefined;
-  const queryTool = normalizeTool(params.get("tool"));
-  const tool = pathTool ?? queryTool ?? base.tool;
+  const tool = pathTool ?? base.tool;
   const pathTarget = toolIndex >= 0 ? segments.slice(toolIndex + 1).join("/") : "";
-  let target = params.get("target") ?? params.get("host") ?? pathTarget ?? base.target;
+  let target = params.get("target") ?? pathTarget ?? base.target;
   const queryPort = params.get("port");
   if (tool === "port" && queryPort && !parseHostPort(target)) {
     target = `${formatHostForPort(target)}:${queryPort}`;
@@ -47,21 +47,19 @@ export function formStateFromLocation(
     ...base,
     tool,
     target: normalizeTargetForTool(target, tool),
-    ipVersion: parseIPVersion(params.get("ip_version") ?? params.get("ipVersion")) ?? base.ipVersion,
-    agentId: params.get("agent_id") ?? params.get("agentId") ?? base.agentId,
+    ipVersion: parseIPVersion(params.get("ip_version")) ?? base.ipVersion,
+    agentId: params.get("agent_id") ?? base.agentId,
     agentTags: supportsAgentTags(tool) ? normalizeSelectableAgentTags(params.getAll("agent_tag")) : [],
     protocol: parseProtocol(params.get("protocol")) ?? base.protocol,
-    dnsType: parseDNSType(params.get("type") ?? params.get("dns_type") ?? params.get("dnsType")) ?? base.dnsType,
+    port: isNetworkProbeTool(tool) ? parseProbePort(queryPort) ?? base.port : base.port,
+    dnsType: parseDNSType(params.get("type")) ?? base.dnsType,
     method: parseHTTPMethod(params.get("method")) ?? base.method,
-    resolveOnAgent: parseBoolean(params.get("resolve_on_agent") ?? params.get("remote_dns") ?? params.get("remoteDns")) ?? base.resolveOnAgent
+    httpVersion: parseHTTPVersion(params.get("http_version")) ?? base.httpVersion,
+    resolveOnAgent: parseBoolean(params.get("resolve_on_agent")) ?? base.resolveOnAgent
   };
 }
 
 export function locationHasExplicitTool(location: Pick<Location, "pathname" | "search">): boolean {
-  const params = new URLSearchParams(location.search);
-  if (normalizeTool(params.get("tool"))) {
-    return true;
-  }
   return location.pathname
     .split("/")
     .filter(Boolean)
@@ -71,7 +69,7 @@ export function locationHasExplicitTool(location: Pick<Location, "pathname" | "s
 
 export function locationHasExplicitTarget(location: Pick<Location, "pathname" | "search">): boolean {
   const params = new URLSearchParams(location.search);
-  if (params.has("target") || params.has("host")) {
+  if (params.has("target")) {
     return true;
   }
   const segments = location.pathname
@@ -102,9 +100,13 @@ export function formStatePath(state: JobFormState): string {
   }
   if (state.tool === "http") {
     params.set("method", state.method);
+    params.set("http_version", state.httpVersion);
   }
   if (state.tool === "ping" || state.tool === "mtr" || state.tool === "traceroute") {
     params.set("protocol", state.protocol);
+    if (state.protocol !== "icmp" && parseProbePort(state.port)) {
+      params.set("port", state.port.trim());
+    }
   }
   if (state.tool !== "dns") {
     params.set("resolve_on_agent", state.resolveOnAgent ? "1" : "0");
@@ -133,9 +135,11 @@ export function formStateFromJob(job: Job, base: JobFormState = defaultFormState
     ipVersion: job.ip_version ?? base.ipVersion,
     agentId: job.agent_id ?? "",
     agentTags: supportsAgentTags(job.tool) && !job.agent_id ? normalizeSelectableAgentTags(base.agentTags) : [],
-    protocol: parseProtocol(args.protocol) ?? base.protocol,
-    dnsType: parseDNSType(args.type) ?? base.dnsType,
-    method: parseHTTPMethod(args.method) ?? base.method,
+    protocol: parseProtocol(args.protocol) ?? (isNetworkProbeTool(job.tool) ? "icmp" : base.protocol),
+    port: isNetworkProbeTool(job.tool) ? parseProbePort(args.port) ?? "" : base.port,
+    dnsType: parseDNSType(args.type) ?? (job.tool === "dns" ? "A" : base.dnsType),
+    method: parseHTTPMethod(args.method) ?? (job.tool === "http" ? "GET" : base.method),
+    httpVersion: parseHTTPVersion(args.http_version) ?? (job.tool === "http" ? "1.1" : base.httpVersion),
     resolveOnAgent: job.resolve_on_agent ?? base.resolveOnAgent
   };
 }
@@ -146,9 +150,13 @@ export function buildCreateJobRequest(state: JobFormState): CreateJobRequest {
   const agentTags = !state.agentId && supportsAgentTags(state.tool) ? normalizeSelectableAgentTags(state.agentTags) : [];
   if (state.tool === "ping" || state.tool === "traceroute" || state.tool === "mtr") {
     setIfPresent(args, "protocol", state.protocol);
+    if (state.protocol !== "icmp" && parseProbePort(state.port)) {
+      setIfPresent(args, "port", state.port);
+    }
   }
   if (state.tool === "http") {
     setIfPresent(args, "method", state.method);
+    setIfPresent(args, "http_version", state.httpVersion);
   }
   if (state.tool === "dns") {
     setIfPresent(args, "type", state.dnsType);
@@ -185,6 +193,9 @@ export function validateForm(state: JobFormState): string | null {
   }
   if (state.tool === "port" && !parseHostPort(target)) {
     return "port requires host:port.";
+  }
+  if (isNetworkProbeTool(state.tool) && state.protocol !== "icmp" && state.port.trim() && !parseProbePort(state.port)) {
+    return "port must be between 1 and 65535.";
   }
   return null;
 }
@@ -363,12 +374,20 @@ function setIfPresent(args: Record<string, string>, key: string, value: string):
 }
 
 function validPort(value: string): boolean {
+  if (!/^[1-9]\d*$/.test(value)) {
+    return false;
+  }
   const port = Number(value);
   return Number.isInteger(port) && port > 0 && port <= 65535;
 }
 
-function normalizeTool(value: string | null): Tool | undefined {
-  return value && allTools.has(value as Tool) ? (value as Tool) : undefined;
+export function parseProbePort(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim() ?? "";
+  return /^\d+$/.test(trimmed) && validPort(trimmed) ? trimmed : undefined;
+}
+
+function isNetworkProbeTool(tool: Tool): boolean {
+  return tool === "ping" || tool === "traceroute" || tool === "mtr";
 }
 
 function parseIPVersion(value: string | null): JobFormState["ipVersion"] | undefined {
@@ -386,6 +405,11 @@ function parseDNSType(value: string | null): JobFormState["dnsType"] | undefined
 function parseHTTPMethod(value: string | null): JobFormState["method"] | undefined {
   const normalized = value?.trim().toUpperCase();
   return normalized === "HEAD" || normalized === "GET" ? normalized : undefined;
+}
+
+function parseHTTPVersion(value: string | null): JobFormState["httpVersion"] | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "auto" || normalized === "3" || normalized === "2" || normalized === "1.1" ? normalized : undefined;
 }
 
 function parseBoolean(value: string | null): boolean | undefined {

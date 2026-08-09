@@ -29,6 +29,7 @@ import { useTranslation } from "react-i18next";
 import { agentSelectLabel } from "./agentDisplay";
 import { agentTagCounts, agentTagLabel, filterAgentsByTags, normalizeSelectableAgentTags } from "./agentTags";
 import { ApiClient } from "./api";
+import type { JobStream, JobStreamMessage } from "./api";
 import { brandUrlTargetsCurrentApp, loadConfig, normalizeBaseUrl, saveStoredApiBaseUrl, saveStoredApiToken } from "./config";
 import { DynamicFields, RemoteDNSSwitch, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
@@ -39,18 +40,16 @@ import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFro
 import { jobHasTerminalEvent } from "./jobStatus";
 import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
 import { ManagePage } from "./ManagePage";
-import { canReadManage, canReadSchedules, dnsTypeOptions, effectivePermissions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed, toolAllowedForAgent } from "./permissions";
+import { canReadManage, canReadSchedules, dnsTypeOptions, effectivePermissions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, httpVersionOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed, toolAllowedForAgent } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
 import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTables";
 import { SchedulePage } from "./SchedulePage";
 import { jobEventFromStreamMessage, mergeEvent, targetResolvedIP } from "./streamEvents";
+import { StatusFallbackPoller } from "./statusFallback";
 import type { Agent, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, RuntimeConfig, Tool, VersionInfo } from "./types";
 import { appVersionLabel } from "./version";
 
-const streamErrorStatusFallbackMS = 4000;
-const streamNames = ["message", "progress", "target_resolved", "target_blocked", "unsupported_tool", "unsupported_protocol", "job_timeout", "hop", "hop_summary", "metric", "summary", "completed", "succeeded", "failed", "canceled", "stderr", "stdout"];
 const debugThemeStorageKey = "mtr.debug-theme";
-const legacyDebugPixelThemeStorageKey = "mtr.debug-pixel-theme";
 const debugThemes = ["pixel", "classic"] as const;
 type DebugTheme = (typeof debugThemes)[number];
 type AppPage = "diagnostics" | "schedules" | "manage";
@@ -100,11 +99,11 @@ export function App() {
   const [debugTheme, setDebugTheme] = useState<DebugTheme>(storedDebugTheme);
   const [apiBaseUrlDraft, setApiBaseUrlDraft] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState("");
-  const sourcesRef = useRef<EventSource[]>([]);
+  const sourcesRef = useRef<JobStream[]>([]);
   const activeJobsRef = useRef<Job[]>([]);
   const eventsByJobIdRef = useRef<Record<string, JobEvent[]>>({});
   const pendingGeoIPRef = useRef<Set<string>>(new Set());
-  const streamErrorFallbackTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [streamErrorFallback] = useState(() => new StatusFallbackPoller(4_000, 30_000));
   const pendingStatusRefreshRef = useRef<Set<string>>(new Set());
   const restoreJobRequestRef = useRef(0);
   const versionClickCountRef = useRef(0);
@@ -181,10 +180,11 @@ export function App() {
   const onlineAgents = visibleAgents.filter((agent) => agent.status === "online").length;
   const noFanoutAgents = submissionIsFanout && selectedFanoutAgents.length === 0;
   const canSubmitCurrentTool = toolAllowed(permissions, form.tool);
+  const noRouteAgents = canSubmitCurrentTool && requiresAgentForTool(permissions, form.tool) && routeAgents.length === 0;
   const showReadonlyResultHeader = !canSubmitCurrentTool && Boolean(currentJob);
-  const showFormError = attemptedSubmit && Boolean(formError) && !error && !permissionsLoadFailed;
+  const showFormError = attemptedSubmit && Boolean(formError) && !noRouteAgents && !error && !permissionsLoadFailed;
   const showNoFanoutAgents = attemptedSubmit && noFanoutAgents && !error && !formError && !permissionsLoadFailed;
-  const runDisabled = !client || permissionsLoadFailed || !canSubmitCurrentTool || controlsLocked;
+  const runDisabled = !client || permissionsLoadFailed || !canSubmitCurrentTool || noRouteAgents || controlsLocked;
   const brandText = config?.brand?.trim() || t("brand");
   const brandHref = config?.brandUrl === null ? "" : config?.brandUrl ?? "/";
 
@@ -213,7 +213,6 @@ export function App() {
     themeClasses.forEach((className) => document.body.classList.remove(className));
     debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.add(className));
     window.localStorage.setItem(debugThemeStorageKey, debugTheme);
-    window.localStorage.removeItem(legacyDebugPixelThemeStorageKey);
     return () => debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.remove(className));
   }, [debugTheme]);
 
@@ -290,8 +289,13 @@ export function App() {
     const methods = httpMethodOptions(effective);
     if (form.tool === "http" && methods.length > 0 && !methods.some((option) => option.value === form.method)) {
       updateForm("method", methods[0].value);
+      return;
     }
-  }, [form.agentId, form.dnsType, form.ipVersion, form.method, form.protocol, form.resolveOnAgent, form.tool, permissions, selectedFormAgent]);
+    const httpVersions = httpVersionOptions(effective);
+    if (form.tool === "http" && httpVersions.length > 0 && !httpVersions.some((option) => option.value === form.httpVersion)) {
+      updateForm("httpVersion", httpVersions[0].value);
+    }
+  }, [form.agentId, form.dnsType, form.httpVersion, form.ipVersion, form.method, form.protocol, form.resolveOnAgent, form.tool, permissions, selectedFormAgent]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -326,8 +330,9 @@ export function App() {
       }
       return;
     }
-    if (!form.agentId || !routeAgents.some((agent) => agent.id === form.agentId)) {
-      updateForm("agentId", routeAgents[0]?.id ?? "");
+    const replacementAgentID = routeAgentIDReplacement(form.agentId, routeAgents);
+    if (replacementAgentID !== undefined) {
+      updateForm("agentId", replacementAgentID);
     }
   }, [form.tool, form.agentId, permissions, routeAgents]);
 
@@ -508,18 +513,14 @@ export function App() {
   }
 
   function openStream(api: ApiClient, jobID: string, agentID?: string) {
-    const source = new EventSource(api.jobStreamUrl(jobID));
-    sourcesRef.current.push(source);
-    setStreaming(true);
-
-    const onEvent = (message: MessageEvent<string>) => {
+    const onEvent = (message: JobStreamMessage) => {
       try {
         const event = jobEventFromStreamMessage(message, jobID, agentID);
         const eventFailureMessage = jobErrorEventMessage(event);
         if (eventFailureMessage) {
           setError(eventFailureMessage);
         }
-        clearStatusFallback(streamErrorFallbackTimersRef, event.job_id);
+        streamErrorFallback.stop(event.job_id);
         setEventsByJobId((current) => {
           const next = {
             ...current,
@@ -533,15 +534,18 @@ export function App() {
       }
     };
 
-    for (const name of streamNames) {
-      source.addEventListener(name, onEvent as EventListener);
-    }
-    source.onmessage = onEvent;
-    source.onerror = () => {
-      const live = sourcesRef.current.some((item) => item.readyState !== EventSource.CLOSED);
-      setStreaming(live);
-      scheduleStatusFallback(api, jobID, streamErrorStatusFallbackMS, streamErrorFallbackTimersRef);
-    };
+    const source = api.openJobStream(
+      jobID,
+      onEvent,
+      () => {
+        const live = sourcesRef.current.some((item) => !item.closed);
+        setStreaming(live);
+        startStatusFallback(api, jobID);
+      },
+      () => startStatusFallback(api, jobID)
+    );
+    sourcesRef.current.push(source);
+    setStreaming(true);
   }
 
   function handleCreatedJob(api: ApiClient, job: Job, agentID?: string) {
@@ -587,48 +591,35 @@ export function App() {
     return translated === key ? t("jobErrorTypes.job_failed") : translated;
   }
 
-  function scheduleStatusFallback(
-    api: ApiClient,
-    jobID: string,
-    delayMS: number,
-    timersRef: React.MutableRefObject<Record<string, ReturnType<typeof setTimeout>>>
-  ) {
-    clearStatusFallback(timersRef, jobID);
-    timersRef.current[jobID] = setTimeout(() => {
-      delete timersRef.current[jobID];
-      void refreshJobStatus(api, jobID);
-    }, delayMS);
+  function startStatusFallback(api: ApiClient, jobID: string) {
+    streamErrorFallback.start(jobID, () => refreshJobStatus(api, jobID));
   }
 
-  function clearStatusFallback(
-    timersRef: React.MutableRefObject<Record<string, ReturnType<typeof setTimeout>>>,
-    jobID: string
-  ) {
-    const timer = timersRef.current[jobID];
-    if (!timer) {
-      return;
-    }
-    clearTimeout(timer);
-    delete timersRef.current[jobID];
-  }
-
-  function clearAllStatusFallbacks() {
-    for (const timer of Object.values(streamErrorFallbackTimersRef.current)) {
-      clearTimeout(timer);
-    }
-    streamErrorFallbackTimersRef.current = {};
-  }
-
-  async function refreshJobStatus(api: ApiClient, jobID: string) {
+  async function refreshJobStatus(api: ApiClient, jobID: string): Promise<boolean> {
     if (pendingStatusRefreshRef.current.has(jobID)) {
-      return;
+      return false;
     }
     pendingStatusRefreshRef.current.add(jobID);
     try {
       const job = await api.getJob(jobID);
-      setActiveJobs((current) => current.map((item) => (item.id === job.id ? { ...item, ...job } : item)));
+      setActiveJobs((current) => {
+        const next = current.map((item) => (item.id === job.id ? { ...item, ...job } : item));
+        activeJobsRef.current = next;
+        return next;
+      });
+      try {
+        const events = await api.listJobEvents(jobID);
+        setEventsByJobId((current) => {
+          const next = { ...current, [jobID]: events };
+          eventsByJobIdRef.current = next;
+          return next;
+        });
+      } catch {
+        // Status polling must continue even when event history is temporarily unavailable.
+      }
+      return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
     } catch {
-      // The stream itself remains the source of truth if the status refresh races a transient failure.
+      return false;
     } finally {
       pendingStatusRefreshRef.current.delete(jobID);
     }
@@ -636,11 +627,10 @@ export function App() {
 
   function closeStreams() {
     for (const source of sourcesRef.current) {
-      source.onerror = null;
       source.close();
     }
     sourcesRef.current = [];
-    clearAllStatusFallbacks();
+    streamErrorFallback.stopAll();
   }
 
   function updateForm<Key extends keyof JobFormState>(key: Key, value: JobFormState[Key]) {
@@ -920,14 +910,15 @@ export function App() {
                         className="agent-field"
                         checkIconPosition="left"
                         disabled={controlsLocked}
+                        error={noRouteAgents}
                         label={t("form.agent")}
                         data={routeAgents.map((agent) => ({
                           value: agent.id,
                           label: agentSelectLabel(agent, t)
                         }))}
+                        placeholder={noRouteAgents ? t("form.noAvailableAgents") : undefined}
                         value={form.agentId || null}
                         onChange={(value) => updateForm("agentId", value ?? routeAgents[0]?.id ?? "")}
-                        error={!form.agentId ? t("errors.agentRequired", { tool: form.tool }) : null}
                       />
                     )}
                     {supportsAgentTags(form.tool) && (
@@ -974,6 +965,21 @@ export function App() {
                       {controlsLocked ? t("form.running") : t("form.run")}
                     </Button>
                   </div>
+                  {noRouteAgents && (
+                    <Alert className="query-form-alert" color="yellow" icon={<AlertTriangle size={18} />} mt="md" radius="md">
+                      {t("errors.noAvailableNodes")}
+                    </Alert>
+                  )}
+                  {showFormError && (
+                    <Alert className="query-form-alert" color="yellow" mt="md" radius="md">
+                      {formError}
+                    </Alert>
+                  )}
+                  {showNoFanoutAgents && (
+                    <Alert className="query-form-alert" color="yellow" mt="md" radius="md">
+                      {t("form.noAvailableAgents")}
+                    </Alert>
+                  )}
                 </Paper>
               </form>
             )}
@@ -1003,17 +1009,6 @@ export function App() {
                 {error}
               </Alert>
             )}
-            {showFormError && (
-              <Alert color="yellow" mb="md" radius="md">
-                {formError}
-              </Alert>
-            )}
-            {showNoFanoutAgents && (
-              <Alert color="yellow" mb="md" radius="md">
-                {t("form.noAvailableAgents")}
-              </Alert>
-            )}
-
             <Paper withBorder className="result-table">
               {isFanout ? (
                 <NodeResultTable tool={resultTool} rows={nodeRows} compact={compact} geoIPByIP={geoIPByIP} onTraceIP={jumpToMtr} showHTTPDownloadMetrics={showHTTPDownloadMetrics} t={t} />
@@ -1140,6 +1135,10 @@ function jobParameterSummary(job: Job): string {
   if (job.tool === "http" && method) {
     details.push(method);
   }
+  const httpVersion = typeof args.http_version === "string" ? args.http_version.trim().toUpperCase() : "";
+  if (job.tool === "http" && httpVersion) {
+    details.push(httpVersion === "AUTO" ? "HTTP Auto" : `HTTP/${httpVersion}`);
+  }
   const recordType = typeof args.type === "string" ? args.type.trim().toUpperCase() : "";
   if (job.tool === "dns" && recordType) {
     details.push(recordType);
@@ -1159,7 +1158,7 @@ function pageFromLocation(location: Pick<Location, "pathname">): AppPage {
 
 function jobIDFromLocation(location: Pick<Location, "pathname" | "search">): string {
   const params = new URLSearchParams(location.search);
-  const queryID = params.get("job_id") ?? params.get("jobId");
+  const queryID = params.get("job_id");
   if (queryID?.trim()) {
     return queryID.trim();
   }
@@ -1180,22 +1179,25 @@ function jobMatchesLocation(job: Job, location: Pick<Location, "pathname" | "sea
   if (locationHasExplicitTarget(location) && actual.target !== expected.target) {
     return false;
   }
-  if (expected.tool !== "dns" && hasAnyParam(params, ["ip_version", "ipVersion"]) && actual.ipVersion !== expected.ipVersion) {
+  if (expected.tool !== "dns" && params.has("ip_version") && actual.ipVersion !== expected.ipVersion) {
     return false;
   }
-  if (hasAnyParam(params, ["agent_id", "agentId"]) && actual.agentId !== expected.agentId) {
+  if (params.has("agent_id") && actual.agentId !== expected.agentId) {
     return false;
   }
   if ((expected.tool === "ping" || expected.tool === "traceroute" || expected.tool === "mtr") && params.has("protocol") && actual.protocol !== expected.protocol) {
     return false;
   }
-  if (expected.tool === "dns" && hasAnyParam(params, ["type", "dns_type", "dnsType"]) && actual.dnsType !== expected.dnsType) {
+  if (expected.tool === "dns" && params.has("type") && actual.dnsType !== expected.dnsType) {
     return false;
   }
   if (expected.tool === "http" && params.has("method") && actual.method !== expected.method) {
     return false;
   }
-  if (expected.tool !== "dns" && hasAnyParam(params, ["resolve_on_agent", "remote_dns", "remoteDns"]) && actual.resolveOnAgent !== expected.resolveOnAgent) {
+  if (expected.tool === "http" && params.has("http_version") && actual.httpVersion !== expected.httpVersion) {
+    return false;
+  }
+  if (expected.tool !== "dns" && params.has("resolve_on_agent") && actual.resolveOnAgent !== expected.resolveOnAgent) {
     return false;
   }
   return true;
@@ -1203,13 +1205,20 @@ function jobMatchesLocation(job: Job, location: Pick<Location, "pathname" | "sea
 
 function locationHasJobContext(location: Pick<Location, "pathname" | "search">): boolean {
   const params = new URLSearchParams(location.search);
-  if (hasAnyParam(params, ["tool", "target", "host"])) {
+  if (params.has("target")) {
     return true;
   }
   const segments = location.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   return segments.some((segment) => navTools.includes(segment as Tool));
 }
 
-function hasAnyParam(params: URLSearchParams, names: string[]): boolean {
-  return names.some((name) => params.has(name));
+export function routeAgentIDReplacement(
+  currentAgentID: string,
+  availableAgents: ReadonlyArray<Pick<Agent, "id">>
+): string | undefined {
+  if (availableAgents.some((agent) => agent.id === currentAgentID)) {
+    return undefined;
+  }
+  const replacementAgentID = availableAgents[0]?.id ?? "";
+  return replacementAgentID === currentAgentID ? undefined : replacementAgentID;
 }

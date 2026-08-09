@@ -6,9 +6,9 @@ describe("runtime config", () => {
     expect(normalizeBaseUrl(" https://api.example.com/// ")).toBe("https://api.example.com");
   });
 
-  it("loads config with safe defaults", async () => {
+  it("loads the deployment API token from config.json", async () => {
     const fetcher = async () =>
-      new Response(JSON.stringify({ apiBaseUrl: "http://localhost:8080/", apiToken: "token", brand: "  Edge MTR  ", brandUrl: " https://mtr.example.com/ " }));
+      new Response(JSON.stringify({ apiBaseUrl: "http://localhost:8080/", apiToken: "  token  ", brand: "  Edge MTR  ", brandUrl: " https://mtr.example.com/ " }));
 
     await expect(loadConfig(fetcher as typeof fetch)).resolves.toEqual({
       apiBaseUrl: "http://localhost:8080",
@@ -90,6 +90,15 @@ describe("runtime config", () => {
       apiBaseUrl: "",
       apiToken: "token",
       brandUrl: null
+    });
+  });
+
+  it("ignores a non-string deployment API token", async () => {
+    const fetcher = async () => new Response(JSON.stringify({ apiBaseUrl: "", apiToken: { secret: "not-a-string" } }));
+
+    await expect(loadConfig(fetcher as typeof fetch)).resolves.toEqual({
+      apiBaseUrl: "",
+      apiToken: ""
     });
   });
 

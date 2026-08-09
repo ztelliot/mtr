@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { __managePageTest } from "./ManagePage";
-import type { APITokenPermission, ManagedAgent } from "./types";
+import type { APITokenPermission, ManagedAgent, OutboundAgentConfig } from "./types";
 
 describe("manage token helpers", () => {
   it("preserves inherited token allowed_args while showing editable defaults", () => {
@@ -13,7 +13,7 @@ describe("manage token helpers", () => {
 
     const editable = __managePageTest.withTokenDefaults(token);
     expect(editable.tools?.http?.allowed_args).toBeUndefined();
-    expect(__managePageTest.displayTokenToolScope("http", editable.tools?.http).allowed_args).toEqual({ method: "GET,HEAD" });
+    expect(__managePageTest.displayTokenToolScope("http", editable.tools?.http).allowed_args).toEqual({ method: "GET,HEAD", http_version: "auto,3,2,1.1" });
     expect(__managePageTest.normalizeToken(editable).tools?.http?.allowed_args).toBeUndefined();
   });
 
@@ -22,6 +22,26 @@ describe("manage token helpers", () => {
 
     expect(selected.dns).toEqual({});
     expect(__managePageTest.displayTokenToolScope("dns", selected.dns).allowed_args).toEqual({ type: "A,AAAA,CNAME,MX,TXT,NS" });
+  });
+
+  it("does not invent an HTTP version for method-only access", () => {
+    const raw = { allowed_args: { method: "HEAD" } };
+
+    expect(__managePageTest.displayTokenToolScope("http", raw).allowed_args).toEqual({ method: "HEAD" });
+    expect(__managePageTest.normalizeTokenToolScope("http", raw).allowed_args).toEqual({ method: "HEAD" });
+    expect(__managePageTest.updateAllowedArg("http", raw.allowed_args, "method", "GET")).toEqual({ method: "GET" });
+  });
+
+  it("keeps raw policy args separate from editable effective defaults", () => {
+    expect(__managePageTest.withPolicyDefaults("http", { enabled: true, allowed_args: { method: "HEAD" } })).toEqual({
+      enabled: true,
+      allowed_args: { method: "HEAD" }
+    });
+    expect(__managePageTest.effectiveAllowedArgs("http", { method: "HEAD" })).toEqual({ method: "HEAD" });
+    expect(__managePageTest.updateAllowedArg("http", undefined, "method", "HEAD")).toEqual({
+      method: "HEAD",
+      http_version: "auto,3,2,1.1"
+    });
   });
 
   it("normalizes and de-duplicates register token Agent IDs", () => {
@@ -46,36 +66,147 @@ describe("manage token helpers", () => {
     expect(__managePageTest.normalizeTokenToolScope("ping", { ip_versions: [4] }).ip_versions).toEqual([4]);
   });
 
-  it("requires HTTP agent token before submitting to match backend validation", () => {
-    expect(__managePageTest.httpAgentRequiredFieldsMissing({
+  it("requires outbound authentication fields according to their type", () => {
+    const bearer: OutboundAgentConfig = {
       id: "edge-http",
+      transport: "http",
       enabled: true,
-      base_url: "https://edge.example.com",
-      http_token: "",
+      url: "https://edge.example.com",
+      auth: { type: "bearer", secret: "" },
       labels: []
-    })).toEqual({ id: false, baseURL: false, token: true });
-    expect(__managePageTest.httpAgentRequiredFieldsMissing({
-      id: "edge-http",
+    };
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(bearer)).toEqual({ id: false, url: false, header: false, accessKey: false, projectID: false, secret: true, eventResponse: false });
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(bearer, "edge-http", true, bearer).secret).toBe(false);
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing({
+      id: "edge-event",
+      transport: "event",
       enabled: true,
-      base_url: "https://edge.example.com",
-      http_token: " secret ",
+      url: "https://functions.example.com/invoke",
+      auth: { type: "header", header: "X-Auth-Token", secret: " secret " },
+      event_response: "result_field",
       labels: []
-    })).toEqual({ id: false, baseURL: false, token: false });
+    })).toEqual({ id: false, url: false, header: false, accessKey: false, projectID: false, secret: false, eventResponse: false });
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing({
+      id: "edge-function",
+      transport: "event",
+      enabled: true,
+      url: "https://functiongraph.example.com/invoke",
+      auth: { type: "huaweicloud_aksk", access_key: "", project_id: "", secret: "" },
+      event_response: "result_field",
+      labels: []
+    })).toEqual({ id: false, url: false, header: false, accessKey: true, projectID: true, secret: true, eventResponse: false });
+    const huaweiCloud: OutboundAgentConfig = {
+      id: "edge-function",
+      transport: "event",
+      enabled: true,
+      url: "https://functiongraph.example.com/invoke",
+      auth: { type: "huaweicloud_aksk", access_key: "AK", project_id: "project", secret: "" },
+      event_response: "result_field",
+      labels: []
+    };
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(huaweiCloud, "edge-function", true, huaweiCloud).secret).toBe(false);
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(huaweiCloud, "edge-function", true, bearer).secret).toBe(true);
   });
 
-  it("does not mark saved HTTP agent configs online until backend reports live state", () => {
-    expect(__managePageTest.managedHTTPAgentFromConfig({
-      id: "edge-http",
+  it("retains a redacted outbound secret only for the backend credential scope", () => {
+    const original: OutboundAgentConfig = {
+      id: "edge-function",
+      transport: "event",
       enabled: true,
-      base_url: "https://edge.example.com",
-      http_token: "secret",
+      url: "https://functiongraph.example.com/invoke",
+      auth: { type: "huaweicloud_aksk", access_key: "AK", project_id: "project", secret: "" },
+      headers: { "X-CFF-Request-Version": "v1" },
+      event_response: "result_field",
+      labels: ["old"],
+      tls: { enabled: true, ca_files: ["ca.pem"], cert_file: "client.pem", key_file: "client-key.pem", server_name: "functiongraph.example.com" }
+    };
+    const clone = (): OutboundAgentConfig => ({
+      ...original,
+      auth: { ...original.auth },
+      headers: { ...original.headers },
+      labels: [...(original.labels ?? [])],
+      tls: { ...original.tls, ca_files: [...(original.tls?.ca_files ?? [])] }
+    });
+
+    const nonScopeChange = clone();
+    nonScopeChange.enabled = false;
+    nonScopeChange.event_response = "direct";
+    nonScopeChange.labels = ["new"];
+    expect(__managePageTest.outboundCredentialScopeEqual(original, nonScopeChange)).toBe(true);
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(nonScopeChange, original.id, true, original).secret).toBe(false);
+
+    const scopeChanges: Record<string, (node: OutboundAgentConfig) => void> = {
+      transport: (node) => { node.transport = "http"; },
+      url: (node) => { node.url = "https://other.example.com/invoke"; },
+      "auth type": (node) => { node.auth = { type: "bearer", secret: "" }; },
+      "access key": (node) => { node.auth.access_key = "OTHER-AK"; },
+      "project id": (node) => { node.auth.project_id = "other-project"; },
+      headers: (node) => { node.headers = { "X-CFF-Request-Version": "v2" }; },
+      "tls enabled": (node) => { node.tls = { ...node.tls, enabled: false }; },
+      "tls ca files": (node) => { node.tls = { ...node.tls, ca_files: ["other-ca.pem"] }; },
+      "tls cert file": (node) => { node.tls = { ...node.tls, cert_file: "other-client.pem" }; },
+      "tls key file": (node) => { node.tls = { ...node.tls, key_file: "other-key.pem" }; },
+      "tls server name": (node) => { node.tls = { ...node.tls, server_name: "other.example.com" }; }
+    };
+    for (const [name, mutate] of Object.entries(scopeChanges)) {
+      const next = clone();
+      mutate(next);
+      expect(__managePageTest.outboundCredentialScopeEqual(original, next), name).toBe(false);
+      expect(__managePageTest.outboundAgentRequiredFieldsMissing(next, original.id, true, original).secret, name).toBe(true);
+    }
+
+    const headerOriginal = clone();
+    headerOriginal.auth = { type: "header", header: "X-Agent-Token", secret: "" };
+    const headerChanged = { ...headerOriginal, auth: { ...headerOriginal.auth, header: "X-Other-Token" } };
+    expect(__managePageTest.outboundCredentialScopeEqual(headerOriginal, headerChanged)).toBe(false);
+    expect(__managePageTest.outboundAgentRequiredFieldsMissing(headerChanged, original.id, true, headerOriginal).secret).toBe(true);
+  });
+
+  it("serializes only fields used by the selected outbound authentication type", () => {
+    expect(__managePageTest.outboundAgentAuthForSave({
+      type: "huaweicloud_aksk",
+      access_key: " AK ",
+      project_id: " project ",
+      secret: " SK ",
+      header: "X-Stale"
+    })).toEqual({ type: "huaweicloud_aksk", access_key: "AK", project_id: "project", secret: "SK" });
+    expect(__managePageTest.outboundAgentAuthForSave({
+      type: "header",
+      header: " X-Agent-Token ",
+      secret: " token ",
+      access_key: "stale-ak",
+      project_id: "stale-project"
+    })).toEqual({ type: "header", header: "X-Agent-Token", secret: "token" });
+    expect(__managePageTest.outboundAgentAuthForSave({
+      type: "none",
+      secret: "stale-secret",
+      access_key: "stale-ak",
+      project_id: "stale-project"
+    })).toEqual({ type: "none" });
+  });
+
+  it("accepts only string-valued JSON objects for outbound request headers", () => {
+    expect(__managePageTest.parseOutboundHeaders('{"X-CFF-Request-Version":"v1"}')).toEqual({ "X-CFF-Request-Version": "v1" });
+    expect(__managePageTest.parseOutboundHeaders("[]")).toBeNull();
+    expect(__managePageTest.parseOutboundHeaders('{"X-Test":1}')).toBeNull();
+    expect(__managePageTest.parseOutboundHeaders("{")).toBeNull();
+  });
+
+  it("does not mark saved outbound agent configs online until backend reports live state", () => {
+    expect(__managePageTest.managedOutboundAgentFromConfig({
+      id: "edge-http",
+      transport: "http",
+      enabled: true,
+      url: "https://edge.example.com",
+      auth: { type: "bearer", secret: "secret" },
       labels: []
     }).status).toBe("offline");
-    expect(__managePageTest.managedHTTPAgentFromConfig({
+    expect(__managePageTest.managedOutboundAgentFromConfig({
       id: "edge-http",
+      transport: "http",
       enabled: true,
-      base_url: "https://edge.example.com",
-      http_token: "secret",
+      url: "https://edge.example.com",
+      auth: { type: "bearer", secret: "secret" },
       labels: []
     }, { ...managedAgent("edge-http", ["agent", "agent:http", "id:edge-http"]), status: "online", transport: "http" }).status).toBe("online");
   });
