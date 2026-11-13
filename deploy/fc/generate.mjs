@@ -27,7 +27,13 @@ const targetsPath = resolve(here, configuredTargetsPath);
 const targetsDisplayPath =
   relative(here, targetsPath).replaceAll("\\", "/") || defaultTargetsFile;
 
-const providerOrder = ["aliyun", "ctyun", "qcloud", "gcloud"];
+const providerOrder = [
+  "aliyun",
+  "ctyun",
+  "qcloud",
+  "huaweicloud",
+  "gcloud",
+];
 const providerConfigs = {
   aliyun: {
     kind: "devs3",
@@ -53,6 +59,12 @@ const providerConfigs = {
     isp: "QCloud",
     renderer: renderQcloudServerlessYaml,
   },
+  huaweicloud: {
+    kind: "huaweicloudFunctionGraph",
+    defaultName: "mtr-agent-huaweicloud",
+    defaultOutput: "huaweicloud",
+    isp: "HWCloud",
+  },
   gcloud: {
     kind: "gcloudRun",
     defaultName: "mtr-agent-gcloud",
@@ -75,6 +87,91 @@ const qcloudDefaultImageRegistries = {
   "na-siliconvalley": "uswccr.ccs.tencentyun.com",
   "sa-saopaulo": "saoccr.ccs.tencentyun.com",
 };
+const huaweicloudDefaultImageRegistries = {
+  default: "swr.{region}.myhuaweicloud.com",
+  "eu-west-101": "swr.eu-west-101.myhuaweicloud.eu",
+};
+const huaweicloudFunctionOverrideFields = new Set([
+  "memory_size",
+  "timeout",
+  "strategy_config",
+  "description",
+  "func_vpc",
+  "mount_config",
+  "log_config",
+  "network_controller",
+  "enable_lts_log",
+  "lts_custom_tag",
+  "domain_names",
+  "enterprise_project_id",
+  "enable_dynamic_memory",
+  "is_stateful_function",
+  "gpu_memory",
+  "gpu_type",
+  "initializer_handler",
+  "initializer_timeout",
+  "pre_stop_handler",
+  "pre_stop_timeout",
+  "encrypted_user_data",
+  "user_data_encrypt_kms_key_id",
+  "app_xrole",
+]);
+const huaweicloudFunctionObjectFields = new Set([
+  "strategy_config",
+  "func_vpc",
+  "mount_config",
+  "log_config",
+  "network_controller",
+  "lts_custom_tag",
+]);
+const huaweicloudFunctionBooleanFields = new Set([
+  "enable_lts_log",
+  "enable_dynamic_memory",
+  "is_stateful_function",
+]);
+const huaweicloudFunctionIntegerFields = new Set([
+  "memory_size",
+  "timeout",
+  "gpu_memory",
+  "initializer_timeout",
+  "pre_stop_timeout",
+]);
+const huaweicloudFunctionStringFields = new Set([
+  "description",
+  "domain_names",
+  "enterprise_project_id",
+  "gpu_type",
+  "initializer_handler",
+  "pre_stop_handler",
+  "encrypted_user_data",
+  "user_data_encrypt_kms_key_id",
+  "app_xrole",
+]);
+const huaweicloudMemorySizes = new Set([
+  128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584,
+  4096,
+]);
+const huaweicloudSensitivePublicKeys = new Set([
+  "imageUrl",
+  "project_id",
+  "enterprise_project_id",
+  "vpc_id",
+  "vpc_name",
+  "subnet_id",
+  "subnet_name",
+  "namespace",
+  "security_groups",
+  "group_id",
+  "group_name",
+  "stream_id",
+  "stream_name",
+  "mount_resource",
+  "mount_share_path",
+  "domain_names",
+  "encrypted_user_data",
+  "user_data_encrypt_kms_key_id",
+  "app_xrole",
+]);
 const requiredTargetFields = [
   "key",
   "region",
@@ -121,6 +218,26 @@ function assertTarget(providerName, target, index, seenKeys) {
     target.image,
     `providers.${providerName}.targets[${index}].image`,
   );
+  assertOptionalString(
+    target.projectId,
+    `providers.${providerName}.targets[${index}].projectId`,
+  );
+  assertOptionalString(
+    target.agencyName,
+    `providers.${providerName}.targets[${index}].agencyName`,
+  );
+  assertOptionalString(
+    target.profile,
+    `providers.${providerName}.targets[${index}].profile`,
+  );
+  assertOptionalString(
+    target.package,
+    `providers.${providerName}.targets[${index}].package`,
+  );
+  assertOptionalPlainObject(
+    target.function,
+    `providers.${providerName}.targets[${index}].function`,
+  );
 }
 
 function assertOptionalString(value, path) {
@@ -154,6 +271,14 @@ function assertOptionalImage(value, path) {
   assertOptionalString(value.imageUrl, `${path}.imageUrl`);
   assertOptionalString(value.registry, `${path}.registry`);
   assertOptionalString(value.runtime, `${path}.runtime`);
+  assertOptionalString(value.platform, `${path}.platform`);
+  assertOptionalString(value.command, `${path}.command`);
+  assertOptionalString(value.args, `${path}.args`);
+  assertOptionalString(value.workingDir, `${path}.workingDir`);
+  assertOptionalString(value.uid, `${path}.uid`);
+  assertOptionalString(value.gid, `${path}.gid`);
+  assertOptionalBoolean(value.isPublic, `${path}.isPublic`);
+  assertOptionalBoolean(value.sync, `${path}.sync`);
   assertOptionalPlainObject(value.registries, `${path}.registries`);
   if (value.registries) {
     for (const [key, registry] of Object.entries(value.registries)) {
@@ -372,6 +497,534 @@ function qcloudImageRegistry(target, provider) {
     image.registries ?? {},
   );
   return registries[target.region] ?? registries[target.key] ?? registries.default;
+}
+
+function huaweicloudImageConfig(target, provider) {
+  if (
+    target.image === false || target.image === null ||
+    provider.image === false || provider.image === null
+  ) {
+    throw new Error(
+      `providers.huaweicloud.targets.${target.key}.image cannot disable the custom image`,
+    );
+  }
+
+  const image = deepMerge(
+    { platform: "linux/amd64", sync: true },
+    deepMerge(provider.image ?? {}, target.image ?? {}),
+  );
+  if (image.sync) {
+    assertNonEmptyString(
+      image.sourceImage,
+      `providers.huaweicloud.targets.${target.key}.image.sourceImage when sync is true`,
+    );
+  }
+  assertNonEmptyString(
+    image.imageUrl,
+    `providers.huaweicloud.targets.${target.key}.image.imageUrl`,
+  );
+
+  return image;
+}
+
+function huaweicloudImageRegistry(target, provider) {
+  const image = huaweicloudImageConfig(target, provider);
+  if (image.registry) {
+    return renderTemplate(image.registry, target);
+  }
+
+  const registries = deepMerge(
+    huaweicloudDefaultImageRegistries,
+    image.registries ?? {},
+  );
+  const registry =
+    registries[target.region] ??
+    registries[target.key] ??
+    registries.default;
+  return renderTemplate(registry, target);
+}
+
+function huaweicloudImageUrl(target, provider) {
+  const image = huaweicloudImageConfig(target, provider);
+  return renderTemplate(image.imageUrl, target, {
+    registry: huaweicloudImageRegistry(target, provider),
+  });
+}
+
+function huaweicloudSourceImage(target, provider) {
+  return renderTemplate(
+    huaweicloudImageConfig(target, provider).sourceImage,
+    target,
+  );
+}
+
+function assertHuaweicloudMirrorConsistency(providerName, provider) {
+  const mirrors = new Map();
+  for (const target of provider.targets) {
+    if (!huaweicloudImageConfig(target, provider).sync) {
+      continue;
+    }
+    const destination = huaweicloudImageUrl(target, provider);
+    const source = huaweicloudSourceImage(target, provider);
+    const platform = huaweicloudImageConfig(target, provider).platform;
+    const previous = mirrors.get(destination);
+    if (previous && (previous.source !== source || previous.platform !== platform)) {
+      throw new Error(
+        `providers.${providerName}.targets.${target.key}.image maps ${destination} from ${source} (${platform}), but target ${previous.key} maps the same destination from ${previous.source} (${previous.platform})`,
+      );
+    }
+    mirrors.set(destination, { key: target.key, source, platform });
+  }
+}
+
+function huaweicloudProjectId(target, provider) {
+  const projectId = target.projectId ?? provider.projectId;
+  if (projectId === undefined) {
+    return undefined;
+  }
+  assertNonEmptyString(
+    projectId,
+    `providers.huaweicloud.targets.${target.key}.projectId`,
+  );
+  if (!isPlaceholderValue(projectId) && !/^[A-Za-z0-9]{32}$/.test(projectId)) {
+    throw new Error(
+      `providers.huaweicloud.targets.${target.key}.projectId must be a 32-character project ID`,
+    );
+  }
+  return projectId;
+}
+
+function huaweicloudPackage(target, provider) {
+  const packageName = target.package ?? provider.package ?? "default";
+  assertNonEmptyString(
+    packageName,
+    `providers.huaweicloud.targets.${target.key}.package`,
+  );
+  return packageName;
+}
+
+function huaweicloudProfile(providerName, target, provider) {
+  const profile = target.profile ?? provider.profile;
+  if (profile !== undefined) {
+    assertNonEmptyString(
+      profile,
+      `providers.${providerName}.targets.${target.key}.profile`,
+    );
+  }
+  return profile;
+}
+
+function huaweicloudEnvObject(providerName, provider, target) {
+  const env = envObject(providerName, provider, target);
+
+  // FunctionGraph custom-image event functions have a fixed plaintext HTTP
+  // contract. Do not inherit settings intended for the public HTTP agents.
+  env.MTR_MODE = "event";
+  env.MTR_HTTP_ADDR = ":8000";
+  env.MTR_HTTP_AUTH_TYPE = "none";
+  env.MTR_HTTP_TLS_ENABLED = "false";
+  delete env.MTR_HTTP_AUTH_HEADER;
+  delete env.MTR_HTTP_AUTH_SECRET;
+  delete env.MTR_HTTP_PATH_PREFIX;
+
+  return env;
+}
+
+function assertHuaweicloudUserId(value, path) {
+  if (typeof value !== "string" || !/^-?\d+$/.test(value)) {
+    throw new Error(`${path} must be an integer string`);
+  }
+  const id = Number(value);
+  if (id < -1 || id > 65534 || id === 0 || id === 1000 || id === 1002) {
+    throw new Error(
+      `${path} must be between -1 and 65534 and cannot be 0, 1000, or 1002`,
+    );
+  }
+}
+
+function huaweicloudCustomImage(target, provider) {
+  const image = huaweicloudImageConfig(target, provider);
+  const customImage = {
+    enabled: true,
+    image: huaweicloudImageUrl(target, provider),
+    uid: image.uid ?? "1003",
+    gid: image.gid ?? "1003",
+    is_public: image.isPublic ?? false,
+  };
+
+  if (image.command !== undefined) {
+    customImage.command = image.command;
+  }
+  if (image.args !== undefined) {
+    customImage.args = image.args;
+  }
+  if (image.workingDir !== undefined) {
+    customImage.working_dir = image.workingDir;
+  }
+
+  return customImage;
+}
+
+function huaweicloudFunctionOverrides(providerName, provider, target) {
+  const overrides = deepMerge(provider.function, target.function) ?? {};
+  const path = `providers.${providerName}.targets.${target.key}.function`;
+  for (const key of Object.keys(overrides)) {
+    if (!huaweicloudFunctionOverrideFields.has(key)) {
+      throw new Error(
+        `${path}.${key} is not supported; only common CreateFunction/UpdateFunctionConfig fields and update-only strategy_config are accepted`,
+      );
+    }
+  }
+
+  for (const [key, value] of Object.entries(overrides)) {
+    const fieldPath = `${path}.${key}`;
+    if (
+      huaweicloudFunctionIntegerFields.has(key) &&
+      !Number.isInteger(value)
+    ) {
+      throw new Error(`${fieldPath} must be an integer`);
+    }
+    if (
+      huaweicloudFunctionBooleanFields.has(key) &&
+      typeof value !== "boolean"
+    ) {
+      throw new Error(`${fieldPath} must be a boolean`);
+    }
+    if (
+      huaweicloudFunctionStringFields.has(key) &&
+      typeof value !== "string"
+    ) {
+      throw new Error(`${fieldPath} must be a string`);
+    }
+    if (
+      huaweicloudFunctionObjectFields.has(key) &&
+      !isPlainObject(value)
+    ) {
+      throw new Error(`${fieldPath} must be an object`);
+    }
+  }
+
+  if (overrides.strategy_config) {
+    for (const [key, value] of Object.entries(overrides.strategy_config)) {
+      if (key !== "concurrency" && key !== "concurrent_num") {
+        throw new Error(`${path}.strategy_config.${key} is not supported`);
+      }
+      const minimum = key === "concurrency" ? -1 : 1;
+      if (!Number.isInteger(value) || value < minimum || value > 1000) {
+        throw new Error(`${path}.strategy_config.${key} must be an integer between ${minimum} and 1000`);
+      }
+    }
+  }
+
+  if (
+    overrides.memory_size !== undefined &&
+    !huaweicloudMemorySizes.has(overrides.memory_size)
+  ) {
+    throw new Error(
+      `${path}.memory_size must be one of ${[...huaweicloudMemorySizes].join(", ")}`,
+    );
+  }
+  if (
+    overrides.timeout !== undefined &&
+    (overrides.timeout < 3 || overrides.timeout > 259200)
+  ) {
+    throw new Error(`${path}.timeout must be between 3 and 259200 seconds`);
+  }
+  if (
+    overrides.initializer_timeout !== undefined &&
+    (overrides.initializer_timeout < 1 || overrides.initializer_timeout > 300)
+  ) {
+    throw new Error(
+      `${path}.initializer_timeout must be between 1 and 300 seconds`,
+    );
+  }
+  if (
+    overrides.pre_stop_timeout !== undefined &&
+    (overrides.pre_stop_timeout < 1 || overrides.pre_stop_timeout > 90)
+  ) {
+    throw new Error(
+      `${path}.pre_stop_timeout must be between 1 and 90 seconds`,
+    );
+  }
+  if (
+    overrides.description !== undefined &&
+    overrides.description.length > 512
+  ) {
+    throw new Error(`${path}.description must not exceed 512 characters`);
+  }
+  if (overrides.network_controller?.disable_public_network !== undefined) {
+    assertOptionalBoolean(
+      overrides.network_controller.disable_public_network,
+      `${path}.network_controller.disable_public_network`,
+    );
+  }
+  if (
+    overrides.network_controller?.trigger_access_vpcs !== undefined &&
+    !Array.isArray(overrides.network_controller.trigger_access_vpcs)
+  ) {
+    throw new Error(
+      `${path}.network_controller.trigger_access_vpcs must be an array`,
+    );
+  }
+  if (overrides.lts_custom_tag) {
+    for (const [key, value] of Object.entries(overrides.lts_custom_tag)) {
+      if (typeof value !== "string") {
+        throw new Error(`${path}.lts_custom_tag.${key} must be a string`);
+      }
+    }
+  }
+  for (const prefix of ["initializer", "pre_stop"]) {
+    const handler = overrides[`${prefix}_handler`];
+    const timeout = overrides[`${prefix}_timeout`];
+    if ((handler === undefined) !== (timeout === undefined)) {
+      throw new Error(
+        `${path}.${prefix}_handler and ${path}.${prefix}_timeout must be configured together`,
+      );
+    }
+  }
+  return overrides;
+}
+
+function huaweicloudFunctionBody(providerName, provider, target) {
+  if (
+    !/^[A-Za-z](?:[A-Za-z0-9_-]{0,58}[A-Za-z0-9])?$/.test(
+      target.functionName,
+    )
+  ) {
+    throw new Error(
+      `providers.${providerName}.targets.${target.key}.functionName must start with a letter, end with a letter or digit, and contain at most 60 letters, digits, underscores, or hyphens`,
+    );
+  }
+  const env = huaweicloudEnvObject(providerName, provider, target);
+  if (Object.keys(env).length > 20) {
+    throw new Error(
+      `providers.${providerName}.targets.${target.key} environment exceeds FunctionGraph's 20-variable limit`,
+    );
+  }
+  const userData = JSON.stringify(env);
+  if (Buffer.byteLength(userData, "utf8") > 4096) {
+    throw new Error(
+      `providers.${providerName}.targets.${target.key} environment exceeds FunctionGraph's 4096-byte limit`,
+    );
+  }
+
+  const agencyName = target.agencyName ?? provider.agencyName;
+  assertNonEmptyString(
+    agencyName,
+    `providers.${providerName}.targets.${target.key}.agencyName for a FunctionGraph custom image`,
+  );
+
+  const defaults = {
+    func_name: target.functionName,
+    runtime: "Custom Image",
+    handler: "-",
+    memory_size: 128,
+    timeout: 600,
+    description: `MTR agent (${target.key})`,
+    user_data: userData,
+    network_controller: {
+      disable_public_network: false,
+    },
+    custom_image: huaweicloudCustomImage(target, provider),
+    xrole: agencyName,
+  };
+
+  const body = deepMerge(
+    defaults,
+    huaweicloudFunctionOverrides(providerName, provider, target),
+  );
+  // Keep identity and the custom-image runtime contract in their dedicated
+  // schema fields. The update-only concurrency policy must never be sent to
+  // CreateFunction; it is attached separately in huaweicloudUpdateInput.
+  delete body.strategy_config;
+  body.func_name = defaults.func_name;
+  body.runtime = defaults.runtime;
+  body.handler = defaults.handler;
+  body.user_data = defaults.user_data;
+  body.custom_image = defaults.custom_image;
+  body.xrole = defaults.xrole;
+  for (const field of ["uid", "gid"]) {
+    assertHuaweicloudUserId(
+      body.custom_image[field],
+      `providers.${providerName}.targets.${target.key}.image.${field}`,
+    );
+  }
+
+  return body;
+}
+
+function huaweicloudFunctionUrn(provider, target) {
+  const projectId = huaweicloudProjectId(target, provider);
+  return projectId === undefined ? undefined
+    : `urn:fss:${target.region}:${projectId}:function:${huaweicloudPackage(target, provider)}:${target.functionName}:latest`;
+}
+
+function huaweicloudListInput(providerName, provider, target) {
+  return {
+    query: {
+      func_name: target.functionName,
+      package_name: huaweicloudPackage(target, provider),
+      precise_search: true,
+      maxitems: "400",
+    },
+  };
+}
+
+function parseHuaweicloudCliJson(output) {
+  // KooCLI writes this notice to stdout even with --cli-output=json.
+  // Remove only this known prefix, rather than searching arbitrary output
+  // for a JSON fragment that could hide an error or incomplete response.
+  const notice = "API parameters transferred for the path, query, body, formData, header, and cookies in cli-jsonInput take precedence over command transfers.";
+  const clean = output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+  const cliError = clean.match(/^\s*\[(USE_ERROR|CLI_ERROR|NETWORK_ERROR|OPENAPI_ERROR|APIE_ERROR)\]/m);
+  if (cliError) {
+    const missingProject = /(?:parameters are required:|缺少必填参数[:：])\s*project_id\b/i.test(clean);
+    throw new Error(`KooCLI reported [${cliError[1]}]${missingProject ? ": missing project_id" : "; check the command, credentials, and permissions"}`);
+  }
+  const lines = clean.split(/\r?\n/);
+  while (lines.length > 0 && (lines[0].trim() === "" || lines[0].trim() === notice)) {
+    lines.shift();
+  }
+  let result;
+  try {
+    result = JSON.parse(lines.join("\n"));
+  } catch {
+    throw new Error("KooCLI did not return valid JSON after its cli-jsonInput notice");
+  }
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("KooCLI response must be a JSON object");
+  }
+  const errorCode = result.error_code || result.error?.code;
+  if (errorCode) {
+    const code = String(errorCode).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+    throw new Error(`KooCLI API error: ${code}`);
+  }
+  return result;
+}
+
+function resolveHuaweicloudProjectId(response, region) {
+  if (!Array.isArray(response.projects) || response.links?.next) {
+    throw new Error("IAM did not return a complete project list");
+  }
+  const matches = response.projects.filter(project => project.name === region && project.enabled !== false);
+  if (matches.length !== 1 || !/^[A-Za-z0-9]{32}$/.test(matches[0].id)) {
+    throw new Error(`Expected one enabled IAM project for ${region}; check IAM permissions or explicitly configure projectId`);
+  }
+  return matches[0].id;
+}
+
+function redactHuaweicloudCliOutput(output) {
+  const clean = output
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/(\bauthorization\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]");
+  return clean.replace(
+    /((?:["']?)(?:[A-Za-z0-9_-]*(?:secret|token|password|access[_-]?key|authorization|user[_-]?data)[A-Za-z0-9_-]*|auth)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi,
+    "$1[REDACTED]",
+  ).trim() || "(empty)";
+}
+
+function renderHuaweicloudCliHelper() {
+  return [
+    'import { readFile, writeFile } from "node:fs/promises";',
+    parseHuaweicloudCliJson.toString(),
+    redactHuaweicloudCliOutput.toString(),
+    resolveHuaweicloudProjectId.toString(),
+    resolveHuaweicloudFunctionUrn.toString(),
+    'const [action, ...args] = process.argv.slice(2);',
+    'let rawOutput = "";',
+    'try {',
+    '  rawOutput = await readFile(args[0], "utf8");',
+    '  if (action === "dump") {',
+    '    console.error(redactHuaweicloudCliOutput(rawOutput));',
+    '  } else {',
+    '  const result = parseHuaweicloudCliJson(rawOutput);',
+    '  if (action === "project") {',
+    '    process.stdout.write(resolveHuaweicloudProjectId(result, args[1]));',
+    '  } else if (action === "urn") {',
+    '    const page = args[4] === "created" ? { functions: [result], count: 1 } : result;',
+    '    process.stdout.write(resolveHuaweicloudFunctionUrn(page, args[1], args[2], args[3]));',
+    '  } else if (action === "prepare") {',
+    '    const [, destination, projectId, functionUrn] = args;',
+    '    if (!/^[A-Za-z0-9]{32}$/.test(projectId)) throw new Error("Resolved project ID is invalid");',
+    '    result.path = { ...result.path, project_id: projectId };',
+    '    if (functionUrn) {',
+    '      if (functionUrn.split(":")[3] !== projectId) throw new Error("Function URN belongs to another project");',
+    '      result.path.function_urn = functionUrn;',
+    '    }',
+    '    await writeFile(destination, JSON.stringify(result), { mode: 0o600 });',
+    '  } else if (action !== "validate") {',
+    '    throw new Error("Unknown KooCLI response action");',
+    '  }',
+    '  }',
+    '} catch (error) {',
+    '  console.error(error.message);',
+    '  if (action === "project" || action === "urn") {',
+    '    console.error("Raw KooCLI response (credentials redacted):");',
+    '    console.error(redactHuaweicloudCliOutput(rawOutput));',
+    '  }',
+    '  process.exitCode = 1;',
+    '}',
+    "",
+  ].join("\n");
+}
+
+function resolveHuaweicloudFunctionUrn(page, region, packageName, functionName) {
+  if (page.error_code || !Array.isArray(page.functions)) {
+    throw new Error("ListFunctions did not return a valid function list");
+  }
+  if (
+    page.functions.length > 1 ||
+    (page.count !== undefined && page.count !== page.functions.length)
+  ) {
+    throw new Error("ListFunctions returned an ambiguous or incomplete result");
+  }
+  if (page.functions.length === 0) {
+    return "";
+  }
+  const fn = page.functions[0];
+  const parts = typeof fn.func_urn === "string" ? fn.func_urn.split(":") : [];
+  if (
+    fn.func_name !== functionName || fn.package !== packageName ||
+    (parts.length !== 7 && parts.length !== 8) ||
+    parts[0] !== "urn" || parts[1] !== "fss" || parts[2] !== region ||
+    !/^[A-Za-z0-9]{32}$/.test(parts[3]) || parts[4] !== "function" ||
+    parts[5] !== packageName || parts[6] !== functionName
+  ) {
+    throw new Error("ListFunctions returned an unexpected function identity");
+  }
+  return `${parts.slice(0, 7).join(":")}:latest`;
+}
+
+function huaweicloudCreateInput(providerName, provider, target) {
+  const body = huaweicloudFunctionBody(providerName, provider, target);
+  return {
+    path: {
+      project_id: huaweicloudProjectId(target, provider),
+    },
+    body: {
+      ...body,
+      package: huaweicloudPackage(target, provider),
+      type: "v2",
+      code_type: "Custom-Image-Swr",
+    },
+  };
+}
+
+function huaweicloudUpdateInput(providerName, provider, target) {
+  return {
+    path: {
+      project_id: huaweicloudProjectId(target, provider),
+      function_urn: huaweicloudFunctionUrn(provider, target),
+    },
+    body: {
+      ...huaweicloudFunctionBody(providerName, provider, target),
+      strategy_config: {
+        concurrency: 1,
+        concurrent_num: 400,
+        ...huaweicloudFunctionOverrides(providerName, provider, target).strategy_config,
+      },
+    },
+  };
 }
 
 function gcloudImageConfig(target, provider) {
@@ -653,6 +1306,130 @@ function renderQcloudDeployScript(providerName, provider) {
   return `${lines.join("\n")}\n`;
 }
 
+function renderHuaweicloudDeployScript(providerName, provider) {
+  const syncTargets = provider.targets.filter(
+    (target) => huaweicloudImageConfig(target, provider).sync,
+  );
+  const lines = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+    "",
+    'command -v hcloud >/dev/null || { echo "Huawei Cloud KooCLI (hcloud) is required" >&2; exit 1; }',
+    'command -v node >/dev/null || { echo "Node.js is required to prepare FunctionGraph API requests" >&2; exit 1; }',
+    "",
+    'WORK_DIR="$(mktemp -d)"',
+    'SHOW_RESULT="$WORK_DIR/response.json"',
+    'STDERR_RESULT="$WORK_DIR/stderr.log"',
+    'REQUEST_FILE="$WORK_DIR/request.json"',
+    'trap \'rm -f "$SHOW_RESULT" "$STDERR_RESULT" "$REQUEST_FILE"; rmdir "$WORK_DIR"\' EXIT',
+    "",
+    "hcloud_json() {",
+    "  local cli_status=0 validation_status=0",
+    '  hcloud "$@" --cli-output=json >"$SHOW_RESULT" 2>"$STDERR_RESULT" || cli_status=$?',
+    '  node "$ROOT/hcloud-helper.mjs" validate "$SHOW_RESULT" || validation_status=$?',
+    '  if [[ "$cli_status" -ne 0 || "$validation_status" -ne 0 ]]; then',
+    '    echo "KooCLI $1 $2 failed (exit code: $cli_status; response validation: $validation_status)" >&2',
+    '    echo "--- stdout (credentials redacted) ---" >&2',
+    '    node "$ROOT/hcloud-helper.mjs" dump "$SHOW_RESULT"',
+    '    echo "--- stderr (credentials redacted) ---" >&2',
+    '    node "$ROOT/hcloud-helper.mjs" dump "$STDERR_RESULT"',
+    '    if [[ "$cli_status" -ne 0 ]]; then return "$cli_status"; fi',
+    "    return 1",
+    "  fi",
+    '  if [[ -s "$STDERR_RESULT" ]]; then node "$ROOT/hcloud-helper.mjs" dump "$STDERR_RESULT"; fi',
+    "}",
+    "",
+    "HUAWEICLOUD_PROJECT_IDS=()",
+    "",
+  ];
+
+  // Resolve every project before any Docker push or FunctionGraph mutation.
+  for (const target of provider.targets) {
+    const projectId = huaweicloudProjectId(target, provider);
+    if (projectId !== undefined) {
+      lines.push(`HUAWEICLOUD_PROJECT_IDS+=(${shellQuote(projectId)})`);
+      continue;
+    }
+    const profile = huaweicloudProfile(providerName, target, provider);
+    const profileOption = profile === undefined ? "" : ` --cli-profile=${shellQuote(profile)}`;
+    lines.push(
+      `echo "Resolving project for ${providerName}.${target.key}"`,
+      `hcloud_json IAM KeystoneListProjects/v3 --cli-region=${shellQuote(target.region)}${profileOption} --name=${shellQuote(target.region)}`,
+      `PROJECT_ID="$(node "$ROOT/hcloud-helper.mjs" project "$SHOW_RESULT" ${shellQuote(target.region)})"`,
+      'HUAWEICLOUD_PROJECT_IDS+=("$PROJECT_ID")',
+      "",
+    );
+  }
+
+  if (syncTargets.length > 0) {
+    lines.push(
+      'command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }',
+      "",
+      'PULLED_HUAWEICLOUD_IMAGE=""',
+      "MIRRORED_HUAWEICLOUD_IMAGES=()",
+      "",
+      "mirror_huaweicloud_image() {",
+      '  local source_image="$1" target_tag="$2" platform="$3"',
+      '  local image source_key="${1}|${3}"',
+      '  for image in "${MIRRORED_HUAWEICLOUD_IMAGES[@]}"; do',
+      '    if [[ "$image" == "$target_tag" ]]; then return; fi',
+      "  done",
+      '  echo "Syncing ${source_image} -> ${target_tag}" >&2',
+      '  if [[ "$PULLED_HUAWEICLOUD_IMAGE" != "$source_key" ]]; then',
+      '    if [[ -n "$platform" ]]; then',
+      '      docker pull --platform "$platform" "$source_image"',
+      "    else",
+      '      docker pull "$source_image"',
+      "    fi",
+      '    PULLED_HUAWEICLOUD_IMAGE="$source_key"',
+      "  fi",
+      '  docker tag "$source_image" "$target_tag"',
+      '  docker push "$target_tag"',
+      '  MIRRORED_HUAWEICLOUD_IMAGES+=("$target_tag")',
+      "}",
+      "",
+    );
+
+    for (const target of syncTargets) {
+      lines.push(
+        `mirror_huaweicloud_image ${shellQuote(huaweicloudSourceImage(target, provider))} ${shellQuote(huaweicloudImageUrl(target, provider))} ${shellQuote(huaweicloudImageConfig(target, provider).platform)}`,
+      );
+    }
+    lines.push("");
+  }
+
+  for (const [index, target] of provider.targets.entries()) {
+    const prefix = target.key;
+    const profile = huaweicloudProfile(providerName, target, provider);
+    const profileOption =
+      profile === undefined
+        ? ""
+        : ` --cli-profile=${shellQuote(profile)}`;
+    lines.push(`echo "Deploying ${providerName}.${target.key}"`);
+    const identityArgs = `${shellQuote(target.region)} ${shellQuote(huaweicloudPackage(target, provider))} ${shellQuote(target.functionName)}`;
+    lines.push(
+      `PROJECT_ID="\${HUAWEICLOUD_PROJECT_IDS[${index}]}"`,
+      `node "$ROOT/hcloud-helper.mjs" prepare "$ROOT/${prefix}.list.json" "$REQUEST_FILE" "$PROJECT_ID"`,
+      `hcloud_json FunctionGraph ListFunctions --cli-region=${shellQuote(target.region)}${profileOption} --cli-jsonInput="$REQUEST_FILE"`,
+      `FUNCTION_URN="$(node "$ROOT/hcloud-helper.mjs" urn "$SHOW_RESULT" ${identityArgs})"`,
+      'if [[ -z "$FUNCTION_URN" ]]; then',
+      `  echo "Creating ${providerName}.${target.key}"`,
+      `  node "$ROOT/hcloud-helper.mjs" prepare "$ROOT/${prefix}.create.json" "$REQUEST_FILE" "$PROJECT_ID"`,
+      `  hcloud_json FunctionGraph CreateFunction --cli-region=${shellQuote(target.region)}${profileOption} --cli-jsonInput="$REQUEST_FILE"`,
+      `  FUNCTION_URN="$(node "$ROOT/hcloud-helper.mjs" urn "$SHOW_RESULT" ${identityArgs} created)"`,
+      "fi",
+      `echo "Applying configuration for ${providerName}.${target.key}"`,
+      `node "$ROOT/hcloud-helper.mjs" prepare "$ROOT/${prefix}.update.json" "$REQUEST_FILE" "$PROJECT_ID" "$FUNCTION_URN"`,
+      `hcloud_json FunctionGraph UpdateFunctionConfig --cli-region=${shellQuote(target.region)}${profileOption} --cli-jsonInput="$REQUEST_FILE"`,
+      "",
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
 function renderGcloudDeployScript(providerName, provider) {
   const lines = [
     "#!/usr/bin/env bash",
@@ -845,6 +1622,24 @@ async function prepareSourceBinary() {
   );
 }
 
+function requiresSourceBinary() {
+  return Object.entries(config.providers).some(([providerName, provider]) => {
+    if (provider.targets.length === 0) {
+      return false;
+    }
+    const kind = providerConfigs[providerName].kind;
+    if (kind === "devs3") {
+      return true;
+    }
+    if (kind === "qcloudScf") {
+      return provider.targets.some(
+        (target) => !qcloudImageConfig(target, provider),
+      );
+    }
+    return false;
+  });
+}
+
 async function runCommand(command, args, options = {}) {
   await new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
@@ -993,6 +1788,12 @@ async function writeGeneratedFile(filename, body) {
   await writeFile(outputPath, `${header}${body}`, "utf8");
 }
 
+async function writeGeneratedJson(filename, value) {
+  const outputPath = generatedOutputPath(filename);
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
 async function writeGeneratedScript(filename, body) {
   const outputPath = generatedOutputPath(filename);
   await mkdir(dirname(outputPath), { recursive: true });
@@ -1040,6 +1841,7 @@ async function deleteProviderOutput(providerName, provider) {
 
   if (
     providerConfigs[providerName].kind === "qcloudScf" ||
+    providerConfigs[providerName].kind === "huaweicloudFunctionGraph" ||
     providerConfigs[providerName].kind === "gcloudRun"
   ) {
     await deleteGeneratedFile("serverless.yaml");
@@ -1095,6 +1897,20 @@ function assertProvider(providerName, provider, seenKeys) {
   }
   assertOptionalPlainObject(provider.run, `providers.${providerName}.run`);
   assertOptionalImage(provider.image, `providers.${providerName}.image`);
+  assertOptionalString(
+    provider.projectId,
+    `providers.${providerName}.projectId`,
+  );
+  assertOptionalString(
+    provider.agencyName,
+    `providers.${providerName}.agencyName`,
+  );
+  assertOptionalString(provider.profile, `providers.${providerName}.profile`);
+  assertOptionalString(provider.package, `providers.${providerName}.package`);
+  assertOptionalPlainObject(
+    provider.function,
+    `providers.${providerName}.function`,
+  );
   if (providerConfig.kind === "devs3") {
     assertNonEmptyString(provider.access, `providers.${providerName}.access`);
   }
@@ -1105,6 +1921,15 @@ function assertProvider(providerName, provider, seenKeys) {
   provider.targets.forEach((target, index) =>
     assertTarget(providerName, target, index, seenKeys),
   );
+
+  if (providerConfig.kind === "huaweicloudFunctionGraph") {
+    provider.targets.forEach((target) => {
+      huaweicloudProjectId(target, provider);
+      huaweicloudProfile(providerName, target, provider);
+      huaweicloudFunctionBody(providerName, provider, target);
+    });
+    assertHuaweicloudMirrorConsistency(providerName, provider);
+  }
 }
 
 async function generateQcloudProvider(providerName, provider) {
@@ -1152,6 +1977,49 @@ async function generateGcloudProvider(providerName, provider) {
   console.log(`Generated ${deployScript} for ${providerName}`);
 }
 
+async function generateHuaweicloudProvider(providerName, provider) {
+  const outputRoot = providerOutput(providerName, provider);
+
+  await deleteProviderOutput(providerName, provider);
+  if (provider.targets.length === 0) {
+    return;
+  }
+
+  for (const target of provider.targets) {
+    const files = [
+      [
+        `${target.key}.list.json`,
+        huaweicloudListInput(providerName, provider, target),
+      ],
+      [
+        `${target.key}.create.json`,
+        huaweicloudCreateInput(providerName, provider, target),
+      ],
+      [
+        `${target.key}.update.json`,
+        huaweicloudUpdateInput(providerName, provider, target),
+      ],
+    ];
+    for (const [filename, value] of files) {
+      const output = join(outputRoot, filename);
+      await writeGeneratedJson(output, value);
+      console.log(`Generated ${output} for ${providerName}.${target.key}`);
+    }
+  }
+
+  const deployScript = join(outputRoot, "deploy.sh");
+  await writeFile(
+    generatedOutputPath(join(outputRoot, "hcloud-helper.mjs")),
+    renderHuaweicloudCliHelper(),
+    "utf8",
+  );
+  await writeGeneratedScript(
+    deployScript,
+    renderHuaweicloudDeployScript(providerName, provider),
+  );
+  console.log(`Generated ${deployScript} for ${providerName}`);
+}
+
 async function generateProvider(providerName, provider) {
   const output = providerOutput(providerName, provider);
 
@@ -1167,6 +2035,10 @@ async function generateProvider(providerName, provider) {
   }
   if (providerConfig.kind === "gcloudRun") {
     await generateGcloudProvider(providerName, provider);
+    return;
+  }
+  if (providerConfig.kind === "huaweicloudFunctionGraph") {
+    await generateHuaweicloudProvider(providerName, provider);
     return;
   }
 
@@ -1198,8 +2070,10 @@ for (const providerName of Object.keys(config.providers)) {
 
 await deleteLegacyOutputs();
 await rm(join(here, outputDir), { recursive: true, force: true });
-await prepareSourceBinary();
-await copySourceBinary(join(outputBinaryDir, "agent"));
+if (requiresSourceBinary()) {
+  await prepareSourceBinary();
+  await copySourceBinary(join(outputBinaryDir, "agent"));
+}
 
 for (const providerName of providerOrder) {
   const provider = config.providers[providerName];
@@ -1228,9 +2102,18 @@ function assertPublicConfigIsRedacted(value) {
 
 function collectSensitiveValues(value, path, findings) {
   if (Array.isArray(value)) {
-    value.forEach((item, index) =>
-      collectSensitiveValues(item, [...path, String(index)], findings),
-    );
+    value.forEach((item, index) => {
+      const nextPath = [...path, String(index)];
+      if (
+        typeof item === "string" &&
+        isSensitivePublicPath(nextPath) &&
+        !isAllowedPublicPlaceholder(item, nextPath)
+      ) {
+        findings.push(nextPath.join("."));
+        return;
+      }
+      collectSensitiveValues(item, nextPath, findings);
+    });
     return;
   }
   if (!isPlainObject(value)) {
@@ -1242,7 +2125,7 @@ function collectSensitiveValues(value, path, findings) {
     if (
       typeof item === "string" &&
       isSensitivePublicPath(nextPath) &&
-      !isPlaceholderValue(item)
+      !isAllowedPublicPlaceholder(item, nextPath)
     ) {
       findings.push(nextPath.join("."));
       continue;
@@ -1261,10 +2144,39 @@ function isSensitivePublicPath(path) {
   if (key === "MTR_HTTP_PATH_PREFIX") {
     return true;
   }
+  if (key === "projectId" || key === "agencyName") {
+    return true;
+  }
+  if (isHuaweicloudPublicPath(path)) {
+    const parentKey = path[path.length - 2] ?? "";
+    if (
+      huaweicloudSensitivePublicKeys.has(key) ||
+      huaweicloudSensitivePublicKeys.has(parentKey)
+    ) {
+      return true;
+    }
+  }
   if (key === "logProjectId" || key === "logProjectID") {
     return true;
   }
   return false;
+}
+
+function isHuaweicloudPublicPath(path) {
+  const providersIndex = path.indexOf("providers");
+  return providersIndex >= 0 && path[providersIndex + 1] === "huaweicloud";
+}
+
+function isAllowedPublicPlaceholder(value, path) {
+  if (isPlaceholderValue(value)) {
+    return true;
+  }
+  const key = path[path.length - 1] ?? "";
+  return (
+    isHuaweicloudPublicPath(path) &&
+    key === "imageUrl" &&
+    /\/<[^<>/]+>\//.test(value)
+  );
 }
 
 function isPlaceholderValue(value) {

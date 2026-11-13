@@ -1020,13 +1020,16 @@ DaemonSet 示例额外包含一条很窄的 RBAC：initContainer 需要 `get nod
 FaaS 部署文件位于 `deploy/fc/`。仓库提交的 `targets.json` 只描述可公开的目标元数据
 和占位运行参数；`generate.mjs` 会根据它生成各云厂商需要的部署模板。
 
-公共模板默认使用 `header` 鉴权，请求头名为 `X-MTR-Agent-Token`。只在本地 targets 文件中
-填写 secret，并让 Server 出站 Agent 的 `auth` 使用完全相同的请求头名和 secret。
+公共模板的顶层 HTTP 配置默认使用 `header` 鉴权，请求头名为 `X-MTR-Agent-Token`。只在本地
+targets 文件中填写 secret，并让 Server 出站 Agent 的 `auth` 使用完全相同的请求头名和
+secret。华为云 FunctionGraph 是例外：对应 provider 会覆盖为受 FunctionGraph IAM 调用边界
+保护的 `event` 模式，不使用这组应用层 HTTP secret。
 
 目前支持：
 
 - `aliyun`：阿里云 Function Compute，通过 Serverless Devs 的 `fc3` 组件部署。
 - `ctyun`：天翼云函数服务，通过 Serverless Devs 的 `faas-cf` 组件部署。
+- `huaweicloud`：华为云 FunctionGraph，自动拉取源镜像、推送到 SWR 后通过官方 KooCLI 部署。
 - `qcloud`：腾讯云 SCF，通过 Serverless Cloud Framework 部署。
 - `gcloud`：Google Cloud Run，通过 `gcloud alpha run deploy` 部署。
 
@@ -1040,8 +1043,8 @@ node generate.mjs --config .targets.json
 ```
 
 也可以通过 `FC_TARGETS_FILE` 选择配置文件。当生成器使用默认的
-`targets.json` 时，会拒绝看起来像真实 token、路径前缀或阿里云日志项目 ID
-的值，避免误把私有配置写进公开模板。
+`targets.json` 时，会拒绝看起来像真实 token、路径前缀、阿里云日志项目 ID、华为云项目 ID
+或委托名称，以及华为云 SWR、VPC、日志、KMS 等部署标识，避免误把私有配置写进公开模板。
 
 通过 `binary.path` 指向本地已构建的 Agent 二进制，或配置
 `binary.fromImage` 从 Docker 镜像中提取。生成内容都会写到
@@ -1051,6 +1054,11 @@ node generate.mjs --config .targets.json
 output/binary/agent
 output/s.aliyun.yaml
 output/s.ctyun.yaml
+output/huaweicloud/<target-key>.list.json
+output/huaweicloud/<target-key>.create.json
+output/huaweicloud/<target-key>.update.json
+output/huaweicloud/deploy.sh
+output/huaweicloud/hcloud-helper.mjs
 output/qcloud/code/scf_bootstrap
 output/qcloud/<target-key>/serverless.yml
 output/qcloud/deploy.sh
@@ -1381,6 +1389,167 @@ docker push ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest
 脚本会按生成后的目标镜像 tag 去重同步。以上配置中，中国大陆目标共享
 `ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`；像 `ap-singapore` 这样的境外
 目标则会使用 `sgccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`。
+
+### 华为云 FunctionGraph 自定义镜像
+
+`providers.huaweicloud` 使用 FunctionGraph v2 自定义镜像事件函数。仓库中的
+`targets.json` 已包含可公开的 provider 和 target 模板；请在本地 `.targets.json` 中填写
+委托名称、源镜像和目标镜像地址；组织名直接写在 `image.imageUrl` 中，默认无需填写项目 ID。
+生成器会为每个 target 写出供
+KooCLI 查询、创建和更新函数的三份 JSON 请求文件，并生成统一部署脚本：
+
+```text
+output/huaweicloud/<target-key>.list.json
+output/huaweicloud/<target-key>.create.json
+output/huaweicloud/<target-key>.update.json
+output/huaweicloud/deploy.sh
+output/huaweicloud/hcloud-helper.mjs
+```
+
+包含一个 target 的最小 provider 配置如下；更多地域可以直接参考仓库中的公开模板：
+
+```json
+{
+  "providers": {
+    "huaweicloud": {
+      "name": "mtr-agent-huaweicloud",
+      "output": "huaweicloud",
+      "agencyName": "<functiongraph-swr-agency>",
+      "package": "default",
+      "function": {
+        "timeout": 600,
+        "strategy_config": {
+          "concurrent_num": 400,
+          "concurrency": 1
+        }
+      },
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:<immutable-tag>",
+        "imageUrl": "{registry}/<organization>/mtr-agent:<immutable-tag>",
+        "sync": false,
+        "uid": "1003",
+        "gid": "1003",
+        "isPublic": false
+      },
+      "targets": [
+        {
+          "key": "beijing",
+          "region": "cn-north-4",
+          "image": {
+            "sync": true
+          },
+          "functionName": "mob-beijing",
+          "country": "CN",
+          "id": "hwc.cn-north-1.fc",
+          "label": "Beijing"
+        }
+      ]
+    }
+  }
+}
+```
+
+`projectId` 是可选项。部署脚本会先通过 `hcloud IAM KeystoneListProjects/v3` 查询与地域名称
+精确匹配的可用项目，无需在 targets 中填写；所用身份需要有查询项目的权限。
+如需指定子项目，或身份没有 IAM 项目查询权限，可在 provider 或 target 上显式填写 `projectId`。
+所有地域的项目查询都会在上传镜像、创建或更新函数之前完成；没有唯一可用项目时直接退出。
+脚本通过 `ListFunctions` 按函数名和分组精确查询，存在时使用返回的真实 URN 更新，不存在时创建；
+查询失败、返回异常或结果不唯一时直接退出，不会误创建函数。部署脚本需要 Node.js 解析查询结果。
+脚本会把完整的 `path.project_id` 和 `path.function_urn` 写入私有临时 JSON 文件，避免 KooCLI
+混用命令行和 `cli-jsonInput` 的路径参数导致缺少必填参数。CLI 即使以退出码 0 输出
+`[USE_ERROR]` 等错误，也会被判为失败并显示错误类型。临时请求在退出时删除；请将生成的
+`hcloud-helper.mjs` 与 `deploy.sh` 一起使用。项目查询接口参见
+[IAM 项目列表](https://support.huaweicloud.com/api-iam/iam_06_0001.html)。
+可选的 `profile` 也支持 provider 默认值和 target 覆盖；未配置时 KooCLI 使用自身的默认 profile。
+镜像格式与腾讯云一致：`image.sourceImage` 指定源镜像，
+`image.imageUrl` 指定 SWR 目标地址，其中的 `<organization>` 替换成自己的组织名。
+`sourceImage` 支持 `{key}`、`{region}` 和 `{functionName}`；`imageUrl` 还支持 `{registry}`。
+target 的 `image` 可以覆盖 provider 的同名字段。
+
+`image.sync` 控制脚本是否上传该 target 的镜像，省略时为 `true`。
+设为 `false` 时跳过该地域的 `docker pull/tag/push`，但仍创建或更新函数，使用其 `imageUrl`。
+上例及公开模板在 provider 上设为 `false`，仅示范为北京四覆盖成 `true`；这只是同步策略示例，
+请按自己的平台同步规则调整，需要手工上传的其他地域也可以覆盖为 `true`。
+所有选中的镜像先上传，再部署全部函数。跳过上传的地域需要事先在 SWR 中有对应镜像；
+平台跨地域同步可能异步完成，脚本不会等待或轮询其状态。若全部 target 都设为 `false`，
+无需配置 `sourceImage`，生成的部署脚本也不依赖 Docker。
+
+生成器已内置各地域的 registry：
+默认使用 `swr.{region}.myhuaweicloud.com`，`eu-west-101` 自动使用
+`swr.eu-west-101.myhuaweicloud.eu`，示例无需配置 `registry` 或 `registries`。
+如需自定义，可用 `image.registry` 统一覆盖，或用 `image.registries` 按地域覆盖。
+脚本默认拉取 `linux/amd64` 变体，可通过 `image.platform` 覆盖。发布时，镜像应使用唯一且不可变的
+tag，不能在发布后把同一个 tag 指向另一份内容。华为云部署不能通过 `"image": false` 关闭；FunctionGraph 对
+容器镜像函数统一要求提供 `agencyName`，包括标记为公开的镜像。FunctionGraph 不允许容器使用
+root 或其他保留 ID，因此生成的 `custom_image` 默认使用平台推荐的 UID/GID `1003`；如需覆盖
+`image.uid` 和 `image.gid`，生成器也会按华为云的合法范围进行校验。非 root FunctionGraph
+运行时不能假定具有原始 socket 权限：请求 ICMP 时
+应优先使用 Agent 的 `protocol=auto`，让它在 ICMP 不可用时回退到 UDP/TCP，并在正式上线前做
+一次真实函数调用验证。
+
+公开模板中的地域均有 FunctionGraph v2 和 SWR endpoint，但华为云没有发布完整的自定义镜像
+逐地域支持矩阵，并要求以控制台展示为准。首次部署前，请确认目标地域的 FunctionGraph 创建方式
+包含“容器镜像”；部署脚本遇到不支持的地域会直接返回 Create/Update 错误，不会静默回退。
+
+华为云函数默认超时为 `600` 秒，单实例并发为 `400`（`strategy_config.concurrent_num`），
+最大实例数为 `1`（`strategy_config.concurrency`）。这些值可在 provider 或 target 的 `function`
+中覆盖。`strategy_config` 仅由 `UpdateFunctionConfig` 接口支持，创建请求不会包含它；部署脚本
+会在新建函数成功后补一次配置更新，已有函数也会应用同一份配置。这里只设置云端并发，Agent
+和 Server 的应用层任务并发上限仍为 `4`，没有随之修改。
+
+生成器默认写入 `network_controller.disable_public_network=false`，使 Agent 可以访问公网探测
+目标。可在 provider 或 target 的 `function` 中覆盖内存、超时、VPC、日志及其他同时受
+CreateFunction 和 UpdateFunctionConfig 支持的参数；除单独处理的 `strategy_config` 外，仅受其中
+一个接口支持的字段会在生成阶段被拒绝，常用字段的类型和范围也会预先校验。若配置 `function.func_vpc`，FunctionGraph 会关闭
+默认网卡，此时需要在 VPC 中另行配置 NAT/EIP 才能继续访问公网。
+
+部署前需要完成以下准备：
+
+- 对 `image.sync: true` 的地域，安装 Docker，并使用 SWR 控制台的登录指令登录目标 registry。
+  脚本会向 `image.imageUrl` 中指定的组织推送镜像；请确保组织可用、登录身份有推送权限。
+  对 `image.sync: false` 的地域，提前通过平台完成同步，无需本地 Docker 登录。
+- 安装华为云 KooCLI，执行 `hcloud configure init`，并保证所选 profile 有查询、创建和更新
+  FunctionGraph 函数的权限。KooCLI 的 AK/SK 只保存在其本地配置中，不要写入 targets 文件。
+- 创建 FunctionGraph 云服务委托，为其授予 `SWR Admin`，再把委托名称填入 provider 的
+  `agencyName`（生成的 FunctionGraph 请求中对应 `xrole`）。这是 FunctionGraph 使用容器镜像
+  所必需的权限，与运行部署脚本的 KooCLI 身份是两个不同概念。
+
+在 `deploy/fc` 目录生成并部署：
+
+```bash
+node generate.mjs --config .targets.json
+bash output/huaweicloud/deploy.sh
+```
+
+`deploy.sh` 只为 `image.sync: true` 的目标执行 `docker pull`、`docker tag` 和 `docker push`，再对全部目标通过官方
+`hcloud FunctionGraph` 命令：函数不存在时创建，已存在时更新其配置和镜像。JSON 和脚本都是
+生成物，不要手工修改，也不要提交到仓库。
+连续使用相同源镜像和平台时只拉取一次，同一个目标 tag 只推送一次；不同源镜像或平台映射到
+同一需要上传的目标 tag 时会在生成阶段报错，避免误部署。
+
+环境变量按“全局 `env` → provider `env` → provider `envs[region]`（没有则选 `envs[key]`）→
+target `env`”的顺序合并，同名字段后者覆盖，未指定的字段继续继承，`null` 删除字段。
+下述 FunctionGraph 协议字段会在合并后由生成器强制适配。
+
+华为云 target 会覆盖顶层 HTTP 配置，以 `event` 模式监听 FunctionGraph 自定义镜像规定的
+`8000` 端口，并提供 `POST /init` 和 `POST /invoke`。容器内的
+`MTR_HTTP_AUTH_TYPE` 为 `none`，因为外部调用已经由 FunctionGraph IAM API 边界鉴权；不要把
+容器端口另行匿名暴露。Server 侧沿用上文的华为云 Event Agent 配置：`transport` 使用
+`event`，`auth.type` 使用 `huaweicloud_aksk`，请求头包含
+`X-CFF-Request-Version: v1`，并设置 `event_response: result_field`。出站 Agent 的 `id`
+必须与 target 的 `id` 相同。
+
+虽然 FunctionGraph 官方提供 Serverless Devs `fgs` 组件，但当前
+[YAML 配置说明](https://support.huaweicloud.com/devg-functiongraph/functiongraph_02_0725.html)
+中的 `codeType` 仅支持 `inline`、`zip`、`obs` 和 `jar`，尚不支持自定义镜像所需的
+`Custom-Image-Swr`。因此华为云镜像部署不能使用 `s deploy`，本仓库改用 KooCLI；待官方组件
+支持自定义镜像后再考虑与其他 Serverless Devs provider 统一。更多官方资料见
+[使用容器镜像创建函数](https://support.huaweicloud.com/usermanual-functiongraph/functiongraph_01_1047.html)、
+[FunctionGraph 功能地域说明](https://support.huaweicloud.com/productdesc-functiongraph/functiongraph_01_0141.html)、
+[通过 KooCLI 管理函数](https://support.huaweicloud.com/usermanual-functiongraph/functiongraph_01_0396.html)、
+[创建函数 API](https://support.huaweicloud.com/api-functiongraph/functiongraph_06_0108.html)、
+[更新函数 metadata API](https://support.huaweicloud.com/api-functiongraph/functiongraph_06_0111.html) 和
+[配置函数的委托权限](https://support.huaweicloud.com/usermanual-functiongraph/functiongraph_01_0920.html)。
 
 ## 致谢
 

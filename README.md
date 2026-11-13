@@ -1216,9 +1216,12 @@ FaaS deployment assets live in `deploy/fc/`. The checked-in `targets.json`
 describes public target metadata and placeholder runtime settings; `generate.mjs`
 turns that file into provider-specific deployment templates.
 
-The public template selects `header` authentication with
-`X-MTR-Agent-Token`. Set its secret only in your local targets file, then use
-the same header name and secret in the Server outbound Agent's `auth` object.
+The public template's top-level HTTP settings select `header` authentication
+with `X-MTR-Agent-Token`. Set its secret only in your local targets file, then
+use the same header name and secret in the Server outbound Agent's `auth`
+object. Huawei Cloud FunctionGraph is the exception: that provider overrides
+these settings with `event` mode behind the FunctionGraph IAM invocation
+boundary and does not use this application-level HTTP secret.
 
 Supported targets:
 
@@ -1226,6 +1229,8 @@ Supported targets:
   component.
 - `ctyun`: CTYun Function Service, using the Serverless Devs `faas-cf`
   component.
+- `huaweicloud`: Huawei Cloud FunctionGraph, automatically pulling a source
+  image, pushing it to SWR, and deploying through the official KooCLI.
 - `qcloud`: Tencent Cloud SCF, using Serverless Cloud Framework.
 - `gcloud`: Google Cloud Run, using `gcloud alpha run deploy`.
 
@@ -1241,8 +1246,10 @@ node generate.mjs --config .targets.json
 
 You can also select the config with `FC_TARGETS_FILE`. When the generator reads
 the default `targets.json`, it rejects values that look like real tokens, path
-prefixes, or Alibaba Cloud log project IDs. This keeps the public template safe
-even if someone edits it by accident.
+prefixes, Alibaba Cloud log project IDs, Huawei Cloud project IDs, or agency
+names, as well as Huawei Cloud SWR, VPC, logging, and KMS deployment
+identifiers. This keeps the public template safe even if someone edits it by
+accident.
 
 Set `binary.path` to point at a built local Agent binary, or configure
 `binary.fromImage` to extract the binary from a Docker image. Generated output
@@ -1252,6 +1259,11 @@ is written under `deploy/fc/output/`:
 output/binary/agent
 output/s.aliyun.yaml
 output/s.ctyun.yaml
+output/huaweicloud/<target-key>.list.json
+output/huaweicloud/<target-key>.create.json
+output/huaweicloud/<target-key>.update.json
+output/huaweicloud/deploy.sh
+output/huaweicloud/hcloud-helper.mjs
 output/qcloud/code/scf_bootstrap
 output/qcloud/<target-key>/serverless.yml
 output/qcloud/deploy.sh
@@ -1588,6 +1600,210 @@ Each target image is mirrored once per generated target tag. With the example
 above, mainland targets share `ccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`;
 an overseas target such as `ap-singapore` uses
 `sgccr.ccs.tencentyun.com/sls-scf/mtr-agent:latest`.
+
+### Huawei Cloud FunctionGraph custom images
+
+`providers.huaweicloud` deploys FunctionGraph v2 custom-image event functions.
+The checked-in `targets.json` contains public provider and target templates;
+put the agency name, source image, and destination image URL in your local
+`.targets.json`. Set your organization in `image.imageUrl`; project IDs are
+automatically resolved by default.
+For each target, the generator writes
+three KooCLI JSON requests for inspecting, creating, and updating the function,
+plus a single deployment script:
+
+```text
+output/huaweicloud/<target-key>.list.json
+output/huaweicloud/<target-key>.create.json
+output/huaweicloud/<target-key>.update.json
+output/huaweicloud/deploy.sh
+output/huaweicloud/hcloud-helper.mjs
+```
+
+A minimal provider with one target looks like this; use the checked-in public
+template as the source for additional regions:
+
+```json
+{
+  "providers": {
+    "huaweicloud": {
+      "name": "mtr-agent-huaweicloud",
+      "output": "huaweicloud",
+      "agencyName": "<functiongraph-swr-agency>",
+      "package": "default",
+      "function": {
+        "timeout": 600,
+        "strategy_config": {
+          "concurrent_num": 400,
+          "concurrency": 1
+        }
+      },
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:<immutable-tag>",
+        "imageUrl": "{registry}/<organization>/mtr-agent:<immutable-tag>",
+        "sync": false,
+        "uid": "1003",
+        "gid": "1003",
+        "isPublic": false
+      },
+      "targets": [
+        {
+          "key": "beijing",
+          "region": "cn-north-4",
+          "image": {
+            "sync": true
+          },
+          "functionName": "mob-beijing",
+          "country": "CN",
+          "id": "hwc.cn-north-1.fc",
+          "label": "Beijing"
+        }
+      ]
+    }
+  }
+}
+```
+
+`projectId` is optional. Before uploading images or modifying functions, the
+script queries `hcloud IAM KeystoneListProjects/v3` and selects the single
+enabled project whose name exactly matches each region. The identity needs
+permission to query IAM projects. To select a subproject or avoid that lookup,
+set `projectId` explicitly on the provider or target. Missing or ambiguous
+projects stop deployment before any uploads or function changes. The script uses
+`ListFunctions` with exact function-name and package matching, updates an
+existing function using its returned URN, and creates a missing function.
+Failed queries, malformed responses, and ambiguous matches stop deployment
+without creating a function. Node.js is required to parse the query response.
+The complete `path.project_id` and `path.function_urn` are written to a private
+temporary JSON request, avoiding KooCLI's restrictions on mixing CLI and JSON
+path parameters. CLI errors such as `[USE_ERROR]` fail deployment even when the
+process exits with status zero, and the error type is displayed. Temporary
+requests are removed on exit. Keep the generated `hcloud-helper.mjs` beside
+`deploy.sh`. See the [IAM project list API](https://support.huaweicloud.com/intl/en-us/api-iam/iam_06_0001.html).
+The optional `profile` also supports provider defaults and target overrides;
+if omitted, KooCLI uses its default profile.
+The image format matches Tencent Cloud: `image.sourceImage` specifies the source
+and `image.imageUrl` specifies the destination SWR URL. Replace `<organization>`
+with your organization. Both support `{key}`, `{region}`, and `{functionName}`;
+`imageUrl` also supports `{registry}`. A target's `image` overrides the provider's
+corresponding fields.
+
+`image.sync` controls whether the script uploads the image for that target and
+defaults to `true` when omitted. Set it to `false` to skip that region's Docker
+pull/tag/push while still creating or updating the function with its `imageUrl`.
+The example and public template set the provider default to `false` and override
+Beijing 4 to `true` as an example only; adapt this to your platform replication
+rules and enable uploads for any other regions that need them. Selected images
+are uploaded first, then all functions are deployed. Skipped destinations must
+already contain the image. Platform replication may be asynchronous; the script
+does not wait for or poll it. If every target disables synchronization, no
+`sourceImage` is required and the generated script does not require Docker.
+
+Registry defaults are built in:
+`swr.{region}.myhuaweicloud.com` for most regions and
+`swr.eu-west-101.myhuaweicloud.eu` for `eu-west-101`. The example needs no
+`registry` or `registries` configuration. Use `image.registry` for a single
+custom registry or `image.registries` for regional overrides when needed.
+The script pulls `linux/amd64` by default; override it with `image.platform`
+when needed. For releases, use a unique,
+immutable tag; do not repoint the same tag after a release.
+Huawei Cloud deployment cannot opt out with
+`"image": false`; FunctionGraph requires `agencyName` for every container-image
+function, including images marked public. FunctionGraph does not allow root or
+other reserved IDs, so the generated `custom_image` uses its recommended
+UID/GID `1003` by default; overrides in `image.uid` and `image.gid` are checked
+against Huawei Cloud's valid range. A non-root FunctionGraph runtime cannot be
+assumed to have raw-socket privileges. Prefer the Agent's `protocol=auto` for
+ICMP requests so it can fall back to UDP/TCP, and verify a real invocation
+before production rollout.
+
+Every region in the public template has FunctionGraph v2 and SWR endpoints,
+but Huawei Cloud does not publish a complete per-region custom-image matrix
+and directs users to the console for current feature availability. Before a
+region's first deployment, confirm that FunctionGraph offers the container
+image creation method there. The deployment script surfaces an unsupported
+Create/Update error and does not silently fall back.
+
+Huawei Cloud functions default to a `600`-second timeout, `400` concurrent
+requests per instance (`strategy_config.concurrent_num`), and at most `1`
+instance (`strategy_config.concurrency`). Override these in the provider's or
+target's `function` object. Only `UpdateFunctionConfig` accepts `strategy_config`,
+so create requests omit it and the deployment script applies the configuration
+after creating a function, as well as when updating an existing one. These are
+cloud-side settings; the Agent and Server application-level job concurrency
+limits remain `4`.
+
+The generator sets `network_controller.disable_public_network=false` by
+default so the Agent can reach public probe targets. Provider- or target-level
+`function` overrides may tune memory, timeout, VPC, logging, and other fields
+accepted by both CreateFunction and UpdateFunctionConfig. Apart from the
+separately handled `strategy_config`, fields supported by only one API are
+rejected during generation, and common value types and ranges
+are validated up front. Configuring `function.func_vpc` disables
+FunctionGraph's default network interface, so that VPC needs NAT/EIP for
+continued public Internet access.
+
+Complete these prerequisites before deployment:
+
+- For regions with `image.sync: true`, install Docker and log in to the registry
+  using the SWR console's login command. The script pushes to the organization
+  in `image.imageUrl`; ensure it is available and the identity can push there.
+  For `image.sync: false` regions, complete platform replication beforehand;
+  no local Docker login is needed for those destinations.
+- Install Huawei Cloud KooCLI, run `hcloud configure init`, and ensure that the
+  selected profile can inspect, create, and update FunctionGraph functions.
+  Keep the KooCLI AK/SK in its local configuration, not in the targets file.
+- Create a FunctionGraph cloud service agency with the `SWR Admin` permission,
+  then set its name as the provider's `agencyName` (rendered as `xrole` in the
+  FunctionGraph request). FunctionGraph needs this agency for container-image
+  functions; it is distinct from the KooCLI identity that runs the deployment.
+
+Generate and deploy from `deploy/fc`:
+
+```bash
+node generate.mjs --config .targets.json
+bash output/huaweicloud/deploy.sh
+```
+
+`deploy.sh` runs `docker pull`, `docker tag`, and `docker push` only for targets
+with `image.sync: true`, then calls the official
+`hcloud FunctionGraph` commands to create a missing function or update the
+configuration and image of an existing one.
+The JSON files and script are generated artifacts: do not edit or commit them.
+Consecutive targets using the same source and platform share a single pull, and
+each destination tag is pushed once. Generation fails if different sources or
+platforms map to the same upload destination tag, preventing an incorrect deployment.
+
+Environment variables are merged in this order: global `env`, provider `env`,
+provider `envs[region]` (or `envs[key]` if the region is absent), then target `env`.
+Later values override matching keys, unspecified keys are inherited, and `null`
+removes a key. The generator enforces the FunctionGraph protocol settings below
+after that merge.
+
+Huawei Cloud targets override the top-level HTTP settings, run in `event` mode,
+and listen on port `8000`, as required for FunctionGraph custom images. The
+container serves `POST /init` and `POST /invoke`. Its
+`MTR_HTTP_AUTH_TYPE` is `none` because the FunctionGraph IAM API boundary
+authenticates external invocation; do not expose the container port
+anonymously by another route. On the Server side, use the Huawei Cloud Event
+Agent configuration described above: `transport: event`,
+`auth.type: huaweicloud_aksk`, the `X-CFF-Request-Version: v1` header, and
+`event_response: result_field`. The outbound Agent `id` must match the target
+`id`.
+
+Huawei Cloud provides an official Serverless Devs `fgs` component, but its
+current [YAML reference](https://support.huaweicloud.com/intl/en-us/devg-functiongraph/functiongraph_02_0725.html)
+only lists `inline`, `zip`, `obs`, and `jar` for `codeType`; it does not expose
+the `Custom-Image-Swr` mode required here. Huawei Cloud image deployment
+therefore cannot use `s deploy` and this repository uses KooCLI instead. This
+can be unified with the other Serverless Devs providers if the component gains
+custom-image support. See also Huawei Cloud's official documentation for
+[creating a function with an image](https://support.huaweicloud.com/intl/en-us/usermanual-functiongraph/functiongraph_01_1047.html),
+[FunctionGraph's region availability guidance](https://support.huaweicloud.com/intl/en-us/productdesc-functiongraph/functiongraph_01_0141.html),
+[managing functions using KooCLI](https://support.huaweicloud.com/intl/en-us/usermanual-functiongraph/functiongraph_01_0396.html),
+the [CreateFunction API](https://support.huaweicloud.com/intl/en-us/api-functiongraph/functiongraph_06_0108.html),
+the [UpdateFunctionConfig API](https://support.huaweicloud.com/intl/en-us/api-functiongraph/functiongraph_06_0111.html),
+and [configuring agency permissions](https://support.huaweicloud.com/intl/en-us/usermanual-functiongraph/functiongraph_01_0920.html).
 
 ## Acknowledgements
 

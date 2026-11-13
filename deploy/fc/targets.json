@@ -383,6 +383,167 @@
         }
       ]
     },
+    "huaweicloud": {
+      "name": "mtr-agent-huaweicloud",
+      "output": "huaweicloud",
+      "agencyName": "<functiongraph-swr-agency>",
+      "package": "default",
+      "function": {
+        "timeout": 600,
+        "strategy_config": {
+          "concurrent_num": 400,
+          "concurrency": 1
+        }
+      },
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent:dev",
+        "imageUrl": "{registry}/<organization>/mtr-agent:dev",
+        "sync": false,
+        "uid": "1003",
+        "gid": "1003",
+        "isPublic": false
+      },
+      "env": {
+        "MTR_MODE": "event",
+        "MTR_HTTP_ADDR": ":8000",
+        "MTR_HTTP_AUTH_TYPE": "none",
+        "MTR_HTTP_AUTH_HEADER": null,
+        "MTR_HTTP_AUTH_SECRET": null,
+        "MTR_HTTP_PATH_PREFIX": null,
+        "MTR_HTTP_TLS_ENABLED": false
+      },
+      "targets": [
+        {
+          "key": "beijing",
+          "region": "cn-north-4",
+          "functionName": "mob-beijing",
+          "country": "CN",
+          "id": "hwc.cn-north-1.fc",
+          "label": "Beijing"
+        },
+        {
+          "key": "shanghai",
+          "region": "cn-east-3",
+          "image": {
+            "sync": true
+          },
+          "functionName": "mob-shanghai",
+          "country": "CN",
+          "id": "hwc.cn-east-1.fc",
+          "label": "Shanghai"
+        },
+        {
+          "key": "guangzhou",
+          "region": "cn-south-1",
+          "functionName": "mob-guangzhou",
+          "country": "CN",
+          "id": "hwc.cn-south-1.fc",
+          "label": "Guangzhou"
+        },
+        {
+          "key": "guiyang",
+          "region": "cn-southwest-2",
+          "functionName": "mob-guiyang",
+          "country": "CN",
+          "id": "hwc.cn-southwest-1.fc",
+          "label": "Guiyang"
+        },
+        {
+          "key": "wulanchabu",
+          "region": "cn-north-9",
+          "functionName": "mob-wulanchabu",
+          "country": "CN",
+          "id": "hwc.cn-north-2.fc",
+          "label": "Wulanchabu"
+        },
+        {
+          "key": "hongkong",
+          "region": "ap-southeast-1",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "hwc.ap-east-1.fc",
+          "label": "Hong Kong"
+        },
+        {
+          "key": "singapore",
+          "region": "ap-southeast-3",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "hwc.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "bangkok",
+          "region": "ap-southeast-2",
+          "functionName": "mob-bangkok",
+          "country": "TH",
+          "id": "hwc.ap-southeast-2.fc",
+          "label": "Bangkok"
+        },
+        {
+          "key": "jakarta",
+          "region": "ap-southeast-4",
+          "functionName": "mob-jakarta",
+          "country": "ID",
+          "id": "hwc.ap-southeast-3.fc",
+          "label": "Jakarta"
+        },
+        {
+          "key": "johannesburg",
+          "region": "af-south-1",
+          "functionName": "mob-johannesburg",
+          "country": "ZA",
+          "id": "hwc.af-south-1.fc",
+          "label": "Johannesburg"
+        },
+        {
+          "key": "saopaulo",
+          "region": "sa-brazil-1",
+          "functionName": "mob-saopaulo",
+          "country": "BR",
+          "id": "hwc.sa-brazil-1.fc",
+          "label": "Sao Paulo"
+        },
+        {
+          "key": "santiago",
+          "region": "la-south-2",
+          "image": {
+            "sync": true
+          },
+          "functionName": "mob-santiago",
+          "country": "CL",
+          "id": "hwc.la-south-1.fc",
+          "label": "Santiago"
+        },
+        {
+          "key": "mexicocity",
+          "region": "la-north-2",
+          "functionName": "mob-mexicocity",
+          "country": "MX",
+          "id": "hwc.la-north-1.fc",
+          "label": "Mexico City"
+        },
+        {
+          "key": "istanbul",
+          "region": "tr-west-1",
+          "image": {
+            "sync": true
+          },
+          "functionName": "mob-istanbul",
+          "country": "TR",
+          "id": "hwc.tr-west-1.fc",
+          "label": "Istanbul"
+        },
+        {
+          "key": "riyadh",
+          "region": "me-east-1",
+          "functionName": "mob-riyadh",
+          "country": "SA",
+          "id": "hwc.me-east-1.fc",
+          "label": "Riyadh"
+        }
+      ]
+    },
     "gcloud": {
       "name": "mtr-agent-gcloud",
       "output": "gcloud",
