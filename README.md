@@ -1704,15 +1704,20 @@ template as the source for additional regions:
 }
 ```
 
-`projectId` is optional. Before uploading images or modifying functions, the
-script queries `hcloud IAM KeystoneListProjects/v3` and selects the single
+`projectId` is optional. For each region, the script queries
+`hcloud IAM KeystoneListProjects/v3` and selects the single
 enabled project whose name exactly matches each region. The identity needs
 permission to query IAM projects. To select a subproject or avoid that lookup,
-set `projectId` explicitly on the provider or target. Missing or ambiguous
-projects stop deployment before any uploads or function changes. The script uses
+set `projectId` explicitly on the provider or target. The script first pushes all
+images configured with `image.sync: true`, allowing more time for Huawei Cloud's
+cross-region image synchronization. It then completes each region's project
+lookup and function deployment before starting the next region. A failed image
+push skips only its corresponding region. A failed region prints its error
+without blocking later regions; the script summarizes failures and exits with a nonzero status at the
+end. Missing or ambiguous projects stop only the current region. The script uses
 `ListFunctions` with exact function-name and package matching, updates an
 existing function using its returned URN, and creates a missing function.
-Failed queries, malformed responses, and ambiguous matches stop deployment
+Failed queries, malformed responses, and ambiguous matches stop the current region
 without creating a function. Node.js is required to parse the query response.
 The complete `path.project_id` and `path.function_urn` are written to a private
 temporary JSON request, avoiding KooCLI's restrictions on mixing CLI and JSON
@@ -1772,6 +1777,25 @@ so create requests omit it and the deployment script applies the configuration
 after creating a function, as well as when updating an existing one. These are
 cloud-side settings; the Agent and Server application-level job concurrency
 limits remain `4`.
+
+For regions that reject `concurrent_num`, set it to `null` in that target:
+
+```json
+{
+  "function": {
+    "strategy_config": {
+      "concurrent_num": null
+    }
+  }
+}
+```
+
+Strategies merge in this order: defaults, provider, then target. Numbers override
+inherited values; `null` omits the field from the API request. The example removes
+only `concurrent_num` and retains the inherited `concurrency` instance limit.
+Use `"concurrency": null` to omit that parameter, or `"strategy_config": null`
+to omit the entire strategy. An empty strategy is omitted as well. Omission does
+not send an instruction to clear or reset the existing cloud-side setting.
 
 The generator sets `network_controller.disable_public_network=false` by
 default so the Agent can reach public probe targets. Provider- or target-level

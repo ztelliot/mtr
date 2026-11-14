@@ -1483,12 +1483,16 @@ output/huaweicloud/hcloud-helper.mjs
 }
 ```
 
-`projectId` 是可选项。部署脚本会先通过 `hcloud IAM KeystoneListProjects/v3` 查询与地域名称
+`projectId` 是可选项。部署脚本会逐地域通过 `hcloud IAM KeystoneListProjects/v3` 查询与地域名称
 精确匹配的可用项目，无需在 targets 中填写；所用身份需要有查询项目的权限。
 如需指定子项目，或身份没有 IAM 项目查询权限，可在 provider 或 target 上显式填写 `projectId`。
-所有地域的项目查询都会在上传镜像、创建或更新函数之前完成；没有唯一可用项目时直接退出。
+脚本先完成所有配置为 `image.sync: true` 的镜像推送，为华为云平台跨地域同步留出时间；
+随后逐地域按“查询项目 → 创建或更新函数”的顺序部署。镜像推送失败时仅跳过对应地域，
+不影响其他地域。
+单个地域失败时会打印错误并继续后续地域，最后汇总失败项并以非零状态退出；没有唯一可用项目时
+只停止当前地域。
 脚本通过 `ListFunctions` 按函数名和分组精确查询，存在时使用返回的真实 URN 更新，不存在时创建；
-查询失败、返回异常或结果不唯一时直接退出，不会误创建函数。部署脚本需要 Node.js 解析查询结果。
+查询失败、返回异常或结果不唯一时停止当前地域，不会误创建函数。部署脚本需要 Node.js 解析查询结果。
 脚本会把完整的 `path.project_id` 和 `path.function_urn` 写入私有临时 JSON 文件，避免 KooCLI
 混用命令行和 `cli-jsonInput` 的路径参数导致缺少必填参数。CLI 即使以退出码 0 输出
 `[USE_ERROR]` 等错误，也会被判为失败并显示错误类型。临时请求在退出时删除；请将生成的
@@ -1530,6 +1534,24 @@ root 或其他保留 ID，因此生成的 `custom_image` 默认使用平台推�
 中覆盖。`strategy_config` 仅由 `UpdateFunctionConfig` 接口支持，创建请求不会包含它；部署脚本
 会在新建函数成功后补一次配置更新，已有函数也会应用同一份配置。这里只设置云端并发，Agent
 和 Server 的应用层任务并发上限仍为 `4`，没有随之修改。
+
+部分地域不支持 `concurrent_num` 时，可在对应 target 中将它设为 `null`：
+
+```json
+{
+  "function": {
+    "strategy_config": {
+      "concurrent_num": null
+    }
+  }
+}
+```
+
+生成器按“默认值 → provider → target”合并策略；数字表示覆盖，`null` 表示不发送该字段。
+上例仅移除 `concurrent_num`，仍保留继承的最大实例数 `concurrency`。
+同样可用 `"concurrency": null` 移除最大实例数参数，或用 `"strategy_config": null`
+省略整个策略对象。若所有字段都被移除，也不会发送空对象。这里的删除只表示从 API 请求中
+省略，不代表向云端发送清空或恢复默认的指令。
 
 生成器默认写入 `network_controller.disable_public_network=false`，使 Agent 可以访问公网探测
 目标。可在 provider 或 target 的 `function` 中覆盖内存、超时、VPC、日志及其他同时受

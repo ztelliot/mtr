@@ -729,6 +729,7 @@ function huaweicloudFunctionOverrides(providerName, provider, target) {
     }
     if (
       huaweicloudFunctionObjectFields.has(key) &&
+      !(key === "strategy_config" && value === null) &&
       !isPlainObject(value)
     ) {
       throw new Error(`${fieldPath} must be an object`);
@@ -739,6 +740,9 @@ function huaweicloudFunctionOverrides(providerName, provider, target) {
     for (const [key, value] of Object.entries(overrides.strategy_config)) {
       if (key !== "concurrency" && key !== "concurrent_num") {
         throw new Error(`${path}.strategy_config.${key} is not supported`);
+      }
+      if (value === null) {
+        continue;
       }
       const minimum = key === "concurrency" ? -1 : 1;
       if (!Number.isInteger(value) || value < minimum || value > 1000) {
@@ -1042,19 +1046,28 @@ function huaweicloudCreateInput(providerName, provider, target) {
 }
 
 function huaweicloudUpdateInput(providerName, provider, target) {
+  const body = huaweicloudFunctionBody(providerName, provider, target);
+  // Merge all three layers before removing nulls so deleted provider defaults
+  // are not reintroduced by a partial target override.
+  const strategy = deepMerge(
+    deepMerge(
+      { concurrency: 1, concurrent_num: 400 },
+      provider.function?.strategy_config,
+    ),
+    target.function?.strategy_config,
+  );
+  if (strategy !== null) {
+    const fields = Object.entries(strategy).filter(([, value]) => value !== null);
+    if (fields.length > 0) {
+      body.strategy_config = Object.fromEntries(fields);
+    }
+  }
   return {
     path: {
       project_id: huaweicloudProjectId(target, provider),
       function_urn: huaweicloudFunctionUrn(provider, target),
     },
-    body: {
-      ...huaweicloudFunctionBody(providerName, provider, target),
-      strategy_config: {
-        concurrency: 1,
-        concurrent_num: 400,
-        ...huaweicloudFunctionOverrides(providerName, provider, target).strategy_config,
-      },
-    },
+    body,
   };
 }
 
@@ -1372,76 +1385,86 @@ function renderHuaweicloudDeployScript(providerName, provider) {
     '  if [[ -s "$STDERR_RESULT" ]]; then node "$ROOT/hcloud-helper.mjs" dump "$STDERR_RESULT"; fi',
     "}",
     "",
-    "HUAWEICLOUD_PROJECT_IDS=()",
+    "FAILED_TARGETS=()",
     "",
   ];
 
-  // Resolve every project before any Docker push or FunctionGraph mutation.
-  for (const target of provider.targets) {
-    const projectId = huaweicloudProjectId(target, provider);
-    if (projectId !== undefined) {
-      lines.push(`HUAWEICLOUD_PROJECT_IDS+=(${shellQuote(projectId)})`);
-      continue;
-    }
-    const profile = huaweicloudProfile(providerName, target, provider);
-    const profileOption = profile === undefined ? "" : ` --cli-profile=${shellQuote(profile)}`;
-    lines.push(
-      `echo "Resolving project for ${providerName}.${target.key}"`,
-      `hcloud_json IAM KeystoneListProjects/v3 --cli-region=${shellQuote(target.region)}${profileOption} --name=${shellQuote(target.region)}`,
-      `PROJECT_ID="$(node "$ROOT/hcloud-helper.mjs" project "$SHOW_RESULT" ${shellQuote(target.region)})"`,
-      'HUAWEICLOUD_PROJECT_IDS+=("$PROJECT_ID")',
-      "",
-    );
-  }
-
   if (syncTargets.length > 0) {
     lines.push(
-      'command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }',
-      "",
       'PULLED_HUAWEICLOUD_IMAGE=""',
       "MIRRORED_HUAWEICLOUD_IMAGES=()",
       "",
       "mirror_huaweicloud_image() {",
       '  local source_image="$1" target_tag="$2" platform="$3"',
       '  local image source_key="${1}|${3}"',
+      '  command -v docker >/dev/null || { echo "docker is required" >&2; return 1; }',
       '  for image in "${MIRRORED_HUAWEICLOUD_IMAGES[@]}"; do',
       '    if [[ "$image" == "$target_tag" ]]; then return; fi',
       "  done",
       '  echo "Syncing ${source_image} -> ${target_tag}" >&2',
       '  if [[ "$PULLED_HUAWEICLOUD_IMAGE" != "$source_key" ]]; then',
       '    if [[ -n "$platform" ]]; then',
-      '      docker pull --platform "$platform" "$source_image"',
+      '      docker pull --platform "$platform" "$source_image" || return $?',
       "    else",
-      '      docker pull "$source_image"',
+      '      docker pull "$source_image" || return $?',
       "    fi",
       '    PULLED_HUAWEICLOUD_IMAGE="$source_key"',
       "  fi",
-      '  docker tag "$source_image" "$target_tag"',
-      '  docker push "$target_tag"',
+      '  docker tag "$source_image" "$target_tag" || return $?',
+      '  docker push "$target_tag" || return $?',
       '  MIRRORED_HUAWEICLOUD_IMAGES+=("$target_tag")',
       "}",
       "",
     );
 
-    for (const target of syncTargets) {
+    // Push all requested images before any project lookup or deployment, giving
+    // Huawei Cloud more time to synchronize images to the remaining regions.
+    for (const [index, target] of syncTargets.entries()) {
       lines.push(
-        `mirror_huaweicloud_image ${shellQuote(huaweicloudSourceImage(target, provider))} ${shellQuote(huaweicloudImageUrl(target, provider))} ${shellQuote(huaweicloudImageConfig(target, provider).platform)}`,
+        `IMAGE_SYNC_STATUS_${index}=0`,
+        `if mirror_huaweicloud_image ${shellQuote(huaweicloudSourceImage(target, provider))} ${shellQuote(huaweicloudImageUrl(target, provider))} ${shellQuote(huaweicloudImageConfig(target, provider).platform)}; then`,
+        "  :",
+        "else",
+        `  IMAGE_SYNC_STATUS_${index}=$?`,
+        `  echo "Image sync failed for ${providerName}.${target.key} (exit code: $IMAGE_SYNC_STATUS_${index}); continuing with other regions" >&2`,
+        `  FAILED_TARGETS+=(${shellQuote(`${providerName}.${target.key}`)})`,
+        "fi",
+        "",
       );
     }
-    lines.push("");
   }
 
-  for (const [index, target] of provider.targets.entries()) {
+  for (const target of provider.targets) {
     const prefix = target.key;
     const profile = huaweicloudProfile(providerName, target, provider);
     const profileOption =
       profile === undefined
         ? ""
         : ` --cli-profile=${shellQuote(profile)}`;
-    lines.push(`echo "Deploying ${providerName}.${target.key}"`);
+    const syncIndex = syncTargets.indexOf(target);
+    if (syncIndex !== -1) {
+      lines.push(`if [[ "$IMAGE_SYNC_STATUS_${syncIndex}" -eq 0 ]]; then`);
+    }
+    // Do not put the subshell in an if/|| condition: Bash would disable
+    // errexit inside it, potentially continuing after a failed cloud command.
+    lines.push(
+      `echo "Deploying ${providerName}.${target.key}"`,
+      "set +e",
+      "(",
+      "set -e",
+    );
+    const projectId = huaweicloudProjectId(target, provider);
+    if (projectId !== undefined) {
+      lines.push(`PROJECT_ID=${shellQuote(projectId)}`);
+    } else {
+      lines.push(
+        `echo "Resolving project for ${providerName}.${target.key}"`,
+        `hcloud_json IAM KeystoneListProjects/v3 --cli-region=${shellQuote(target.region)}${profileOption} --name=${shellQuote(target.region)}`,
+        `PROJECT_ID="$(node "$ROOT/hcloud-helper.mjs" project "$SHOW_RESULT" ${shellQuote(target.region)})"`,
+      );
+    }
     const identityArgs = `${shellQuote(target.region)} ${shellQuote(huaweicloudPackage(target, provider))} ${shellQuote(target.functionName)}`;
     lines.push(
-      `PROJECT_ID="\${HUAWEICLOUD_PROJECT_IDS[${index}]}"`,
       `node "$ROOT/hcloud-helper.mjs" prepare "$ROOT/${prefix}.list.json" "$REQUEST_FILE" "$PROJECT_ID"`,
       `hcloud_json FunctionGraph ListFunctions --cli-region=${shellQuote(target.region)}${profileOption} --cli-jsonInput="$REQUEST_FILE"`,
       `FUNCTION_URN="$(node "$ROOT/hcloud-helper.mjs" urn "$SHOW_RESULT" ${identityArgs})"`,
@@ -1454,9 +1477,31 @@ function renderHuaweicloudDeployScript(providerName, provider) {
       `echo "Applying configuration for ${providerName}.${target.key}"`,
       `node "$ROOT/hcloud-helper.mjs" prepare "$ROOT/${prefix}.update.json" "$REQUEST_FILE" "$PROJECT_ID" "$FUNCTION_URN"`,
       `hcloud_json FunctionGraph UpdateFunctionConfig --cli-region=${shellQuote(target.region)}${profileOption} --cli-jsonInput="$REQUEST_FILE"`,
+      ")",
+      "DEPLOY_STATUS=$?",
+      "set -e",
+      'if [[ "$DEPLOY_STATUS" -ne 0 ]]; then',
+      `  echo "Failed ${providerName}.${target.key} (exit code: $DEPLOY_STATUS); continuing with the next region" >&2`,
+      `  FAILED_TARGETS+=(${shellQuote(`${providerName}.${target.key}`)})`,
+      "fi",
       "",
     );
+    if (syncIndex !== -1) {
+      lines.push(
+        "else",
+        `  echo "Skipping ${providerName}.${target.key}: image sync failed" >&2`,
+        "fi",
+        "",
+      );
+    }
   }
+
+  lines.push(
+    'if [[ "${#FAILED_TARGETS[@]}" -gt 0 ]]; then',
+    '  printf "Failed deployments: %s\\n" "${FAILED_TARGETS[*]}" >&2',
+    "  exit 1",
+    "fi",
+  );
 
   return `${lines.join("\n")}\n`;
 }
@@ -2031,7 +2076,7 @@ function azureContainerTarget(provider, target, env) {
   return { key: target.key, region: target.region, functionName: target.functionName, resourceGroup, environment, subscription, image, run, env: variables };
 }
 
-function azureContainerManifest(target, environmentId, revisionSuffix) {
+function azureContainerManifest(target, environmentId, deploymentId, express = false) {
   const secrets = [];
   const env = Object.entries(target.env).map(([name, value]) => {
     if (/secret|token|password|key/i.test(name)) {
@@ -2041,15 +2086,18 @@ function azureContainerManifest(target, environmentId, revisionSuffix) {
     }
     return { name, value };
   });
+  // Express generates its own revision names. Changing a non-MTR environment
+  // variable also rolls out mutable image tags such as dev on every deployment.
+  if (express) env.push({ name: "AZURE_MTR_DEPLOYMENT_ID", value: deploymentId });
   return {
     location: target.region,
     properties: {
       environmentId,
-      workloadProfileName: "Consumption",
-      configuration: { activeRevisionsMode: "Single", secrets,
+      ...(!express ? { workloadProfileName: "Consumption" } : {}),
+      configuration: { ...(!express ? { activeRevisionsMode: "Single" } : {}), secrets,
         ingress: { external: true, targetPort: 9000, transport: "http", allowInsecure: false } },
       template: {
-        revisionSuffix,
+        ...(!express ? { revisionSuffix: deploymentId } : {}),
         containers: [{ name: "mtr-agent", image: target.image.imageUrl, env,
           resources: { cpu: target.run.cpu, memory: target.run.memory },
           probes: [
@@ -2083,6 +2131,7 @@ async function deployAzureContainers(targets, { execute = executeAzureCommand, l
   }
   const normalizeRegion = value => String(value).replace(/\s/g, "").toLowerCase();
   const subscriptions = new Set();
+  const expressEnvironments = new Set();
   const succeeded = [], failed = [];
   const work = await mkdtemp(join(tmpdir(), "mtr-azure-"));
   try {
@@ -2119,12 +2168,26 @@ async function deployAzureContainers(targets, { execute = executeAzureCommand, l
           const existingEnvironment = existing.properties?.environmentId ?? existing.properties?.managedEnvironmentId;
           if (normalizeRegion(existing.location) !== target.region || existingEnvironment?.toLowerCase() !== environment.id.toLowerCase()) throw new Error("existing Container App belongs to a different region or environment");
         }
-        const manifest = azureContainerManifest(target, environment.id, `mtr-${Date.now().toString(36)}`);
+        const environmentKey = environment.id.toLowerCase();
+        const express = String(environment.properties?.environmentMode).toLowerCase() === "express" || expressEnvironments.has(environmentKey);
+        const deploymentId = `mtr-${Date.now().toString(36)}`;
+        const manifest = azureContainerManifest(target, environment.id, deploymentId, express);
         const manifestFile = join(work, "containerapp.json");
         await writeFile(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
         log(`Deploying ${label}: ${target.image.imageUrl}`);
-        az(target, ["containerapp", existing ? "update" : "create", ...appArgs,
-          ...(!existing ? ["--environment", environment.id] : []), "--yaml", manifestFile]);
+        const deployArgs = ["containerapp", existing ? "update" : "create", ...appArgs,
+          ...(!existing ? ["--environment", environment.id] : []), "--yaml", manifestFile];
+        try {
+          az(target, deployArgs);
+        } catch (error) {
+          // Older CLI versions can omit environmentMode even for Express.
+          // Retry only this explicit validation rejection, never other errors.
+          if (express || !/\(ExpressRevisionSuffixNotSupported\)/.test(error.message)) throw error;
+          expressEnvironments.add(environmentKey);
+          log(`Express environment detected for ${label}; retrying with automatic revision naming`);
+          await writeFile(manifestFile, JSON.stringify(azureContainerManifest(target, environment.id, deploymentId, true)), { mode: 0o600 });
+          az(target, deployArgs);
+        }
         const app = az(target, ["containerapp", "show", ...appArgs]);
         const fqdn = app?.properties?.configuration?.ingress?.fqdn;
         if (!fqdn) throw new Error("Azure returned no Container App hostname");
