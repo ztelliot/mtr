@@ -1275,6 +1275,32 @@ environment variables. Every generated target receives `MTR_COUNTRY`, `MTR_ID`,
 `MTR_ISP`, `TZ`, and `MTR_REGION`; runtime settings come from top-level `env`
 and may be overridden by provider-level or target-level `env` objects.
 
+After deployment, generate PostgreSQL inserts for outbound Agents from the repository root:
+
+```bash
+node deploy/fc/generate.mjs sql --provider all
+```
+
+The script reads `deploy/fc/.targets.json` when present, otherwise public `targets.json`,
+and writes `deploy/fc/output/outbound-agents.sql`. Use `--config`, `--output`,
+`--provider`, and `--regions` to select inputs and targets. Config paths resolve
+relative to `deploy/fc/`; output paths resolve relative to the current working
+directory. The SQL subcommand does not clear deployment output or extract binaries,
+and existing SQL files are not overwritten. The original
+`node deploy/fc/generate.mjs --config .targets.json` still generates deployment
+assets only. Alibaba Cloud and CTYun use `s <key> info`; Tencent Cloud runs
+`scf info` once in the parent output directory; Google Cloud runs
+`gcloud alpha run services list --format=json` once; Huawei Cloud queries IAM project IDs.
+HTTP Agents use the configured path prefix and merged header/bearer credentials.
+Huawei Cloud reuses AK/SK from the existing database Agent `hwc.cn-north-1.fc` by default.
+Use `--source-id aliyun=ID,ctyun=ID,huaweicloud=ID` to reuse other database credentials.
+If CTYun returns only a private domain, the Server needs network access to it;
+set `target.agentUrl` for an explicit address when necessary. The SQL file may contain
+HTTP tokens and is written with mode `0600`; do not commit it.
+The script only reads deployment information and never executes SQL. Existing Agent IDs
+are skipped. Import with `\i deploy/fc/output/outbound-agents.sql` in a psql client
+that can access the generated file.
+
 To extract the Agent binary from the published container image:
 
 ```json

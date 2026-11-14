@@ -1,14 +1,20 @@
 import {
+  access,
   chmod,
   copyFile,
   mkdir,
+  mkdtemp,
   readFile,
+  realpath,
   rm,
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,10 +25,13 @@ const outputRootPath = resolve(here, outputDir);
 const sourceBinary = "agent";
 const outputBinaryDir = "binary";
 let config;
+const cli = parseArgs(process.argv.slice(2));
 const configuredTargetsPath =
-  parseArgs(process.argv.slice(2)) ??
+  cli.config ??
   process.env.FC_TARGETS_FILE ??
-  defaultTargetsFile;
+  (cli.command === "sql" && existsSync(join(here, ".targets.json"))
+    ? ".targets.json"
+    : defaultTargetsFile);
 const targetsPath = resolve(here, configuredTargetsPath);
 const targetsDisplayPath =
   relative(here, targetsPath).replaceAll("\\", "/") || defaultTargetsFile;
@@ -327,34 +336,40 @@ function assertOptionalBinary(value, path) {
 }
 
 function parseArgs(args) {
-  let configPath;
-
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg === "--config") {
-      const next = args[i + 1];
-      if (!next) {
-        throw new Error("--config requires a file path");
-      }
-      configPath = next;
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith("--config=")) {
-      configPath = arg.slice("--config=".length);
-      if (!configPath) {
-        throw new Error("--config requires a file path");
-      }
-      continue;
-    }
-    if (arg === "--help" || arg === "-h") {
-      console.log("Usage: node generate.mjs [--config <path>]");
-      process.exit(0);
-    }
-    throw new Error(`Unsupported argument: ${arg}`);
+  const options = { command: "deploy" };
+  let start = 0;
+  if (args[0] === "sql" || args[0] === "deploy") {
+    options.command = args[0];
+    start = 1;
   }
 
-  return configPath;
+  for (let i = start; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--help" || arg === "-h") {
+      console.log([
+        "Usage:",
+        "  node generate.mjs [deploy] [--config <path>]",
+        "  node generate.mjs sql [--config <path>] [--output <file.sql>]",
+        "    [--provider all|aliyun,ctyun,qcloud,huaweicloud,gcloud]",
+        "    [--regions <region,...>] [--source-id <provider=ID,...>]",
+        "",
+        "Config paths are relative to deploy/fc; SQL output paths are relative to the working directory.",
+        "The sql command only reads deployment information and never clears deployment output or executes SQL.",
+      ].join("\n"));
+      process.exit(0);
+    }
+    const equals = arg.indexOf("=");
+    const name = equals < 0 ? arg : arg.slice(0, equals);
+    const allowed = options.command === "sql"
+      ? ["--config", "--output", "--provider", "--regions", "--source-id"]
+      : ["--config"];
+    if (!allowed.includes(name)) throw new Error(`Unsupported argument: ${arg}`);
+    const value = equals < 0 ? args[++i] : arg.slice(equals + 1);
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+    options[name.slice(2)] = value;
+  }
+
+  return options;
 }
 
 function envObject(providerName, provider, target) {
@@ -2052,36 +2067,317 @@ config = JSON.parse(await readFile(targetsPath, "utf8"));
 if (!isPlainObject(config.providers)) {
   throw new Error(`${targetsDisplayPath} must contain a providers object`);
 }
-if (targetsPath === defaultTargetsPath) {
-  assertPublicConfigIsRedacted(config);
-}
-assertOptionalPlainObject(config.env, "env");
-assertOptionalBinary(config.binary, "binary");
-for (const providerName of Object.keys(config.providers)) {
-  if (!providerConfigs[providerName]) {
-    throw new Error(`Unsupported provider: ${providerName}`);
+if (cli.command === "sql") {
+  await generateOutboundAgentSql({
+    config,
+    configPath: targetsPath,
+    output: cli.output,
+    provider: cli.provider,
+    regions: cli.regions,
+    sourceId: cli["source-id"],
+  });
+} else {
+  if (targetsPath === defaultTargetsPath) {
+    assertPublicConfigIsRedacted(config);
+  }
+  assertOptionalPlainObject(config.env, "env");
+  assertOptionalBinary(config.binary, "binary");
+  for (const providerName of Object.keys(config.providers)) {
+    if (!providerConfigs[providerName]) {
+      throw new Error(`Unsupported provider: ${providerName}`);
+    }
+  }
+
+  const seenKeys = new Set();
+  for (const providerName of Object.keys(config.providers)) {
+    assertProvider(providerName, config.providers[providerName], seenKeys);
+  }
+
+  await deleteLegacyOutputs();
+  await rm(join(here, outputDir), { recursive: true, force: true });
+  if (requiresSourceBinary()) {
+    await prepareSourceBinary();
+    await copySourceBinary(join(outputBinaryDir, "agent"));
+  }
+
+  for (const providerName of providerOrder) {
+    const provider = config.providers[providerName];
+    if (!provider) {
+      await deleteProviderOutput(providerName);
+      continue;
+    }
+    await generateProvider(providerName, provider);
   }
 }
 
-const seenKeys = new Set();
-for (const providerName of Object.keys(config.providers)) {
-  assertProvider(providerName, config.providers[providerName], seenKeys);
-}
-
-await deleteLegacyOutputs();
-await rm(join(here, outputDir), { recursive: true, force: true });
-if (requiresSourceBinary()) {
-  await prepareSourceBinary();
-  await copySourceBinary(join(outputBinaryDir, "agent"));
-}
-
-for (const providerName of providerOrder) {
-  const provider = config.providers[providerName];
-  if (!provider) {
-    await deleteProviderOutput(providerName);
-    continue;
+async function generateOutboundAgentSql({
+  config,
+  configPath,
+  output = join(here, outputDir, "outbound-agents.sql"),
+  provider: providerFilter = "all",
+  regions: regionFilter,
+  sourceId = "huaweicloud=hwc.cn-north-1.fc",
+}) {
+  const fcDir = here;
+  const options = {
+    config: configPath,
+    output,
+    provider: providerFilter,
+    regions: regionFilter,
+    "source-id": sourceId,
+  };
+  const supported = ["aliyun", "ctyun", "qcloud", "huaweicloud", "gcloud"];
+  const selected = options.provider === "all" ? supported.filter(p => config.providers?.[p]) : options.provider.split(",");
+  for (const p of selected) if (!supported.includes(p) || !config.providers?.[p]) throw new Error(`Provider is not configured: ${p}`);
+  const regions = options.regions ? new Set(options.regions.split(",")) : null;
+  if (regions) for (const region of regions) if (!selected.some(p => config.providers[p].targets.some(t => t.region === region))) throw new Error(`Region is not in selected targets: ${region}`);
+  const sources = { huaweicloud: "hwc.cn-north-1.fc" };
+  for (const entry of options["source-id"].split(",")) {
+    const [provider, id] = entry.includes("=") ? entry.split("=") : ["huaweicloud", entry];
+    if (!supported.includes(provider) || !id || !/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error(`Invalid source agent mapping: ${entry}`);
+    sources[provider] = id;
   }
-  await generateProvider(providerName, provider);
+  const literal = value => "E'" + String(value).replaceAll("\\", "\\\\").replaceAll("'", "''") + "'";
+  const json = value => value == null ? "NULL::jsonb" : `${literal(JSON.stringify(value))}::jsonb`;
+  const clean = value => value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  const redact = value => clean(value)
+    .replace(/(\bauthorization\s*[:=]\s*)[^\n]*/gi, "$1[REDACTED]")
+    .replace(/(["']?[\w-]*(?:secret|token|password|access[_-]?key|authorization|credential|signature|downloadurl|codeurl|user[_-]?data)[\w-]*["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,;}]+)/gi, "$1[REDACTED]");
+  const placeholder = value => !value || /<[^<>]+>/.test(String(value));
+  const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const cache = new Map();
+
+  function run(command, args, cwd = fcDir) {
+    const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 180000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" } });
+    if (result.error) throw new Error(`${command}: ${result.error.message}`);
+    const output = clean(result.stdout);
+    if (result.status !== 0 || /^\s*\[(USE_ERROR|CLI_ERROR|NETWORK_ERROR|OPENAPI_ERROR|APIE_ERROR)\]/m.test(output)) {
+      throw new Error(`${command} ${args.slice(0, 2).join(" ")} failed (exit ${result.status})\n${redact(result.stderr || output)}`);
+    }
+    return output;
+  }
+
+  function parseJson(output, context) {
+    const notice = "API parameters transferred for the path, query, body, formData, header, and cookies in cli-jsonInput take precedence over command transfers.";
+    const body = clean(output).split("\n").filter(line => line.trim() !== notice).join("\n").trim();
+    let result;
+    try { result = JSON.parse(body); } catch { throw new Error(`${context}: expected JSON output`); }
+    if (result?.error || result?.error_code) throw new Error(`${context}: API reported an error`);
+    return result;
+  }
+
+  function mergedEnv(providerName, provider, target) {
+    const env = { ...config.env, ...provider.env, ...(provider.envs?.[target.region] ?? provider.envs?.[target.key]), ...target.env };
+    const get = (o, path) => path.reduce((value, key) => value?.[key], o);
+    const path = providerName === "aliyun" ? ["props", "environmentVariables"]
+      : providerName === "ctyun" ? ["props", "container", "environmentVariables"]
+      : providerName === "qcloud" ? ["inputs", "environment", "variables"] : null;
+    if (path) Object.assign(env, get(provider, path), get(target, path));
+    for (const [key, value] of Object.entries(env)) if (value == null) delete env[key]; else env[key] = String(value);
+    return env;
+  }
+
+  function httpAuth(env, context) {
+    if (placeholder(env.MTR_HTTP_AUTH_SECRET)) throw new Error(`${context}: configure MTR_HTTP_AUTH_SECRET in the local targets file, or reuse an existing row with --source-id ${context.split(".")[0]}=ID`);
+    if (env.MTR_HTTP_AUTH_TYPE === "bearer") return { type: "bearer", secret: env.MTR_HTTP_AUTH_SECRET };
+    if (env.MTR_HTTP_AUTH_TYPE === "header" && env.MTR_HTTP_AUTH_HEADER) return { type: "header", header: env.MTR_HTTP_AUTH_HEADER, secret: env.MTR_HTTP_AUTH_SECRET };
+    throw new Error(`${context}: HTTP agents require header or bearer authentication`);
+  }
+
+  function httpUrl(base, prefix, context) {
+    if (placeholder(base) || (prefix && placeholder(prefix))) throw new Error(`${context}: URL/path prefix still contains a placeholder`);
+    let url;
+    try { url = new URL(/^https?:\/\//i.test(base) ? base : `https://${base}`); } catch { throw new Error(`${context}: invalid service URL`); }
+    if (!["http:", "https:"].includes(url.protocol) || url.search || url.hash || url.username || url.password) throw new Error(`${context}: service URL must not contain query parameters or credentials`);
+    const value = (prefix ?? "").trim();
+    if (/[\s?#]/.test(value)) throw new Error(`${context}: invalid Agent path prefix`);
+    const normalized = !value || value === "/" ? "" : (value.startsWith("/") ? value : "/" + value).replace(/\/+$/g, "");
+    const path = url.pathname.replace(/\/+$/g, "");
+    url.pathname = normalized && !path.endsWith(normalized) ? path + normalized : path;
+    return url.toString().replace(/\/$/, "");
+  }
+
+  function urlsFrom(value, path = [], result = []) {
+    if (!object(value) && !Array.isArray(value)) return result;
+    for (const [key, child] of Object.entries(value)) {
+      if (/code|download|secret|password|credential|environment|internal|intranet|console|doclink/i.test(key)) continue;
+      const next = [...path, key];
+      if (/^(triggerDesc|triggerConfig)$/i.test(key) && typeof child === "string") {
+        try { urlsFrom(JSON.parse(child), next, result); } catch { /* Not every trigger description is JSON. */ }
+      } else if (typeof child === "string" && /url|domain|endpoint|address/i.test(key) && !placeholder(child)) {
+        try { const url = new URL(/^https?:\/\//i.test(child) ? child : `https://${child}`); if (url.hostname.includes(".") && !url.search && !url.hash) result.push(url.toString()); } catch { /* Not a URL field. */ }
+      } else if (object(child) || Array.isArray(child)) urlsFrom(child, next, result);
+    }
+    return result;
+  }
+
+  function serviceUrl(info, context) {
+    const preferred = info?.url?.system_url ?? info?.httpTrigger?.urlInternet ?? info?.externalDomain ?? info?.publicDomain;
+    if (preferred) return preferred;
+    const candidates = [...new Set(urlsFrom(info))];
+    const https = candidates.filter(url => url.startsWith("https://"));
+    const choices = https.length ? https : candidates;
+    if (choices.length === 1) return choices[0];
+    if (choices.length > 1) throw new Error(`${context}: multiple invocation URLs; set target.agentUrl explicitly`);
+    if (info?.internalDomain) {
+      console.error(`${context}: s info only returned internalDomain; the Server must be able to reach this private endpoint (override with target.agentUrl if needed)`);
+      return info.internalDomain;
+    }
+    throw new Error(`${context}: info returned no invocation URL; set target.agentUrl explicitly`);
+  }
+
+  async function scfRecords(provider) {
+    if (cache.has("qcloud")) return cache.get("qcloud");
+    console.error("qcloud: scf info (all subdirectories)");
+    const output = run("scf", ["info"], join(fcDir, "output", provider.output ?? "qcloud"));
+    let yaml;
+    for (const directory of (process.env.PATH ?? "").split(":")) {
+      const executable = join(directory, "scf");
+      if (!existsSync(executable)) continue;
+      try { yaml = createRequire(await realpath(executable))("js-yaml"); break; } catch { /* Try another installation. */ }
+    }
+    if (!yaml) throw new Error("qcloud: cannot load js-yaml from the scf installation");
+    const records = [], lines = output.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const start = lines[i].match(/^(\s*)Output:\s*$/);
+      if (!start) continue;
+      const block = [lines[i]], indent = start[1].length;
+      for (i++; i < lines.length; i++) {
+        if (lines[i].trim() && lines[i].match(/^\s*/)[0].length <= indent) { i--; break; }
+        block.push(lines[i]);
+      }
+      try { const data = yaml.load(block.join("\n"), { schema: yaml.JSON_SCHEMA }); if (object(data?.Output)) records.push(data.Output); }
+      catch { throw new Error("qcloud: scf info output could not be parsed as YAML"); }
+    }
+    if (!records.length) throw new Error("qcloud: scf info returned no Output records");
+    cache.set("qcloud", records);
+    return records;
+  }
+
+  async function invocationUrl(providerName, provider, target, temp) {
+    if (target.agentUrl) return target.agentUrl;
+    const context = `${providerName}.${target.key}`;
+    if (providerName === "aliyun" || providerName === "ctyun") {
+      const template = resolve(fcDir, "output", provider.output ?? `s.${providerName}.yaml`);
+      await access(template);
+      const output = join(temp, `${providerName}-${target.key}.json`);
+      console.error(`${context}: s info`);
+      run("s", [target.key, "info", "-t", template, "--output-format", "json", "--output-file", output, "--skip-actions"], dirname(template));
+      const info = parseJson(await readFile(output, "utf8"), context);
+      const record = info[target.key] ?? info;
+      if (record.functionName && record.functionName !== target.functionName) throw new Error(`${context}: info returned another function`);
+      return serviceUrl(record, context);
+    }
+    if (providerName === "qcloud") {
+      const records = await scfRecords(provider);
+      const matches = records.filter(record => record.functionName === target.functionName && (!record.region || record.region === target.region));
+      if (!matches.length) { console.error(`${context}: not deployed, skipping`); return null; }
+      if (matches.length !== 1) throw new Error(`${context}: ambiguous scf info result`);
+      return serviceUrl(matches[0], context);
+    }
+    if (!cache.has("gcloud")) {
+      console.error("gcloud: gcloud alpha run services list");
+      const args = ["alpha", "run", "services", "list", "--format=json", "--quiet"];
+      const project = provider.project ?? provider.projectId;
+      if (project && !placeholder(project)) args.push(`--project=${project}`);
+      const data = parseJson(run("gcloud", args), "gcloud services list");
+      if (!Array.isArray(data)) throw new Error("gcloud: expected a service list");
+      cache.set("gcloud", data);
+    }
+    const matches = cache.get("gcloud").filter(service => service.metadata?.name === target.functionName && service.metadata?.labels?.["cloud.googleapis.com/location"] === target.region);
+    if (!matches.length) { console.error(`${context}: not deployed, skipping`); return null; }
+    if (matches.length !== 1 || !matches[0].status?.url) throw new Error(`${context}: missing or ambiguous service URL`);
+    return matches[0].status.url;
+  }
+
+  function huaweiProject(provider, target) {
+    const configured = target.projectId ?? provider.projectId;
+    if (!placeholder(configured)) {
+      if (!/^[A-Za-z0-9]{32}$/.test(configured)) throw new Error(`${target.key}: invalid projectId`);
+      return configured;
+    }
+    const profile = target.profile ?? provider.profile;
+    const key = `huawei:${profile ?? "default"}:${target.region}`;
+    if (!cache.has(key)) {
+      console.error(`huaweicloud.${target.key}: resolving IAM project`);
+      const args = ["IAM", "KeystoneListProjects/v3", `--name=${target.region}`, `--cli-region=${target.region}`, "--cli-output=json"];
+      if (profile) args.push(`--cli-profile=${profile}`);
+      const data = parseJson(run("hcloud", args), target.region);
+      if (!Array.isArray(data.projects) || data.links?.next) throw new Error(`${target.region}: incomplete IAM project list`);
+      const projects = data.projects.filter(project => project.name === target.region && project.enabled !== false);
+      if (projects.length > 1 || projects.length && !/^[A-Za-z0-9]{32}$/.test(projects[0].id)) throw new Error(`${target.region}: ambiguous or invalid project`);
+      cache.set(key, projects[0]?.id ?? null);
+    }
+    return cache.get(key);
+  }
+
+  const temp = await mkdtemp(join(tmpdir(), "mtr-outbound-info-"));
+  try {
+    const rows = [], guards = new Map(), ids = new Set();
+    for (const providerName of selected) {
+      const provider = config.providers[providerName];
+      if (!Array.isArray(provider.targets)) throw new Error(`${providerName}: targets must be an array`);
+      for (const target of provider.targets) {
+        if (regions && !regions.has(target.region)) continue;
+        if (!/^[A-Za-z0-9_.-]+$/.test(target.id ?? "") || ids.has(target.id)) throw new Error(`Invalid or duplicate agent ID: ${target.id}`);
+        ids.add(target.id);
+        const context = `${providerName}.${target.key}`;
+        const source = sources[providerName] ?? null;
+        let url, project = null, auth = null;
+        const transport = providerName === "huaweicloud" ? "event" : "http";
+        if (transport === "event") {
+          project = huaweiProject(provider, target);
+          if (!project) { console.error(`${context}: no enabled project, skipping`); continue; }
+          const urn = `urn:fss:${target.region}:${project}:function:${target.package ?? provider.package ?? "default"}:${target.functionName}:latest`;
+          url = `https://functiongraph.${target.region}.myhuaweicloud.com/v2/${project}/fgs/functions/${encodeURIComponent(urn)}/invocations`;
+          if (!source) throw new Error(`${context}: select a Huawei AK/SK source row with --source-id`);
+        } else {
+          const env = mergedEnv(providerName, provider, target);
+          if (!source) auth = httpAuth(env, context);
+          const base = await invocationUrl(providerName, provider, target, temp);
+          if (base === null) continue;
+          url = httpUrl(base, env.MTR_HTTP_PATH_PREFIX, context);
+        }
+        if (source) guards.set(source, transport === "event" ? "huaweicloud_aksk" : "http");
+        rows.push(`    (${[literal(target.id), literal(url), literal(transport), project ? literal(project) : "NULL::text", json(auth), source ? literal(source) : "NULL::text", json(target.labels), json(target.tls)].join(", ")})`);
+      }
+    }
+    if (!rows.length) throw new Error("No targets resolved; no SQL file generated");
+    const guardSql = [...guards].map(([source, type]) => `  IF NOT EXISTS (SELECT 1 FROM outbound_agents WHERE id = ${literal(source)} AND ${type === "http" ? "auth->>'type' IN ('header', 'bearer')" : "auth->>'type' = 'huaweicloud_aksk' AND COALESCE(auth->>'access_key', '') <> ''"} AND COALESCE(auth->>'secret', '') <> '') THEN
+      RAISE EXCEPTION 'Missing or invalid source agent: %', ${literal(source)};
+    END IF;`).join("\n");
+    const sql = `-- Generated from ${resolve(options.config).replace(/[\r\n]/g, " ")}
+  -- Contains HTTP tokens when read from the targets file. Keep this file private.
+  -- Existing IDs are skipped. Cloud resources and the database are not modified by the generator.
+  BEGIN;
+  ${guards.size ? `DO $mtr_guard$\nBEGIN\n${guardSql}\nEND;\n$mtr_guard$;\n` : ""}
+  WITH targets(id, url, transport, project_id, auth, source_id, labels, tls) AS (
+    VALUES
+  ${rows.join(",\n")}
+  )
+  INSERT INTO outbound_agents (
+    id, transport, enabled, url, headers, auth, event_response, labels, tls, created_at, updated_at
+  )
+  SELECT target.id, target.transport, TRUE, target.url,
+    CASE WHEN target.transport = 'event' THEN '{"X-CFF-Request-Version":"v1"}'::jsonb ELSE '{}'::jsonb END,
+    CASE WHEN target.transport = 'event' THEN jsonb_build_object(
+      'type', 'huaweicloud_aksk', 'access_key', source.auth->>'access_key',
+      'secret', source.auth->>'secret', 'project_id', target.project_id
+    ) ELSE COALESCE(target.auth, source.auth) END,
+    CASE WHEN target.transport = 'event' THEN 'result_field' ELSE '' END,
+    COALESCE(target.labels, source.labels, '[]'::jsonb), COALESCE(target.tls, source.tls, '{}'::jsonb), NOW(), NOW()
+  FROM targets AS target LEFT JOIN outbound_agents AS source ON source.id = target.source_id
+  WHERE TRUE
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id;
+  COMMIT;
+  `;
+    await mkdir(dirname(resolve(options.output)), { recursive: true });
+    await writeFile(resolve(options.output), sql, { mode: 0o600, flag: "wx" });
+    console.error(`Generated ${rows.length} rows: ${resolve(options.output)} (existing IDs will be skipped)`);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 }
 
 function assertPublicConfigIsRedacted(value) {

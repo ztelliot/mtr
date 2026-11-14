@@ -1069,6 +1069,27 @@ FaaS Agent 不读取 `config.yaml`，所有运行参数都通过环境变量注�
 `MTR_COUNTRY`、`MTR_ID`、`MTR_ISP`、`TZ` 和 `MTR_REGION`；Agent 运行参数来自
 `targets.json` 顶层的 `env`，也可以被 provider 或 target 里的 `env` 覆盖。
 
+部署完成后，可在仓库根目录生成出站 Agent 的 PostgreSQL 插入 SQL：
+
+```bash
+node deploy/fc/generate.mjs sql --provider all
+```
+
+脚本默认读取 `deploy/fc/.targets.json`（不存在时读取公开 `targets.json`），输出到
+`deploy/fc/output/outbound-agents.sql`。可用 `--config`、`--output`、`--provider` 和 `--regions`
+选择文件、厂商及地域。`--config` 相对于 `deploy/fc/` 解析，`--output` 相对于当前工作目录解析。
+SQL 子命令只查询已部署资源，不清理部署输出，也不提取二进制；输出文件已存在时会拒绝覆盖。
+原有 `node deploy/fc/generate.mjs --config .targets.json` 仍只生成部署文件。
+阿里云、天翼云通过 `s <key> info` 读取地址；腾讯云在生成物父目录执行一次 `scf info`；
+Google Cloud 执行一次 `gcloud alpha run services list --format=json`；华为云查询 IAM 项目 ID。
+HTTP Agent 自动追加配置中的路径前缀，并使用合并后的 header/bearer token；华为云默认从数据库
+现有 `hwc.cn-north-1.fc` 行复用 AK/SK。其他厂商也可以通过
+`--source-id aliyun=已有ID,ctyun=已有ID,huaweicloud=已有ID` 复用认证。
+天翼云如果只返回内网域名，会提示 Server 需要能访问该网络；也可在 target 配置 `agentUrl`
+显式指定调用地址。SQL 文件可能包含 HTTP token，权限为 `0600`，不要提交。
+脚本只读查询部署信息，不执行 SQL；已有 Agent ID 会跳过。在可访问该文件的 psql 客户端执行
+`\i deploy/fc/output/outbound-agents.sql` 即可导入。
+
 从已发布镜像提取 Agent 二进制的示例：
 
 ```json
