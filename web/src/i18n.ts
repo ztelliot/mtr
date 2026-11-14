@@ -150,6 +150,7 @@ export const resources = {
         tokyo: "东京",
         osaka: "大阪",
         seoul: "首尔",
+        busan: "釜山",
         frankfurt: "法兰克福",
         london: "伦敦",
         norrbotten: "诺尔博滕",
