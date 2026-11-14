@@ -21,7 +21,7 @@ RUN set -eux; \
       GOOS="${targetos}" GOARCH="${targetarch}" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/ztelliot/mtr/internal/version.Version=${VERSION} -X github.com/ztelliot/mtr/internal/version.Commit=${COMMIT} -X github.com/ztelliot/mtr/internal/version.BuiltAt=${BUILT_AT}" -o /out/mtr-agent ./cmd/agent; \
     fi
 
-FROM scratch
+FROM scratch AS runtime
 ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
@@ -35,3 +35,17 @@ EXPOSE 8000 9000
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/mtr-agent"]
 CMD ["-config", "/etc/mtr/agent.yaml"]
+
+FROM runtime AS lambda
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 /lambda-adapter /opt/extensions/lambda-adapter
+ENV MTR_MODE=http \
+    MTR_HTTP_ADDR=:9000 \
+    MTR_HTTP_TLS_ENABLED=false \
+    MTR_SPEEDTEST_MAX_BYTES=0 \
+    AWS_LWA_PORT=9000 \
+    AWS_LWA_READINESS_CHECK_PROTOCOL=tcp \
+    AWS_LWA_INVOKE_MODE=response_stream
+USER 65532:65532
+
+# Keep the default build as the regular Agent image.
+FROM runtime AS agent

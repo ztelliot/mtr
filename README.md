@@ -1233,6 +1233,8 @@ Supported targets:
   image, pushing it to SWR, and deploying through the official KooCLI.
 - `qcloud`: Tencent Cloud SCF, using Serverless Cloud Framework.
 - `gcloud`: Google Cloud Run, using `gcloud alpha run deploy`.
+- `aws`: AWS Lambda with Lambda Web Adapter, private ECR images, and streaming
+  Function URLs, using AWS CLI v2.
 
 Keep real deployment values out of `targets.json`. For production, copy it to a
 local file such as `.targets.json`, fill in values like `MTR_HTTP_AUTH_SECRET`,
@@ -1268,6 +1270,9 @@ output/qcloud/code/scf_bootstrap
 output/qcloud/<target-key>/serverless.yml
 output/qcloud/deploy.sh
 output/gcloud/deploy.sh
+output/aws/targets.json
+output/aws/aws-lambda-deploy.mjs
+output/aws/deploy.sh
 ```
 
 The FaaS Agent does not read `config.yaml`. It is configured entirely through
@@ -1290,7 +1295,8 @@ and existing SQL files are not overwritten. The original
 `node deploy/fc/generate.mjs --config .targets.json` still generates deployment
 assets only. Alibaba Cloud and CTYun use `s <key> info`; Tencent Cloud runs
 `scf info` once in the parent output directory; Google Cloud runs
-`gcloud alpha run services list --format=json` once; Huawei Cloud queries IAM project IDs.
+`gcloud alpha run services list --format=json` once; Huawei Cloud queries IAM project IDs;
+AWS reads each function's URL with `aws lambda get-function-url-config`.
 HTTP Agents use the configured path prefix and merged header/bearer credentials.
 Huawei Cloud reuses AK/SK from the existing database Agent `hwc.cn-north-1.fc` by default.
 Use `--source-id aliyun=ID,ctyun=ID,huaweicloud=ID` to reuse other database credentials.
@@ -1830,6 +1836,39 @@ custom-image support. See also Huawei Cloud's official documentation for
 the [CreateFunction API](https://support.huaweicloud.com/intl/en-us/api-functiongraph/functiongraph_06_0108.html),
 the [UpdateFunctionConfig API](https://support.huaweicloud.com/intl/en-us/api-functiongraph/functiongraph_06_0111.html),
 and [configuring agency permissions](https://support.huaweicloud.com/intl/en-us/usermanual-functiongraph/functiongraph_01_0920.html).
+
+### AWS Lambda
+
+`providers.aws` deploys HTTP Agents with [Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter).
+The separate image `ghcr.io/ztelliot/mtr-agent-lambda` provides `dev-amd64` and
+`dev-arm64`, plus corresponding version and `latest` tags. Each tag contains
+one architecture. Defaults are 128 MB and `linux/arm64`; targets may override
+`image.platform` to `linux/amd64`. Image sync copies only each target's selected
+architecture. Build it manually with:
+
+```bash
+docker buildx build -f Dockerfile.agent --target lambda \
+  --platform linux/arm64 --provenance=false --sbom=false \
+  -t ghcr.io/ztelliot/mtr-agent-lambda:dev-arm64 --push .
+```
+
+Install Docker, Node.js, and AWS CLI v2, and configure AWS credentials locally.
+Use the `providers.aws` template in `targets.json`; fill in `roleArn`, the
+same-region ECR `image.imageUrl`, and the HTTP token in your local `.targets.json`.
+The execution role must trust Lambda and allow CloudWatch logging; the deployment
+identity needs Lambda/ECR permissions and permission to pass that role.
+
+```bash
+cd deploy/fc
+node generate.mjs --config .targets.json
+bash output/aws/deploy.sh
+node generate.mjs sql --config .targets.json --provider aws
+```
+
+Deployment syncs the image to ECR and creates or updates the function and its
+streaming Function URL. Server uses `transport: http` and the Agent token.
+For route probes, use `udp` or `auto`; ICMP and the current TCP traceroute/MTR
+implementation require raw sockets.
 
 ## Acknowledgements
 

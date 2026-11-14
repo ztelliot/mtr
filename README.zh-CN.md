@@ -1032,6 +1032,8 @@ secret。华为云 FunctionGraph 是例外：对应 provider 会覆盖为受 Fun
 - `huaweicloud`：华为云 FunctionGraph，自动拉取源镜像、推送到 SWR 后通过官方 KooCLI 部署。
 - `qcloud`：腾讯云 SCF，通过 Serverless Cloud Framework 部署。
 - `gcloud`：Google Cloud Run，通过 `gcloud alpha run deploy` 部署。
+- `aws`：AWS Lambda，通过 AWS CLI v2 部署，使用 Lambda Web Adapter、私有 ECR 镜像
+  和支持流式响应的 Function URL。
 
 `targets.json` 是提交到仓库里的模板，只放占位符和可公开的目标信息。真实部署时，
 复制一份本地配置，例如 `.targets.json`，填入真实 token、路径前缀、日志项目 ID
@@ -1063,6 +1065,9 @@ output/qcloud/code/scf_bootstrap
 output/qcloud/<target-key>/serverless.yml
 output/qcloud/deploy.sh
 output/gcloud/deploy.sh
+output/aws/targets.json
+output/aws/aws-lambda-deploy.mjs
+output/aws/deploy.sh
 ```
 
 FaaS Agent 不读取 `config.yaml`，所有运行参数都通过环境变量注入。每个目标都会得到
@@ -1081,7 +1086,8 @@ node deploy/fc/generate.mjs sql --provider all
 SQL 子命令只查询已部署资源，不清理部署输出，也不提取二进制；输出文件已存在时会拒绝覆盖。
 原有 `node deploy/fc/generate.mjs --config .targets.json` 仍只生成部署文件。
 阿里云、天翼云通过 `s <key> info` 读取地址；腾讯云在生成物父目录执行一次 `scf info`；
-Google Cloud 执行一次 `gcloud alpha run services list --format=json`；华为云查询 IAM 项目 ID。
+Google Cloud 执行一次 `gcloud alpha run services list --format=json`；华为云查询 IAM 项目 ID；
+AWS 通过 `aws lambda get-function-url-config` 查询每个函数的 URL。
 HTTP Agent 自动追加配置中的路径前缀，并使用合并后的 header/bearer token；华为云默认从数据库
 现有 `hwc.cn-north-1.fc` 行复用 AK/SK。其他厂商也可以通过
 `--source-id aliyun=已有ID,ctyun=已有ID,huaweicloud=已有ID` 复用认证。
@@ -1571,6 +1577,36 @@ target `env`”的顺序合并，同名字段后者覆盖，未指定的字段�
 [创建函数 API](https://support.huaweicloud.com/api-functiongraph/functiongraph_06_0108.html)、
 [更新函数 metadata API](https://support.huaweicloud.com/api-functiongraph/functiongraph_06_0111.html) 和
 [配置函数的委托权限](https://support.huaweicloud.com/usermanual-functiongraph/functiongraph_01_0920.html)。
+
+### AWS Lambda
+
+`providers.aws` 通过 [Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter)
+部署 HTTP Agent。独立镜像 `ghcr.io/ztelliot/mtr-agent-lambda` 提供 `dev-amd64`、
+`dev-arm64`，以及对应架构的版本和 `latest` 标签；每个标签只包含一种架构。
+默认内存为 128 MB、平台为 `linux/arm64`；target 可覆盖为 `linux/amd64`。
+镜像同步只处理各 target 选定的架构。手动构建：
+
+```bash
+docker buildx build -f Dockerfile.agent --target lambda \
+  --platform linux/arm64 --provenance=false --sbom=false \
+  -t ghcr.io/ztelliot/mtr-agent-lambda:dev-arm64 --push .
+```
+
+准备 Docker、Node.js 和 AWS CLI v2，并在本地配置 AWS 凭据。参照 `targets.json`
+中的 `providers.aws` 模板，在本地 `.targets.json` 填写 `roleArn`、同地域 ECR
+`image.imageUrl` 和 HTTP token。执行角色需信任 Lambda 并允许写入 CloudWatch 日志；
+部署身份需具备 Lambda/ECR 权限和传递该角色的权限。
+
+```bash
+cd deploy/fc
+node generate.mjs --config .targets.json
+bash output/aws/deploy.sh
+node generate.mjs sql --config .targets.json --provider aws
+```
+
+部署脚本会同步镜像到 ECR，并创建或更新函数及流式 Function URL。Server 使用
+`transport: http` 和 Agent token。路由探测可选 `udp` 或 `auto`；ICMP 和当前的 TCP
+traceroute/MTR 实现依赖原始 socket。
 
 ## 致谢
 

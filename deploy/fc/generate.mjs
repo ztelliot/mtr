@@ -42,6 +42,7 @@ const providerOrder = [
   "qcloud",
   "huaweicloud",
   "gcloud",
+  "aws",
 ];
 const providerConfigs = {
   aliyun: {
@@ -80,6 +81,12 @@ const providerConfigs = {
     defaultOutput: "gcloud",
     isp: "GCP",
   },
+  aws: {
+    kind: "awsLambda",
+    defaultName: "mtr-agent-aws",
+    defaultOutput: "aws",
+    isp: "AWS",
+  },
 };
 
 const qcloudCodeDirName = "code";
@@ -89,12 +96,14 @@ const qcloudDefaultImageRegistries = {
   "ap-singapore": "sgccr.ccs.tencentyun.com",
   "ap-bangkok": "thccr.ccs.tencentyun.com",
   "ap-jakarta": "jktccr.ccs.tencentyun.com",
+  "ap-johorbahru": "jbccr.ccs.tencentyun.com",
   "ap-tokyo": "jpccr.ccs.tencentyun.com",
   "ap-seoul": "krccr.ccs.tencentyun.com",
   "eu-frankfurt": "deccr.ccs.tencentyun.com",
   "na-ashburn": "useccr.ccs.tencentyun.com",
   "na-siliconvalley": "uswccr.ccs.tencentyun.com",
   "sa-saopaulo": "saoccr.ccs.tencentyun.com",
+  "me-saudi-arabia": "saccr.ccs.tencentyun.com",
 };
 const huaweicloudDefaultImageRegistries = {
   default: "swr.{region}.myhuaweicloud.com",
@@ -350,7 +359,7 @@ function parseArgs(args) {
         "Usage:",
         "  node generate.mjs [deploy] [--config <path>]",
         "  node generate.mjs sql [--config <path>] [--output <file.sql>]",
-        "    [--provider all|aliyun,ctyun,qcloud,huaweicloud,gcloud]",
+        "    [--provider all|aliyun,ctyun,qcloud,huaweicloud,gcloud,aws]",
         "    [--regions <region,...>] [--source-id <provider=ID,...>]",
         "",
         "Config paths are relative to deploy/fc; SQL output paths are relative to the working directory.",
@@ -1857,7 +1866,8 @@ async function deleteProviderOutput(providerName, provider) {
   if (
     providerConfigs[providerName].kind === "qcloudScf" ||
     providerConfigs[providerName].kind === "huaweicloudFunctionGraph" ||
-    providerConfigs[providerName].kind === "gcloudRun"
+    providerConfigs[providerName].kind === "gcloudRun" ||
+    providerConfigs[providerName].kind === "awsLambda"
   ) {
     await deleteGeneratedFile("serverless.yaml");
     await deleteGeneratedFile(join(output, "deploy.sh"));
@@ -1945,6 +1955,270 @@ function assertProvider(providerName, provider, seenKeys) {
     });
     assertHuaweicloudMirrorConsistency(providerName, provider);
   }
+  if (providerConfig.kind === "awsLambda") {
+    const mirrors = new Map();
+    const functions = new Set();
+    for (const target of provider.targets) {
+      const plan = awsLambdaTarget(provider, target, envObject(providerName, provider, target));
+      const identity = `${plan.profile ?? ""}:${plan.region}:${plan.functionName}`;
+      if (functions.has(identity)) throw new Error(`Duplicate AWS Lambda function: ${target.functionName} in ${target.region}`);
+      functions.add(identity);
+      if (!plan.image.sync) continue;
+      const source = `${plan.image.sourceImage}|${plan.image.platform}`;
+      const previous = mirrors.get(plan.image.imageUrl);
+      if (previous && previous !== source) throw new Error(`AWS image ${plan.image.imageUrl} maps to conflicting source images or platforms`);
+      mirrors.set(plan.image.imageUrl, source);
+    }
+  }
+}
+
+function parseEcrImage(uri, region) {
+  const match = String(uri).match(/^(\d{12}|<account-id>)\.dkr\.ecr\.([a-z0-9-]+)\.(amazonaws\.com(?:\.cn)?)\/([a-z0-9][a-z0-9._/-]*)(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|@(sha256:[a-f0-9]{64}))$/);
+  if (!match || match[2] !== region) {
+    throw new Error("image.imageUrl must be a tagged or digest-pinned private ECR image in the target region");
+  }
+  return {
+    registry: uri.split("/")[0],
+    accountId: match[1],
+    repository: match[4],
+    imageId: match[5] ? `imageTag=${match[5]}` : `imageDigest=${match[6]}`,
+    tag: match[5],
+  };
+}
+
+function awsLambdaTarget(provider, target, env) {
+  const context = `providers.aws.targets.${target.key}`;
+  if (!/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(target.region)) throw new Error(`${context}.region is invalid`);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(target.functionName)) throw new Error(`${context}.functionName is invalid`);
+  if (provider.image === false || provider.image === null || target.image === false || target.image === null) {
+    throw new Error(`${context}.image cannot disable the Lambda image`);
+  }
+  const image = { platform: "linux/arm64", sync: true, ...provider.image, ...target.image };
+  if (!["linux/amd64", "linux/arm64"].includes(image.platform)) throw new Error(`${context}.image.platform must be linux/amd64 or linux/arm64`);
+  if (typeof image.sync !== "boolean") throw new Error(`${context}.image.sync must be a boolean`);
+  const arch = image.platform.split("/")[1];
+  const render = value => String(value).replaceAll("{region}", target.region).replaceAll("{key}", target.key).replaceAll("{functionName}", target.functionName).replaceAll("{arch}", arch);
+  image.sourceImage = render(image.sourceImage ?? `ghcr.io/ztelliot/mtr-agent-lambda:dev-${arch}`);
+  image.imageUrl = render(image.imageUrl ?? "");
+  const ecr = parseEcrImage(image.imageUrl, target.region);
+  if (image.sync && !ecr.tag) throw new Error(`${context}.image.imageUrl must use a tag when sync is true`);
+  if (image.sync && (!image.sourceImage || /\s/.test(image.sourceImage))) throw new Error(`${context}.image.sourceImage is invalid`);
+  const roleArn = target.roleArn ?? provider.roleArn;
+  if (typeof roleArn !== "string" || !/^arn:aws(?:-cn|-us-gov)?:iam::(?:\d{12}|<account-id>):role\/[A-Za-z0-9_+=,.@/-]+$/.test(roleArn)) {
+    throw new Error(`${context}.roleArn must be a Lambda execution role ARN`);
+  }
+  const profile = target.profile ?? provider.profile;
+  if (profile !== undefined && (typeof profile !== "string" || !profile.trim())) throw new Error(`${context}.profile must be a non-empty string`);
+  const settings = { timeout: 300, memorySize: 128, description: `MTR Lambda agent (${target.key})`, ...provider.function, ...target.function };
+  for (const key of Object.keys(settings)) {
+    if (!["timeout", "memorySize", "description", "reservedConcurrency"].includes(key)) throw new Error(`${context}.function.${key} is unsupported`);
+  }
+  for (const [key, min, max] of [["timeout", 1, 900], ["memorySize", 128, 10240], ["reservedConcurrency", 0, Infinity]]) {
+    if (settings[key] !== undefined && (!Number.isInteger(settings[key]) || settings[key] < min || settings[key] > max)) throw new Error(`${context}.function.${key} is out of range`);
+  }
+  if (typeof settings.description !== "string" || Buffer.byteLength(settings.description) > 256) throw new Error(`${context}.function.description must fit in 256 bytes`);
+  const variables = {
+    MTR_LOG_LEVEL: "info", MTR_PROTOCOLS: "1", MTR_CAPABILITIES: "ping,traceroute,mtr,http,dns,port",
+    MTR_HTTP_AUTH_TYPE: "header", MTR_HTTP_AUTH_HEADER: "X-MTR-Agent-Token",
+    ...env,
+    // Both ends must agree on streaming and port; inherited settings can be
+    // intended for a different provider (including event-mode FunctionGraph).
+    MTR_MODE: "http", MTR_HTTP_ADDR: ":9000", MTR_HTTP_TLS_ENABLED: "false",
+    MTR_SPEEDTEST_MAX_BYTES: "0", AWS_LWA_PORT: "9000",
+    AWS_LWA_READINESS_CHECK_PORT: "9000", AWS_LWA_READINESS_CHECK_PROTOCOL: "tcp",
+    AWS_LWA_INVOKE_MODE: "response_stream",
+  };
+  if (!["header", "bearer"].includes(variables.MTR_HTTP_AUTH_TYPE) || !variables.MTR_HTTP_AUTH_SECRET?.trim()) {
+    throw new Error(`${context} requires header or bearer HTTP authentication and MTR_HTTP_AUTH_SECRET`);
+  }
+  if (variables.MTR_HTTP_AUTH_TYPE === "header" && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(variables.MTR_HTTP_AUTH_HEADER ?? "")) throw new Error(`${context}.MTR_HTTP_AUTH_HEADER is invalid`);
+  if (variables.MTR_HTTP_AUTH_TYPE === "bearer" && variables.MTR_HTTP_AUTH_HEADER) throw new Error(`${context}: bearer auth requires an empty MTR_HTTP_AUTH_HEADER`);
+  let bytes = 0;
+  for (const [key, value] of Object.entries(variables)) {
+    if (!/^[A-Za-z][A-Za-z0-9_]+$/.test(key) || /^(?:AWS_LAMBDA_|AWS_EXECUTION_ENV$|AWS_REGION$|AWS_DEFAULT_REGION$|AWS_ACCESS_KEY_ID$|AWS_SECRET_ACCESS_KEY$|AWS_SESSION_TOKEN$|_HANDLER$|LAMBDA_TASK_ROOT$|LAMBDA_RUNTIME_DIR$)/.test(key)) throw new Error(`${context}.env contains a reserved or invalid Lambda key: ${key}`);
+    bytes += Buffer.byteLength(key) + Buffer.byteLength(String(value));
+    variables[key] = String(value);
+  }
+  if (bytes > 4096) throw new Error(`${context}.env exceeds Lambda's 4096-byte limit`);
+  return {
+    key: target.key, region: target.region, profile, functionName: target.functionName,
+    image, configuration: {
+      Role: roleArn, Timeout: settings.timeout, MemorySize: settings.memorySize,
+      Description: settings.description, Environment: { Variables: variables },
+    },
+    architecture: arch === "amd64" ? "x86_64" : "arm64",
+    reservedConcurrency: settings.reservedConcurrency,
+  };
+}
+
+function executeAwsCommand(command, args, options) {
+  return spawnSync(command, args, {
+    encoding: "utf8", timeout: 300000, maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, AWS_PAGER: "", AWS_CLI_AUTO_PROMPT: "off" }, ...options,
+  });
+}
+
+async function deployAwsLambda(targets, { execute = executeAwsCommand, log = console.log } = {}) {
+  // Reject all unresolved templates before uploading images or changing functions.
+  if (!Array.isArray(targets) || !targets.length) throw new Error("No AWS Lambda targets configured");
+  for (const target of targets) {
+    if (/<[^<>]+>/.test(JSON.stringify(target))) throw new Error(`aws.${target.key}: replace placeholders in the local targets file before deployment`);
+    parseEcrImage(target.image.imageUrl, target.region);
+  }
+  const secrets = targets.flatMap(t => Object.entries(t.configuration.Environment.Variables)
+    .filter(([key]) => /secret|token|password|key/i.test(key)).map(([, value]) => value)).filter(Boolean);
+  const redact = text => secrets.reduce((result, secret) => result.replaceAll(secret, "[REDACTED]"), String(text));
+  function run(command, args, { missing, ...options } = {}) {
+    const result = execute(command, args, options);
+    if (result.error) throw new Error(`${command}: ${result.error.code ?? "could not start command"}`);
+    if (result.status !== 0) {
+      const code = result.stderr?.match(/An error occurred \(([^)]+)\)/)?.[1];
+      if (missing && code === missing) return null;
+      throw new Error(`${command} ${args.slice(0, 2).join(" ")} failed: ${redact(result.stderr || `exit ${result.status}`).slice(0, 2000)}`);
+    }
+    return result.stdout?.trim() ?? "";
+  }
+  function aws(target, service, operation, args = [], options = {}) {
+    return run("aws", [service, operation, "--region", target.region,
+      ...(target.profile ? ["--profile", target.profile] : []), "--output", "json", "--no-cli-pager", ...args], options);
+  }
+  const json = value => value === null ? null : JSON.parse(value);
+  const current = new Map();
+  const urls = new Map();
+  // Check every function first. Only an explicit ResourceNotFound is absence.
+  for (const target of targets) {
+    const args = ["--function-name", target.functionName];
+    const info = json(aws(target, "lambda", "get-function", args, { missing: "ResourceNotFoundException" }));
+    if (info && info.Configuration?.PackageType !== "Image") throw new Error(`aws.${target.key}: existing function must use package type Image`);
+    current.set(target, info);
+    const url = json(aws(target, "lambda", "get-function-url-config", args, { missing: "ResourceNotFoundException" }));
+    if (url && url.AuthType !== "NONE") throw new Error(`aws.${target.key}: existing Function URL uses AWS_IAM; refusing to change its authentication`);
+    urls.set(target, url);
+  }
+  const work = await mkdtemp(join(tmpdir(), "mtr-lambda-"));
+  try {
+    const request = join(work, "request.json");
+    async function input(target, operation, value) {
+      await writeFile(request, JSON.stringify(value), { mode: 0o600 });
+      return aws(target, "lambda", operation, ["--cli-input-json", `file://${request}`]);
+    }
+    const mirrored = new Set();
+    const images = new Map();
+    for (const target of targets) {
+      const { image } = target;
+      const ecr = parseEcrImage(image.imageUrl, target.region);
+      if (image.sync && !mirrored.has(image.imageUrl)) {
+        log(`Syncing ${image.sourceImage} -> ${image.imageUrl}`);
+        const repoArgs = ["--registry-id", ecr.accountId, "--repository-names", ecr.repository];
+        if (aws(target, "ecr", "describe-repositories", repoArgs, { missing: "RepositoryNotFoundException" }) === null) {
+          const caller = json(aws(target, "sts", "get-caller-identity"));
+          if (caller?.Account !== ecr.accountId) throw new Error(`aws.${target.key}: create the ECR repository in its owning account before deployment`);
+          aws(target, "ecr", "create-repository", ["--repository-name", ecr.repository]);
+        }
+        const password = json(aws(target, "ecr", "get-authorization-token", ["--registry-ids", ecr.accountId]))?.authorizationData?.[0]?.authorizationToken;
+        if (!password) throw new Error(`aws.${target.key}: ECR returned no authorization token`);
+        const credentials = Buffer.from(password, "base64").toString();
+        if (!credentials.startsWith("AWS:")) throw new Error("ECR returned invalid Docker credentials");
+        // An isolated Docker config avoids changing the user's registry logins.
+        const docker = args => ["--config", work, ...args];
+        run("docker", docker(["login", "--username", "AWS", "--password-stdin", ecr.registry]), { input: credentials.slice(4) + "\n" });
+        // Pull with the user's config so private source registries keep working.
+        run("docker", ["pull", "--platform", image.platform, image.sourceImage]);
+        const platform = run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image.sourceImage]);
+        if (platform !== image.platform) throw new Error(`aws.${target.key}: source image architecture does not match ${image.platform}`);
+        run("docker", ["tag", image.sourceImage, image.imageUrl]);
+        run("docker", docker(["push", image.imageUrl]));
+        mirrored.add(image.imageUrl);
+      }
+      const result = json(aws(target, "ecr", "batch-get-image", ["--registry-id", ecr.accountId,
+        "--repository-name", ecr.repository, "--image-ids", ecr.imageId]));
+      const entry = result?.images?.[0];
+      const manifest = entry && JSON.parse(entry.imageManifest);
+      if (result?.failures?.length || result?.images?.length !== 1 || !manifest || manifest.manifests || !manifest.config || !/^sha256:[a-f0-9]{64}$/.test(entry.imageId?.imageDigest)) {
+        throw new Error(`aws.${target.key}: ECR must contain a single-architecture image manifest without attestations`);
+      }
+      images.set(target, `${ecr.registry}/${ecr.repository}@${entry.imageId.imageDigest}`);
+    }
+    for (const target of targets) {
+      log(`Deploying aws.${target.key}`);
+      const functionArgs = ["--function-name", target.functionName];
+      const base = { FunctionName: target.functionName, ...target.configuration };
+      if (current.get(target)) {
+        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+        await input(target, "update-function-configuration", base);
+        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+        await input(target, "update-function-code", { FunctionName: target.functionName,
+          ImageUri: images.get(target), Architectures: [target.architecture] });
+        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+      } else {
+        await input(target, "create-function", { ...base, PackageType: "Image",
+          Code: { ImageUri: images.get(target) }, Architectures: [target.architecture] });
+        aws(target, "lambda", "wait", ["function-active-v2", ...functionArgs]);
+      }
+      if (target.reservedConcurrency !== undefined) aws(target, "lambda", "put-function-concurrency", [...functionArgs, "--reserved-concurrent-executions", String(target.reservedConcurrency)]);
+      const url = json(aws(target, "lambda", urls.get(target) ? "update-function-url-config" : "create-function-url-config",
+        [...functionArgs, "--auth-type", "NONE", "--invoke-mode", "RESPONSE_STREAM"]));
+      const policyResult = json(aws(target, "lambda", "get-policy", functionArgs, { missing: "ResourceNotFoundException" }));
+      const statements = policyResult ? JSON.parse(policyResult.Policy).Statement : [];
+      const permissions = [
+        ["mtr-function-url", "lambda:InvokeFunctionUrl", "lambda:FunctionUrlAuthType", "StringEquals", "NONE", ["--function-url-auth-type", "NONE"]],
+        ["mtr-function-url-invoke", "lambda:InvokeFunction", "lambda:InvokedViaFunctionUrl", "Bool", "true", ["--invoked-via-function-url"]],
+      ];
+      for (const [sid, action, condition, operator, value, options] of permissions) {
+        const existing = statements.find(statement => statement.Sid === sid);
+        if (existing) {
+          const publicPrincipal = existing.Principal === "*" || existing.Principal?.AWS === "*";
+          if (existing.Effect !== "Allow" || existing.Action !== action || !publicPrincipal || String(existing.Condition?.[operator]?.[condition]) !== value) {
+            throw new Error(`aws.${target.key}: permission ${sid} differs from the managed Function URL policy`);
+          }
+          continue;
+        }
+        aws(target, "lambda", "add-permission", [...functionArgs, "--statement-id", sid, "--action", action, "--principal", "*", ...options]);
+      }
+      if (!url?.FunctionUrl) throw new Error(`aws.${target.key}: Lambda returned no Function URL`);
+      log(`aws.${target.key}: ${url.FunctionUrl}`);
+    }
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+function renderAwsLambdaDeployHelper() {
+  return [
+    'import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";',
+    'import { spawnSync } from "node:child_process";',
+    'import { tmpdir } from "node:os";',
+    'import { join, resolve } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    parseEcrImage.toString(),
+    executeAwsCommand.toString(),
+    deployAwsLambda.toString(),
+    'if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {',
+    '  try {',
+    '    if (!process.argv[2]) throw new Error("Usage: node aws-lambda-deploy.mjs <targets.json>");',
+    '    await deployAwsLambda(JSON.parse(await readFile(process.argv[2], "utf8")));',
+    '  } catch (error) {',
+    '    console.error(error.message);',
+    '    process.exitCode = 1;',
+    '  }',
+    '}',
+    '',
+  ].join("\n");
+}
+
+async function generateAwsProvider(providerName, provider) {
+  const outputRoot = providerOutput(providerName, provider);
+  const plans = provider.targets.map(target => awsLambdaTarget(provider, target, envObject(providerName, provider, target)));
+  const planFile = generatedOutputPath(join(outputRoot, "targets.json"));
+  await mkdir(dirname(planFile), { recursive: true });
+  await writeFile(planFile, `${JSON.stringify(plans, null, 2)}\n`, { mode: 0o600 });
+  await writeGeneratedScript(join(outputRoot, "aws-lambda-deploy.mjs"), renderAwsLambdaDeployHelper());
+  await writeGeneratedScript(join(outputRoot, "deploy.sh"), [
+    "#!/usr/bin/env bash", "set -euo pipefail",
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+    'exec node "$ROOT/aws-lambda-deploy.mjs" "$ROOT/targets.json"', "",
+  ].join("\n"));
+  console.log(`Generated ${outputRoot}/targets.json and deploy.sh for ${providerName}`);
 }
 
 async function generateQcloudProvider(providerName, provider) {
@@ -2056,6 +2330,10 @@ async function generateProvider(providerName, provider) {
     await generateHuaweicloudProvider(providerName, provider);
     return;
   }
+  if (providerConfig.kind === "awsLambda") {
+    await generateAwsProvider(providerName, provider);
+    return;
+  }
 
   const body = renderProviderYaml(providerName, provider);
 
@@ -2126,7 +2404,7 @@ async function generateOutboundAgentSql({
     regions: regionFilter,
     "source-id": sourceId,
   };
-  const supported = ["aliyun", "ctyun", "qcloud", "huaweicloud", "gcloud"];
+  const supported = ["aliyun", "ctyun", "qcloud", "huaweicloud", "gcloud", "aws"];
   const selected = options.provider === "all" ? supported.filter(p => config.providers?.[p]) : options.provider.split(",");
   for (const p of selected) if (!supported.includes(p) || !config.providers?.[p]) throw new Error(`Provider is not configured: ${p}`);
   const regions = options.regions ? new Set(options.regions.split(",")) : null;
@@ -2147,11 +2425,12 @@ async function generateOutboundAgentSql({
   const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const cache = new Map();
 
-  function run(command, args, cwd = fcDir) {
+  function run(command, args, cwd = fcDir, { missing } = {}) {
     const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 180000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" } });
     if (result.error) throw new Error(`${command}: ${result.error.message}`);
     const output = clean(result.stdout);
     if (result.status !== 0 || /^\s*\[(USE_ERROR|CLI_ERROR|NETWORK_ERROR|OPENAPI_ERROR|APIE_ERROR)\]/m.test(output)) {
+      if (missing && result.stderr?.match(/An error occurred \(([^)]+)\)/)?.[1] === missing) return null;
       throw new Error(`${command} ${args.slice(0, 2).join(" ")} failed (exit ${result.status})\n${redact(result.stderr || output)}`);
     }
     return output;
@@ -2257,6 +2536,22 @@ async function generateOutboundAgentSql({
   async function invocationUrl(providerName, provider, target, temp) {
     if (target.agentUrl) return target.agentUrl;
     const context = `${providerName}.${target.key}`;
+    if (providerName === "aws") {
+      console.error(`${context}: aws lambda get-function-url-config`);
+      const args = ["lambda", "get-function-url-config", "--function-name", target.functionName,
+        "--region", target.region, "--output", "json", "--no-cli-pager"];
+      const profile = target.profile ?? provider.profile;
+      if (profile) args.push("--profile", profile);
+      const result = run("aws", args, fcDir, { missing: "ResourceNotFoundException" });
+      if (result === null) {
+        console.error(`${context}: no deployed Function URL, skipping`);
+        return null;
+      }
+      const info = parseJson(result, context);
+      if (info.AuthType !== "NONE" || info.InvokeMode !== "RESPONSE_STREAM") throw new Error(`${context}: Function URL must use NONE auth and RESPONSE_STREAM`);
+      if (!info.FunctionUrl) throw new Error(`${context}: Lambda returned no Function URL`);
+      return info.FunctionUrl;
+    }
     if (providerName === "aliyun" || providerName === "ctyun") {
       const template = resolve(fcDir, "output", provider.output ?? `s.${providerName}.yaml`);
       await access(template);
@@ -2443,6 +2738,7 @@ function isSensitivePublicPath(path) {
   if (key === "projectId" || key === "agencyName") {
     return true;
   }
+  if (path[0] === "providers" && path[1] === "aws" && ["roleArn", "imageUrl", "agentUrl", "profile"].includes(key)) return true;
   if (isHuaweicloudPublicPath(path)) {
     const parentKey = path[path.length - 2] ?? "";
     if (
@@ -2467,6 +2763,7 @@ function isAllowedPublicPlaceholder(value, path) {
   if (isPlaceholderValue(value)) {
     return true;
   }
+  if (path[0] === "providers" && path[1] === "aws" && /<[^<>]+>/.test(value)) return true;
   const key = path[path.length - 1] ?? "";
   return (
     isHuaweicloudPublicPath(path) &&

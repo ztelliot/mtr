@@ -544,6 +544,47 @@
         }
       ]
     },
+    "aws": {
+      "name": "mtr-agent-aws",
+      "output": "aws",
+      "roleArn": "arn:aws:iam::<account-id>:role/mtr-agent-lambda",
+      "image": {
+        "sourceImage": "ghcr.io/ztelliot/mtr-agent-lambda:dev-{arch}",
+        "imageUrl": "<account-id>.dkr.ecr.{region}.amazonaws.com/mtr-agent-lambda:dev-{arch}",
+        "platform": "linux/arm64",
+        "sync": true
+      },
+      "function": {
+        "memorySize": 128,
+        "timeout": 300
+      },
+      "targets": [
+        {
+          "key": "tokyo",
+          "region": "ap-northeast-1",
+          "functionName": "mob-tokyo",
+          "country": "JP",
+          "id": "aws.ap-northeast-1.fc",
+          "label": "Tokyo"
+        },
+        {
+          "key": "singapore",
+          "region": "ap-southeast-1",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "aws.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "virginia",
+          "region": "us-east-1",
+          "functionName": "mob-virginia",
+          "country": "US",
+          "id": "aws.us-east-1.fc",
+          "label": "Virginia"
+        }
+      ]
+    },
     "gcloud": {
       "name": "mtr-agent-gcloud",
       "output": "gcloud",

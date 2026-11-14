@@ -126,19 +126,53 @@ jobs:
           printf '%s\n' "COMMIT=$COMMIT" >> "$GITHUB_ENV"
           printf '%s\n' "BUILT_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+      - name: Prepare Go image build targets
+        env:
+          COMPONENT: ${{ matrix.component }}
+          IMAGE_METADATA: ${{ steps.meta.outputs.json }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          component = os.environ["COMPONENT"]
+          metadata = json.loads(os.environ["IMAGE_METADATA"])
+          common = {
+              "context": ".",
+              "dockerfile": f"Dockerfile.{component}",
+              "args": {key: os.environ[key] for key in ("VERSION", "COMMIT", "BUILT_AT")},
+              "labels": metadata["labels"],
+          }
+          targets = {
+              "image": {
+                  **common,
+                  "platforms": ["linux/amd64", "linux/arm64"],
+                  "tags": metadata["tags"],
+              },
+          }
+          if component == "agent":
+              for arch in ("amd64", "arm64"):
+                  targets[f"lambda-{arch}"] = {
+                      **common,
+                      "target": "lambda",
+                      "platforms": [f"linux/{arch}"],
+                      "tags": [
+                          f"{image}-lambda:{tag}-{arch}"
+                          for image, tag in (value.rsplit(":", 1) for value in metadata["tags"])
+                      ],
+                      "attest": ["type=provenance,disabled=true", "type=sbom,disabled=true"],
+                  }
+          definition = {"group": {"default": {"targets": list(targets)}}, "target": targets}
+          Path(os.environ["RUNNER_TEMP"], "go-images.bake.json").write_text(json.dumps(definition))
+          PYTHON
+
+      - name: Build and push Go images
+        uses: docker/bake-action@v7
         with:
-          context: .
-          file: Dockerfile.${{ matrix.component }}
+          source: .
+          files: ${{ runner.temp }}/go-images.bake.json
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILT_AT=${{ env.BUILT_AT }}
 
   build-web-image:
     runs-on: ubuntu-latest
