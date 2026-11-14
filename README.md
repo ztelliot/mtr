@@ -489,6 +489,10 @@ before a response has started. HTTP/2 and HTTP/3 require HTTPS, and HTTP/3
 requires outbound UDP access. Results report the selected protocol in
 `protocol` or `http_version`, plus `requested_protocol` or
 `requested_http_version` when `auto` was requested.
+`auto` is a request selection strategy, not a configurable permission. Protocol
+and HTTP version allowlists contain only concrete values. Auto selects and falls
+back within the intersection of the token, node, and Agent policies, including
+probe port restrictions; it rejects a job when no permitted candidate remains.
 `count` and `max_hops` are controlled by Server runtime policy, not by user
 requests. `dns` replaces the old `nslookup` tool name. `port` performs a native
 TCP connect probe and requires `args.port`. By default, Server resolves target
@@ -1235,6 +1239,7 @@ Supported targets:
 - `gcloud`: Google Cloud Run, using `gcloud alpha run deploy`.
 - `aws`: AWS Lambda with Lambda Web Adapter, private ECR images, and streaming
   Function URLs, using AWS CLI v2.
+- `azure`: Azure Container Apps Consumption, using the existing Agent image and Azure CLI.
 
 Keep real deployment values out of `targets.json`. For production, copy it to a
 local file such as `.targets.json`, fill in values like `MTR_HTTP_AUTH_SECRET`,
@@ -1273,6 +1278,9 @@ output/gcloud/deploy.sh
 output/aws/targets.json
 output/aws/aws-lambda-deploy.mjs
 output/aws/deploy.sh
+output/azure/targets.json
+output/azure/azure-deploy.mjs
+output/azure/deploy.sh
 ```
 
 The FaaS Agent does not read `config.yaml`. It is configured entirely through
@@ -1855,8 +1863,10 @@ docker buildx build -f Dockerfile.agent --target lambda \
 Install Docker, Node.js, and AWS CLI v2, and configure AWS credentials locally.
 Use the `providers.aws` template in `targets.json`; fill in `roleArn`, the
 same-region ECR `image.imageUrl`, and the HTTP token in your local `.targets.json`.
-The execution role must trust Lambda and allow CloudWatch logging; the deployment
-identity needs Lambda/ECR permissions and permission to pass that role.
+The execution role must trust Lambda. CloudWatch logging is optional; omit
+`AWSLambdaBasicExecutionRole` and other CloudWatch Logs permissions when logs
+are not needed. The deployment identity needs Lambda/ECR permissions and
+permission to pass that role.
 
 ```bash
 cd deploy/fc
@@ -1869,6 +1879,30 @@ Deployment syncs the image to ECR and creates or updates the function and its
 streaming Function URL. Server uses `transport: http` and the Agent token.
 For route probes, use `udp` or `auto`; ICMP and the current TCP traceroute/MTR
 implementation require raw sockets.
+
+### Azure Container Apps
+
+`providers.azure` runs `ghcr.io/ztelliot/mtr-agent:dev` directly on the Consumption
+profile. No Storage Account, Functions host, or extra image build is needed.
+Defaults are 0.25 CPU, 0.5 GiB, `run.minReplicas: 0`, and `run.maxReplicas: 1`.
+Logs are not stored; no Log Analytics workspace or Application Insights is created.
+
+Install Azure CLI and Node.js. In your local `.targets.json`, configure
+`subscription`, `resourceGroup`, `environment`, and the HTTP token. Templates
+use names like `mob-hongkong` and IDs like `azr.ap-east-1.fc`.
+
+```bash
+az login
+cd deploy/fc
+node generate.mjs --config .targets.json
+bash output/azure/deploy.sh
+node generate.mjs sql --config .targets.json --provider azure
+```
+
+Targets deploy one at a time; failures don't block later targets. The script
+creates or reuses a log-free environment and uses single revision mode.
+Server uses `transport: http` and the existing Agent token. `run.httpConcurrency`
+is the HTTP autoscaling threshold, not a hard request concurrency limit.
 
 ## Acknowledgements
 

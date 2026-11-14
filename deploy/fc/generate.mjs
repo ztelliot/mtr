@@ -43,6 +43,7 @@ const providerOrder = [
   "huaweicloud",
   "gcloud",
   "aws",
+  "azure",
 ];
 const providerConfigs = {
   aliyun: {
@@ -86,6 +87,12 @@ const providerConfigs = {
     defaultName: "mtr-agent-aws",
     defaultOutput: "aws",
     isp: "AWS",
+  },
+  azure: {
+    kind: "azureContainerApps",
+    defaultName: "mtr-agent-azure",
+    defaultOutput: "azure",
+    isp: "Azure",
   },
 };
 
@@ -359,7 +366,7 @@ function parseArgs(args) {
         "Usage:",
         "  node generate.mjs [deploy] [--config <path>]",
         "  node generate.mjs sql [--config <path>] [--output <file.sql>]",
-        "    [--provider all|aliyun,ctyun,qcloud,huaweicloud,gcloud,aws]",
+        "    [--provider all|aliyun,ctyun,qcloud,huaweicloud,gcloud,aws,azure]",
         "    [--regions <region,...>] [--source-id <provider=ID,...>]",
         "",
         "Config paths are relative to deploy/fc; SQL output paths are relative to the working directory.",
@@ -1867,7 +1874,8 @@ async function deleteProviderOutput(providerName, provider) {
     providerConfigs[providerName].kind === "qcloudScf" ||
     providerConfigs[providerName].kind === "huaweicloudFunctionGraph" ||
     providerConfigs[providerName].kind === "gcloudRun" ||
-    providerConfigs[providerName].kind === "awsLambda"
+    providerConfigs[providerName].kind === "awsLambda" ||
+    providerConfigs[providerName].kind === "azureContainerApps"
   ) {
     await deleteGeneratedFile("serverless.yaml");
     await deleteGeneratedFile(join(output, "deploy.sh"));
@@ -1970,6 +1978,198 @@ function assertProvider(providerName, provider, seenKeys) {
       mirrors.set(plan.image.imageUrl, source);
     }
   }
+  if (providerConfig.kind === "azureContainerApps") {
+    const apps = new Set();
+    for (const target of provider.targets) {
+      const plan = azureContainerTarget(provider, target, envObject(providerName, provider, target));
+      const identity = `${plan.subscription ?? ""}:${plan.resourceGroup}:${plan.functionName}`;
+      if (apps.has(identity)) throw new Error(`Duplicate Azure Container App: ${plan.functionName}`);
+      apps.add(identity);
+    }
+  }
+}
+
+function azureContainerTarget(provider, target, env) {
+  const context = `providers.azure.targets.${target.key}`;
+  const placeholder = value => /<[^<>]+>/.test(String(value));
+  for (const key of ["resourceGroup", "environment", "subscription"]) {
+    for (const value of [provider[key], target[key]]) {
+      if (value !== undefined && (typeof value !== "string" || !value.trim())) throw new Error(`${context}.${key} must be a non-empty string`);
+    }
+  }
+  const resourceGroup = renderTemplate(target.resourceGroup ?? provider.resourceGroup ?? "mtr-agents-{region}", target);
+  const environment = renderTemplate(target.environment ?? provider.environment ?? "mtr-{region}", target);
+  const subscription = target.subscription ?? provider.subscription;
+  if (!/^[a-z][a-z0-9]+$/.test(target.region)) throw new Error(`${context}.region must be an Azure location name such as southeastasia`);
+  if (!placeholder(target.functionName) && (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(target.functionName) || target.functionName.includes("--"))) throw new Error(`${context}.functionName must be a Container App name (2-32 lowercase letters, digits or hyphens)`);
+  if (/[\0\r\n/\\]/.test(resourceGroup)) throw new Error(`${context}.resourceGroup is invalid`);
+  if (!placeholder(environment) && !/^[a-z][a-z0-9-]{0,58}[a-z0-9]$/.test(environment)) throw new Error(`${context}.environment is invalid`);
+  if (provider.function || target.function || provider.storageAccount || target.storageAccount) throw new Error(`${context}: Container Apps uses image/run/environment; remove Functions-only function and storageAccount settings`);
+  if (provider.image === false || provider.image === null || target.image === false || target.image === null) throw new Error(`${context}.image cannot disable the container image`);
+  const image = { imageUrl: "ghcr.io/ztelliot/mtr-agent:dev", platform: "linux/amd64", ...provider.image, ...target.image };
+  if (image.platform !== "linux/amd64") throw new Error(`${context}.image.platform must be linux/amd64 for Azure Container Apps`);
+  if (image.sync || image.sourceImage) throw new Error(`${context}: Container Apps pulls image.imageUrl directly; sourceImage/sync are not used`);
+  image.imageUrl = renderTemplate(image.imageUrl, target);
+  if (!image.imageUrl || /[\s\0]/.test(image.imageUrl)) throw new Error(`${context}.image.imageUrl is invalid`);
+  const run = { cpu: 0.25, memory: "0.5Gi", minReplicas: 0, maxReplicas: 1, httpConcurrency: 1, ...provider.run, ...target.run };
+  for (const key of Object.keys(run)) {
+    if (!["cpu", "memory", "minReplicas", "maxReplicas", "httpConcurrency"].includes(key)) throw new Error(`${context}.run.${key} is unsupported`);
+  }
+  if (typeof run.cpu !== "number" || run.cpu < 0.25 || run.cpu > 4 || !Number.isInteger(run.cpu * 4) || !/^\d+(?:\.\d+)?Gi$/.test(run.memory) || parseFloat(run.memory) !== run.cpu * 2) throw new Error(`${context}.run must use a Consumption CPU/memory pair such as 0.25 CPU and 0.5Gi`);
+  for (const [key, min, max] of [["minReplicas", 0, 1000], ["maxReplicas", 1, 1000], ["httpConcurrency", 1, 1000]]) {
+    if (!Number.isInteger(run[key]) || run[key] < min || run[key] > max) throw new Error(`${context}.run.${key} is out of range`);
+  }
+  if (run.minReplicas > run.maxReplicas) throw new Error(`${context}.run.minReplicas exceeds maxReplicas`);
+  const variables = {
+    MTR_LOG_LEVEL: "info", MTR_PROTOCOLS: "1", MTR_CAPABILITIES: "ping,traceroute,mtr,http,dns,port",
+    MTR_HTTP_AUTH_TYPE: "header", MTR_HTTP_AUTH_HEADER: "X-MTR-Agent-Token", ...env,
+    MTR_MODE: "http", MTR_HTTP_ADDR: ":9000", MTR_HTTP_TLS_ENABLED: "false", MTR_SPEEDTEST_MAX_BYTES: "0",
+  };
+  if (!["header", "bearer"].includes(variables.MTR_HTTP_AUTH_TYPE) || !variables.MTR_HTTP_AUTH_SECRET?.trim()) throw new Error(`${context} requires header or bearer HTTP authentication and MTR_HTTP_AUTH_SECRET`);
+  if (variables.MTR_HTTP_AUTH_TYPE === "header" && !variables.MTR_HTTP_AUTH_HEADER) throw new Error(`${context} requires MTR_HTTP_AUTH_HEADER`);
+  if (variables.MTR_HTTP_AUTH_TYPE === "bearer" && variables.MTR_HTTP_AUTH_HEADER) throw new Error(`${context}: bearer auth requires an empty MTR_HTTP_AUTH_HEADER`);
+  return { key: target.key, region: target.region, functionName: target.functionName, resourceGroup, environment, subscription, image, run, env: variables };
+}
+
+function azureContainerManifest(target, environmentId, revisionSuffix) {
+  const secrets = [];
+  const env = Object.entries(target.env).map(([name, value]) => {
+    if (/secret|token|password|key/i.test(name)) {
+      const secretName = `env-${name.toLowerCase().replaceAll("_", "-")}`;
+      secrets.push({ name: secretName, value });
+      return { name, secretRef: secretName };
+    }
+    return { name, value };
+  });
+  return {
+    location: target.region,
+    properties: {
+      environmentId,
+      workloadProfileName: "Consumption",
+      configuration: { activeRevisionsMode: "Single", secrets,
+        ingress: { external: true, targetPort: 9000, transport: "http", allowInsecure: false } },
+      template: {
+        revisionSuffix,
+        containers: [{ name: "mtr-agent", image: target.image.imageUrl, env,
+          resources: { cpu: target.run.cpu, memory: target.run.memory },
+          probes: [
+            { type: "Startup", tcpSocket: { port: 9000 }, initialDelaySeconds: 1, periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 60 },
+            { type: "Readiness", tcpSocket: { port: 9000 }, periodSeconds: 5, timeoutSeconds: 1, failureThreshold: 3 },
+          ] }],
+        scale: { minReplicas: target.run.minReplicas, maxReplicas: target.run.maxReplicas,
+          rules: [{ name: "http", http: { metadata: { concurrentRequests: String(target.run.httpConcurrency) } } }] },
+      },
+    },
+  };
+}
+
+function executeAzureCommand(command, args, options) {
+  return spawnSync(command, args, { encoding: "utf8", timeout: 900000, maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, AZURE_CORE_COLLECT_TELEMETRY: "no" }, ...options });
+}
+
+async function deployAzureContainers(targets, { execute = executeAzureCommand, log = console.log } = {}) {
+  if (!Array.isArray(targets) || !targets.length) throw new Error("No Azure targets configured");
+  const secrets = targets.flatMap(t => Object.entries(t.env ?? {}).filter(([key]) => /secret|token|password|key/i.test(key)).map(([, value]) => value)).filter(Boolean);
+  const redact = value => secrets.reduce((result, secret) => result.replaceAll(secret, "[REDACTED]"), String(value));
+  function az(target, args, { missing, ...options } = {}) {
+    const result = execute("az", [...args, ...(target.subscription ? ["--subscription", target.subscription] : []), "--only-show-errors", "--output", "json"], options);
+    if (result.error) throw new Error(`az: ${result.error.code ?? "could not start command"}`);
+    if (result.status !== 0) {
+      if (missing && /\((?:ResourceNotFound|ResourceGroupNotFound|ParentResourceNotFound|ContainerAppNotFound)\)/.test(result.stderr ?? "")) return null;
+      throw new Error(`az ${args.slice(0, 3).join(" ")} failed: ${redact(result.stderr || `exit ${result.status}`).slice(0, 2000)}`);
+    }
+    return result.stdout?.trim() ? JSON.parse(result.stdout) : null;
+  }
+  const normalizeRegion = value => String(value).replace(/\s/g, "").toLowerCase();
+  const subscriptions = new Set();
+  const succeeded = [], failed = [];
+  const work = await mkdtemp(join(tmpdir(), "mtr-azure-"));
+  try {
+    for (const target of targets) {
+      const label = `azure.${target.key} (${target.region})`;
+      try {
+        log(`Checking ${label}`);
+        if (/<[^<>]+>/.test(JSON.stringify(target))) throw new Error("replace placeholders in the local targets file before deployment");
+        const subscription = target.subscription ?? "default";
+        if (!subscriptions.has(subscription)) {
+          const provider = az(target, ["provider", "show", "--namespace", "Microsoft.App"]);
+          if (provider.registrationState !== "Registered") {
+            log("Registering Microsoft.App resource provider");
+            az(target, ["provider", "register", "--namespace", "Microsoft.App", "--wait"]);
+          }
+          subscriptions.add(subscription);
+        }
+        if (!az(target, ["group", "exists", "--name", target.resourceGroup])) {
+          az(target, ["group", "create", "--name", target.resourceGroup, "--location", target.region]);
+        }
+        const environmentArgs = ["--name", target.environment, "--resource-group", target.resourceGroup];
+        let environment = az(target, ["containerapp", "env", "show", ...environmentArgs], { missing: true });
+        if (!environment) {
+          log(`Creating environment ${target.environment} (${target.region})`);
+          environment = az(target, ["containerapp", "env", "create", ...environmentArgs, "--location", target.region,
+            "--enable-workload-profiles", "true", "--logs-destination", "none"]);
+        }
+        if (normalizeRegion(environment.location) !== target.region || !environment.id) throw new Error("Container Apps environment has no ID or belongs to a different region");
+        const logs = environment.properties?.appLogsConfiguration?.destination;
+        if (logs && logs !== "none") throw new Error("existing environment stores logs; use a dedicated environment with logs-destination none");
+        const appArgs = ["--name", target.functionName, "--resource-group", target.resourceGroup];
+        const existing = az(target, ["containerapp", "show", ...appArgs], { missing: true });
+        if (existing) {
+          const existingEnvironment = existing.properties?.environmentId ?? existing.properties?.managedEnvironmentId;
+          if (normalizeRegion(existing.location) !== target.region || existingEnvironment?.toLowerCase() !== environment.id.toLowerCase()) throw new Error("existing Container App belongs to a different region or environment");
+        }
+        const manifest = azureContainerManifest(target, environment.id, `mtr-${Date.now().toString(36)}`);
+        const manifestFile = join(work, "containerapp.json");
+        await writeFile(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
+        log(`Deploying ${label}: ${target.image.imageUrl}`);
+        az(target, ["containerapp", existing ? "update" : "create", ...appArgs,
+          ...(!existing ? ["--environment", environment.id] : []), "--yaml", manifestFile]);
+        const app = az(target, ["containerapp", "show", ...appArgs]);
+        const fqdn = app?.properties?.configuration?.ingress?.fqdn;
+        if (!fqdn) throw new Error("Azure returned no Container App hostname");
+        log(`Succeeded ${label}: https://${fqdn}${target.env.MTR_HTTP_PATH_PREFIX ?? ""}`);
+        succeeded.push(label);
+      } catch (error) {
+        log(`Failed ${label}: ${redact(error.message)}`);
+        failed.push(label);
+      }
+    }
+    log(`Azure deployment finished: ${succeeded.length} succeeded, ${failed.length} failed.`);
+    if (failed.length) throw new Error(`Failed targets: ${failed.join(", ")}`);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+function renderAzureDeployHelper() {
+  return [
+    'import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";',
+    'import { spawnSync } from "node:child_process";',
+    'import { tmpdir } from "node:os";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    azureContainerManifest.toString(), executeAzureCommand.toString(), deployAzureContainers.toString(),
+    'try {',
+    '  const root = dirname(fileURLToPath(import.meta.url));',
+    '  await deployAzureContainers(JSON.parse(await readFile(join(root, "targets.json"), "utf8")));',
+    '} catch (error) { console.error(error.message); process.exitCode = 1; }', '',
+  ].join("\n");
+}
+
+async function generateAzureProvider(providerName, provider) {
+  const outputRoot = providerOutput(providerName, provider);
+  const plans = provider.targets.map(target => azureContainerTarget(provider, target, envObject(providerName, provider, target)));
+  const planFile = generatedOutputPath(join(outputRoot, "targets.json"));
+  await mkdir(dirname(planFile), { recursive: true });
+  await writeFile(planFile, JSON.stringify(plans, null, 2) + "\n", { mode: 0o600 });
+  await writeGeneratedScript(join(outputRoot, "azure-deploy.mjs"), renderAzureDeployHelper());
+  await writeGeneratedScript(join(outputRoot, "deploy.sh"), [
+    '#!/usr/bin/env bash', 'set -euo pipefail',
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+    'exec node "$ROOT/azure-deploy.mjs"', '',
+  ].join("\n"));
+  console.log(`Generated ${outputRoot}/targets.json and deploy.sh for Azure Container Apps`);
 }
 
 function parseEcrImage(uri, region) {
@@ -2059,13 +2259,8 @@ function executeAwsCommand(command, args, options) {
 }
 
 async function deployAwsLambda(targets, { execute = executeAwsCommand, log = console.log } = {}) {
-  // Reject all unresolved templates before uploading images or changing functions.
   if (!Array.isArray(targets) || !targets.length) throw new Error("No AWS Lambda targets configured");
-  for (const target of targets) {
-    if (/<[^<>]+>/.test(JSON.stringify(target))) throw new Error(`aws.${target.key}: replace placeholders in the local targets file before deployment`);
-    parseEcrImage(target.image.imageUrl, target.region);
-  }
-  const secrets = targets.flatMap(t => Object.entries(t.configuration.Environment.Variables)
+  const secrets = targets.flatMap(t => Object.entries(t.configuration?.Environment?.Variables ?? {})
     .filter(([key]) => /secret|token|password|key/i.test(key)).map(([, value]) => value)).filter(Boolean);
   const redact = text => secrets.reduce((result, secret) => result.replaceAll(secret, "[REDACTED]"), String(text));
   function run(command, args, { missing, ...options } = {}) {
@@ -2079,22 +2274,20 @@ async function deployAwsLambda(targets, { execute = executeAwsCommand, log = con
     return result.stdout?.trim() ?? "";
   }
   function aws(target, service, operation, args = [], options = {}) {
-    return run("aws", [service, operation, "--region", target.region,
-      ...(target.profile ? ["--profile", target.profile] : []), "--output", "json", "--no-cli-pager", ...args], options);
+    try {
+      return run("aws", [service, operation, "--region", target.region,
+        ...(target.profile ? ["--profile", target.profile] : []), "--output", "json", "--no-cli-pager", ...args], options);
+    } catch (error) {
+      const hint = service === "lambda" && operation.includes("function-url-config") &&
+        /Unable to determine service\/operation name to be authorized/.test(error.message)
+        ? "\nCheck Function URL availability in this region and the configured Lambda endpoint before changing IAM permissions."
+        : "";
+      throw new Error(`aws.${target.key} (${target.region}): ${error.message}${hint}`);
+    }
   }
   const json = value => value === null ? null : JSON.parse(value);
-  const current = new Map();
-  const urls = new Map();
-  // Check every function first. Only an explicit ResourceNotFound is absence.
-  for (const target of targets) {
-    const args = ["--function-name", target.functionName];
-    const info = json(aws(target, "lambda", "get-function", args, { missing: "ResourceNotFoundException" }));
-    if (info && info.Configuration?.PackageType !== "Image") throw new Error(`aws.${target.key}: existing function must use package type Image`);
-    current.set(target, info);
-    const url = json(aws(target, "lambda", "get-function-url-config", args, { missing: "ResourceNotFoundException" }));
-    if (url && url.AuthType !== "NONE") throw new Error(`aws.${target.key}: existing Function URL uses AWS_IAM; refusing to change its authentication`);
-    urls.set(target, url);
-  }
+  const succeeded = [];
+  const failed = [];
   const work = await mkdtemp(join(tmpdir(), "mtr-lambda-"));
   try {
     const request = join(work, "request.json");
@@ -2103,81 +2296,104 @@ async function deployAwsLambda(targets, { execute = executeAwsCommand, log = con
       return aws(target, "lambda", operation, ["--cli-input-json", `file://${request}`]);
     }
     const mirrored = new Set();
-    const images = new Map();
+    // Finish each target before touching the next region. A regional failure
+    // must not prevent healthy regions from being deployed.
     for (const target of targets) {
-      const { image } = target;
-      const ecr = parseEcrImage(image.imageUrl, target.region);
-      if (image.sync && !mirrored.has(image.imageUrl)) {
-        log(`Syncing ${image.sourceImage} -> ${image.imageUrl}`);
-        const repoArgs = ["--registry-id", ecr.accountId, "--repository-names", ecr.repository];
-        if (aws(target, "ecr", "describe-repositories", repoArgs, { missing: "RepositoryNotFoundException" }) === null) {
-          const caller = json(aws(target, "sts", "get-caller-identity"));
-          if (caller?.Account !== ecr.accountId) throw new Error(`aws.${target.key}: create the ECR repository in its owning account before deployment`);
-          aws(target, "ecr", "create-repository", ["--repository-name", ecr.repository]);
-        }
-        const password = json(aws(target, "ecr", "get-authorization-token", ["--registry-ids", ecr.accountId]))?.authorizationData?.[0]?.authorizationToken;
-        if (!password) throw new Error(`aws.${target.key}: ECR returned no authorization token`);
-        const credentials = Buffer.from(password, "base64").toString();
-        if (!credentials.startsWith("AWS:")) throw new Error("ECR returned invalid Docker credentials");
-        // An isolated Docker config avoids changing the user's registry logins.
-        const docker = args => ["--config", work, ...args];
-        run("docker", docker(["login", "--username", "AWS", "--password-stdin", ecr.registry]), { input: credentials.slice(4) + "\n" });
-        // Pull with the user's config so private source registries keep working.
-        run("docker", ["pull", "--platform", image.platform, image.sourceImage]);
-        const platform = run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image.sourceImage]);
-        if (platform !== image.platform) throw new Error(`aws.${target.key}: source image architecture does not match ${image.platform}`);
-        run("docker", ["tag", image.sourceImage, image.imageUrl]);
-        run("docker", docker(["push", image.imageUrl]));
-        mirrored.add(image.imageUrl);
-      }
-      const result = json(aws(target, "ecr", "batch-get-image", ["--registry-id", ecr.accountId,
-        "--repository-name", ecr.repository, "--image-ids", ecr.imageId]));
-      const entry = result?.images?.[0];
-      const manifest = entry && JSON.parse(entry.imageManifest);
-      if (result?.failures?.length || result?.images?.length !== 1 || !manifest || manifest.manifests || !manifest.config || !/^sha256:[a-f0-9]{64}$/.test(entry.imageId?.imageDigest)) {
-        throw new Error(`aws.${target.key}: ECR must contain a single-architecture image manifest without attestations`);
-      }
-      images.set(target, `${ecr.registry}/${ecr.repository}@${entry.imageId.imageDigest}`);
-    }
-    for (const target of targets) {
-      log(`Deploying aws.${target.key}`);
-      const functionArgs = ["--function-name", target.functionName];
-      const base = { FunctionName: target.functionName, ...target.configuration };
-      if (current.get(target)) {
-        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
-        await input(target, "update-function-configuration", base);
-        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
-        await input(target, "update-function-code", { FunctionName: target.functionName,
-          ImageUri: images.get(target), Architectures: [target.architecture] });
-        aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
-      } else {
-        await input(target, "create-function", { ...base, PackageType: "Image",
-          Code: { ImageUri: images.get(target) }, Architectures: [target.architecture] });
-        aws(target, "lambda", "wait", ["function-active-v2", ...functionArgs]);
-      }
-      if (target.reservedConcurrency !== undefined) aws(target, "lambda", "put-function-concurrency", [...functionArgs, "--reserved-concurrent-executions", String(target.reservedConcurrency)]);
-      const url = json(aws(target, "lambda", urls.get(target) ? "update-function-url-config" : "create-function-url-config",
-        [...functionArgs, "--auth-type", "NONE", "--invoke-mode", "RESPONSE_STREAM"]));
-      const policyResult = json(aws(target, "lambda", "get-policy", functionArgs, { missing: "ResourceNotFoundException" }));
-      const statements = policyResult ? JSON.parse(policyResult.Policy).Statement : [];
-      const permissions = [
-        ["mtr-function-url", "lambda:InvokeFunctionUrl", "lambda:FunctionUrlAuthType", "StringEquals", "NONE", ["--function-url-auth-type", "NONE"]],
-        ["mtr-function-url-invoke", "lambda:InvokeFunction", "lambda:InvokedViaFunctionUrl", "Bool", "true", ["--invoked-via-function-url"]],
-      ];
-      for (const [sid, action, condition, operator, value, options] of permissions) {
-        const existing = statements.find(statement => statement.Sid === sid);
-        if (existing) {
-          const publicPrincipal = existing.Principal === "*" || existing.Principal?.AWS === "*";
-          if (existing.Effect !== "Allow" || existing.Action !== action || !publicPrincipal || String(existing.Condition?.[operator]?.[condition]) !== value) {
-            throw new Error(`aws.${target.key}: permission ${sid} differs from the managed Function URL policy`);
+      const label = `aws.${target.key} (${target.region})`;
+      try {
+        log(`Checking ${label}`);
+        if (/<[^<>]+>/.test(JSON.stringify(target))) throw new Error("replace placeholders in the local targets file before deployment");
+        const ecr = parseEcrImage(target.image.imageUrl, target.region);
+        const functionArgs = ["--function-name", target.functionName];
+        // Only an explicit ResourceNotFound is absence; permission and network
+        // failures stop this target and are reported before proceeding.
+        const info = json(aws(target, "lambda", "get-function", functionArgs, { missing: "ResourceNotFoundException" }));
+        if (info && info.Configuration?.PackageType !== "Image") throw new Error("existing function must use package type Image");
+        const existingUrl = info
+          ? json(aws(target, "lambda", "get-function-url-config", functionArgs, { missing: "ResourceNotFoundException" }))
+          : null;
+        if (existingUrl && existingUrl.AuthType !== "NONE") throw new Error("existing Function URL uses AWS_IAM; refusing to change its authentication");
+        const { image } = target;
+        if (image.sync && !mirrored.has(image.imageUrl)) {
+          log(`Checking ECR repository ${ecr.registry}/${ecr.repository}`);
+          const repoArgs = ["--registry-id", ecr.accountId, "--repository-names", ecr.repository];
+          if (aws(target, "ecr", "describe-repositories", repoArgs, { missing: "RepositoryNotFoundException" }) === null) {
+            const caller = json(aws(target, "sts", "get-caller-identity"));
+            if (caller?.Account !== ecr.accountId) throw new Error(`aws.${target.key}: create the ECR repository in its owning account before deployment`);
+            aws(target, "ecr", "create-repository", ["--repository-name", ecr.repository]);
           }
-          continue;
+          log(`Authenticating ECR registry ${ecr.registry}`);
+          const password = json(aws(target, "ecr", "get-authorization-token", ["--registry-ids", ecr.accountId]))?.authorizationData?.[0]?.authorizationToken;
+          if (!password) throw new Error(`aws.${target.key}: ECR returned no authorization token`);
+          const credentials = Buffer.from(password, "base64").toString();
+          if (!credentials.startsWith("AWS:")) throw new Error("ECR returned invalid Docker credentials");
+          // An isolated Docker config avoids changing the user's registry logins.
+          const docker = args => ["--config", work, ...args];
+          run("docker", docker(["login", "--username", "AWS", "--password-stdin", ecr.registry]), { input: credentials.slice(4) + "\n" });
+          // Pull with the user's config so private source registries keep working.
+          log(`Pulling ${image.sourceImage} (${image.platform})`);
+          run("docker", ["pull", "--platform", image.platform, image.sourceImage]);
+          const platform = run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image.sourceImage]);
+          if (platform !== image.platform) throw new Error(`aws.${target.key}: source image architecture does not match ${image.platform}`);
+          run("docker", ["tag", image.sourceImage, image.imageUrl]);
+          log(`Pushing ${image.imageUrl}`);
+          run("docker", docker(["push", image.imageUrl]));
+          mirrored.add(image.imageUrl);
         }
-        aws(target, "lambda", "add-permission", [...functionArgs, "--statement-id", sid, "--action", action, "--principal", "*", ...options]);
+        const result = json(aws(target, "ecr", "batch-get-image", ["--registry-id", ecr.accountId,
+          "--repository-name", ecr.repository, "--image-ids", ecr.imageId]));
+        const entry = result?.images?.[0];
+        const manifest = entry && JSON.parse(entry.imageManifest);
+        if (result?.failures?.length || result?.images?.length !== 1 || !manifest || manifest.manifests || !manifest.config || !/^sha256:[a-f0-9]{64}$/.test(entry.imageId?.imageDigest)) {
+          throw new Error(`aws.${target.key}: ECR must contain a single-architecture image manifest without attestations`);
+        }
+        const imageUri = `${ecr.registry}/${ecr.repository}@${entry.imageId.imageDigest}`;
+        log(`Deploying ${label}`);
+        const base = { FunctionName: target.functionName, ...target.configuration };
+        if (info) {
+          aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+          await input(target, "update-function-configuration", base);
+          aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+          await input(target, "update-function-code", { FunctionName: target.functionName,
+            ImageUri: imageUri, Architectures: [target.architecture] });
+          aws(target, "lambda", "wait", ["function-updated-v2", ...functionArgs]);
+        } else {
+          await input(target, "create-function", { ...base, PackageType: "Image",
+            Code: { ImageUri: imageUri }, Architectures: [target.architecture] });
+          aws(target, "lambda", "wait", ["function-active-v2", ...functionArgs]);
+        }
+        if (target.reservedConcurrency !== undefined) aws(target, "lambda", "put-function-concurrency", [...functionArgs, "--reserved-concurrent-executions", String(target.reservedConcurrency)]);
+        const url = json(aws(target, "lambda", existingUrl ? "update-function-url-config" : "create-function-url-config",
+          [...functionArgs, "--auth-type", "NONE", "--invoke-mode", "RESPONSE_STREAM"]));
+        const policyResult = json(aws(target, "lambda", "get-policy", functionArgs, { missing: "ResourceNotFoundException" }));
+        const statements = policyResult ? JSON.parse(policyResult.Policy).Statement : [];
+        const permissions = [
+          ["mtr-function-url", "lambda:InvokeFunctionUrl", "lambda:FunctionUrlAuthType", "StringEquals", "NONE", ["--function-url-auth-type", "NONE"]],
+          ["mtr-function-url-invoke", "lambda:InvokeFunction", "lambda:InvokedViaFunctionUrl", "Bool", "true", ["--invoked-via-function-url"]],
+        ];
+        for (const [sid, action, condition, operator, value, options] of permissions) {
+          const existing = statements.find(statement => statement.Sid === sid);
+          if (existing) {
+            const publicPrincipal = existing.Principal === "*" || existing.Principal?.AWS === "*";
+            if (existing.Effect !== "Allow" || existing.Action !== action || !publicPrincipal || String(existing.Condition?.[operator]?.[condition]) !== value) {
+              throw new Error(`aws.${target.key}: permission ${sid} differs from the managed Function URL policy`);
+            }
+            continue;
+          }
+          aws(target, "lambda", "add-permission", [...functionArgs, "--statement-id", sid, "--action", action, "--principal", "*", ...options]);
+        }
+        if (!url?.FunctionUrl) throw new Error(`aws.${target.key}: Lambda returned no Function URL`);
+        log(`Succeeded ${label}: ${url.FunctionUrl}`);
+        succeeded.push(label);
+      } catch (error) {
+        const message = redact(error.message);
+        const prefix = `${label}: `;
+        log(`Failed ${label}: ${message.startsWith(prefix) ? message.slice(prefix.length) : message}`);
+        failed.push(label);
       }
-      if (!url?.FunctionUrl) throw new Error(`aws.${target.key}: Lambda returned no Function URL`);
-      log(`aws.${target.key}: ${url.FunctionUrl}`);
     }
+    log(`AWS deployment finished: ${succeeded.length} succeeded, ${failed.length} failed.`);
+    if (failed.length) throw new Error(`Failed targets: ${failed.join(", ")}`);
   } finally {
     await rm(work, { recursive: true, force: true });
   }
@@ -2334,6 +2550,10 @@ async function generateProvider(providerName, provider) {
     await generateAwsProvider(providerName, provider);
     return;
   }
+  if (providerConfig.kind === "azureContainerApps") {
+    await generateAzureProvider(providerName, provider);
+    return;
+  }
 
   const body = renderProviderYaml(providerName, provider);
 
@@ -2404,7 +2624,7 @@ async function generateOutboundAgentSql({
     regions: regionFilter,
     "source-id": sourceId,
   };
-  const supported = ["aliyun", "ctyun", "qcloud", "huaweicloud", "gcloud", "aws"];
+  const supported = ["aliyun", "ctyun", "qcloud", "huaweicloud", "gcloud", "aws", "azure"];
   const selected = options.provider === "all" ? supported.filter(p => config.providers?.[p]) : options.provider.split(",");
   for (const p of selected) if (!supported.includes(p) || !config.providers?.[p]) throw new Error(`Provider is not configured: ${p}`);
   const regions = options.regions ? new Set(options.regions.split(",")) : null;
@@ -2430,7 +2650,8 @@ async function generateOutboundAgentSql({
     if (result.error) throw new Error(`${command}: ${result.error.message}`);
     const output = clean(result.stdout);
     if (result.status !== 0 || /^\s*\[(USE_ERROR|CLI_ERROR|NETWORK_ERROR|OPENAPI_ERROR|APIE_ERROR)\]/m.test(output)) {
-      if (missing && result.stderr?.match(/An error occurred \(([^)]+)\)/)?.[1] === missing) return null;
+      const code = result.stderr?.match(/An error occurred \(([^)]+)\)/)?.[1] ?? result.stderr?.match(/ERROR:\s*\(([^)]+)\)/)?.[1];
+      if (missing && (Array.isArray(missing) ? missing : [missing]).includes(code)) return null;
       throw new Error(`${command} ${args.slice(0, 2).join(" ")} failed (exit ${result.status})\n${redact(result.stderr || output)}`);
     }
     return output;
@@ -2536,6 +2757,20 @@ async function generateOutboundAgentSql({
   async function invocationUrl(providerName, provider, target, temp) {
     if (target.agentUrl) return target.agentUrl;
     const context = `${providerName}.${target.key}`;
+    if (providerName === "azure") {
+      const resourceGroup = renderTemplate(target.resourceGroup ?? provider.resourceGroup ?? "mtr-agents-{region}", target);
+      const subscription = target.subscription ?? provider.subscription;
+      if ([target.functionName, resourceGroup, subscription].some(value => value && placeholder(value))) throw new Error(`${context}: replace Azure deployment placeholders in the local targets file`);
+      console.error(`${context}: az containerapp show`);
+      const args = ["containerapp", "show", "--name", target.functionName, "--resource-group", resourceGroup,
+        "--query", "{fqdn:properties.configuration.ingress.fqdn,location:location}", "--output", "json", "--only-show-errors"];
+      if (subscription) args.push("--subscription", subscription);
+      const result = run("az", args, fcDir, { missing: ["ResourceNotFound", "ResourceGroupNotFound", "ParentResourceNotFound", "ContainerAppNotFound"] });
+      if (result === null) { console.error(`${context}: not deployed, skipping`); return null; }
+      const app = parseJson(result, context);
+      if (String(app.location).replace(/\s/g, "").toLowerCase() !== target.region || !app.fqdn) throw new Error(`${context}: missing hostname or Container App region mismatch`);
+      return `https://${app.fqdn}`;
+    }
     if (providerName === "aws") {
       console.error(`${context}: aws lambda get-function-url-config`);
       const args = ["lambda", "get-function-url-config", "--function-name", target.functionName,
@@ -2739,6 +2974,7 @@ function isSensitivePublicPath(path) {
     return true;
   }
   if (path[0] === "providers" && path[1] === "aws" && ["roleArn", "imageUrl", "agentUrl", "profile"].includes(key)) return true;
+  if (path[0] === "providers" && path[1] === "azure" && ["subscription", "agentUrl"].includes(key)) return true;
   if (isHuaweicloudPublicPath(path)) {
     const parentKey = path[path.length - 2] ?? "";
     if (
@@ -2764,6 +3000,7 @@ function isAllowedPublicPlaceholder(value, path) {
     return true;
   }
   if (path[0] === "providers" && path[1] === "aws" && /<[^<>]+>/.test(value)) return true;
+  if (path[0] === "providers" && path[1] === "azure" && /<[^<>]+>/.test(value)) return true;
   const key = path[path.length - 1] ?? "";
   return (
     isHuaweicloudPublicPath(path) &&

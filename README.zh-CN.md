@@ -412,6 +412,9 @@ RST 都视为到达。该实现目前仅支持 Linux，收集中间跳时需要 
 `auto` 时依次尝试 HTTP/3、HTTP/2、HTTP/1.1，且只会在尚未收到响应时回落。HTTP/2 和 HTTP/3
 要求 HTTPS，HTTP/3 还要求允许出站 UDP。结果中的 `protocol` 或 `http_version` 表示实际协议；
 请求 `auto` 时还会返回 `requested_protocol` 或 `requested_http_version`。
+`auto` 是请求中的自动选择策略，不是可单独配置的权限。协议与 HTTP 版本白名单只填写具体值；
+Auto 只在 Token、节点和 Agent 策略的交集中选择和回退，并遵守探测端口限制。没有可用候选项时
+拒绝执行任务。
 `count` 和 `max_hops` 由 Server 运行时配置控制，用户不可直接指定。`dns` 替代旧的
 `nslookup` 工具名。`port` 执行原生 TCP 连接探测，并要求提供 `args.port`。默认情况下，
 Server 会先解析目标主机名再将任务入队；设置 `resolve_on_agent: true` 可将 DNS 解析和解析后 IP
@@ -1034,6 +1037,7 @@ secret。华为云 FunctionGraph 是例外：对应 provider 会覆盖为受 Fun
 - `gcloud`：Google Cloud Run，通过 `gcloud alpha run deploy` 部署。
 - `aws`：AWS Lambda，通过 AWS CLI v2 部署，使用 Lambda Web Adapter、私有 ECR 镜像
   和支持流式响应的 Function URL。
+- `azure`：Azure Container Apps Consumption，通过 Azure CLI 部署现有 Agent 镜像。
 
 `targets.json` 是提交到仓库里的模板，只放占位符和可公开的目标信息。真实部署时，
 复制一份本地配置，例如 `.targets.json`，填入真实 token、路径前缀、日志项目 ID
@@ -1068,6 +1072,9 @@ output/gcloud/deploy.sh
 output/aws/targets.json
 output/aws/aws-lambda-deploy.mjs
 output/aws/deploy.sh
+output/azure/targets.json
+output/azure/azure-deploy.mjs
+output/azure/deploy.sh
 ```
 
 FaaS Agent 不读取 `config.yaml`，所有运行参数都通过环境变量注入。每个目标都会得到
@@ -1594,7 +1601,8 @@ docker buildx build -f Dockerfile.agent --target lambda \
 
 准备 Docker、Node.js 和 AWS CLI v2，并在本地配置 AWS 凭据。参照 `targets.json`
 中的 `providers.aws` 模板，在本地 `.targets.json` 填写 `roleArn`、同地域 ECR
-`image.imageUrl` 和 HTTP token。执行角色需信任 Lambda 并允许写入 CloudWatch 日志；
+`image.imageUrl` 和 HTTP token。执行角色需信任 Lambda。CloudWatch 日志可选；
+无需日志时，不附加 `AWSLambdaBasicExecutionRole` 或其他 CloudWatch Logs 权限。
 部署身份需具备 Lambda/ECR 权限和传递该角色的权限。
 
 ```bash
@@ -1607,6 +1615,27 @@ node generate.mjs sql --config .targets.json --provider aws
 部署脚本会同步镜像到 ECR，并创建或更新函数及流式 Function URL。Server 使用
 `transport: http` 和 Agent token。路由探测可选 `udp` 或 `auto`；ICMP 和当前的 TCP
 traceroute/MTR 实现依赖原始 socket。
+
+### Azure Container Apps
+
+`providers.azure` 通过 Consumption profile 直接运行 `ghcr.io/ztelliot/mtr-agent:dev`，
+无需 Storage Account、Functions 宿主或额外镜像构建。默认 0.25 CPU、0.5 GiB、
+`run.minReplicas: 0`、`run.maxReplicas: 1`。不存储日志，不创建 Log Analytics 或 Application Insights。
+
+准备 Azure CLI 和 Node.js。在本地 `.targets.json` 中填写 `subscription`、`resourceGroup`、
+`environment` 和 HTTP token。模板沿用 `mob-hongkong`、`azr.ap-east-1.fc` 这类命名。
+
+```bash
+az login
+cd deploy/fc
+node generate.mjs --config .targets.json
+bash output/azure/deploy.sh
+node generate.mjs sql --config .targets.json --provider azure
+```
+
+脚本创建或复用不保存日志的环境，并使用单 revision 模式，逐个地域部署；单个失败后继续。
+Server 沿用 `transport: http` 和 Agent token。`run.httpConcurrency` 是 HTTP 扩容阈值，
+不是请求并发硬上限。
 
 ## 致谢
 

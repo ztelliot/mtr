@@ -585,6 +585,50 @@
         }
       ]
     },
+    "azure": {
+      "name": "mtr-agent-azure",
+      "output": "azure",
+      "subscription": "<subscription-id>",
+      "resourceGroup": "mtr-agents-{region}",
+      "environment": "mtr-{region}",
+      "image": {
+        "imageUrl": "ghcr.io/ztelliot/mtr-agent:dev",
+        "platform": "linux/amd64"
+      },
+      "run": {
+        "cpu": 0.25,
+        "memory": "0.5Gi",
+        "minReplicas": 0,
+        "maxReplicas": 1,
+        "httpConcurrency": 1
+      },
+      "targets": [
+        {
+          "key": "hongkong",
+          "region": "eastasia",
+          "functionName": "mob-hongkong",
+          "country": "HK",
+          "id": "azr.ap-east-1.fc",
+          "label": "Hong Kong"
+        },
+        {
+          "key": "singapore",
+          "region": "southeastasia",
+          "functionName": "mob-singapore",
+          "country": "SG",
+          "id": "azr.ap-southeast-1.fc",
+          "label": "Singapore"
+        },
+        {
+          "key": "tokyo",
+          "region": "japaneast",
+          "functionName": "mob-tokyo",
+          "country": "JP",
+          "id": "azr.ap-northeast-1.fc",
+          "label": "Tokyo"
+        }
+      ]
+    },
     "gcloud": {
       "name": "mtr-agent-gcloud",
       "output": "gcloud",
