@@ -186,7 +186,9 @@ export function permissionFormError(
   }
   if (form.tool === "ping" || form.tool === "mtr" || form.tool === "traceroute") {
     const ports = probePortsForForm(form);
-    if (ports === null || ports.some((port) => !permissionAllowsArg(effective, form.tool, "port", port))) {
+    if (ports === null || (form.protocol === "auto" && !form.port.trim()
+      ? !networkAutoHasCandidate(effective, form.tool)
+      : ports.some((port) => !permissionAllowsArg(effective, form.tool, "port", port)))) {
       return t("errors.optionNotAllowed", { option: t("form.port") });
     }
   }
@@ -598,19 +600,19 @@ function permissionAllowsArg(permissions: Permissions | null, tool: Tool, arg: s
   if (arg === "port") {
     return portAllowed(rule, value);
   }
-  if (!csvValueAllowed(rule, value)) {
-    return false;
+  if (value === "auto" && arg === "protocol" && (tool === "ping" || tool === "mtr" || tool === "traceroute")) {
+    return ["icmp", "udp", "tcp"].some((candidate) => csvValues(rule).includes(candidate));
   }
-  if (value !== "auto") {
-    return true;
+  if (value === "auto" && tool === "http" && arg === "http_version") {
+    return ["3", "2", "1.1"].some((candidate) => csvValues(rule).includes(candidate));
   }
-  const candidates = arg === "protocol" && (tool === "ping" || tool === "mtr" || tool === "traceroute")
-    ? ["icmp", "udp", "tcp"]
-    : tool === "http" && arg === "http_version"
-      ? ["3", "2", "1.1"]
-      : [];
-  const values = csvValues(rule);
-  return candidates.length === 0 || candidates.every((candidate) => values.includes(candidate));
+  return csvValueAllowed(rule, value);
+}
+
+function networkAutoHasCandidate(permissions: Permissions | null, tool: Tool): boolean {
+  return permissionAllowsArg(permissions, tool, "protocol", "icmp")
+    || (permissionAllowsArg(permissions, tool, "protocol", "udp") && permissionAllowsArg(permissions, tool, "port", "33434"))
+    || (permissionAllowsArg(permissions, tool, "protocol", "tcp") && permissionAllowsArg(permissions, tool, "port", "80"));
 }
 
 function probePortsForForm(form: JobFormState): string[] | null {

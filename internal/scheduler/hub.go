@@ -1862,6 +1862,7 @@ func toJobSpecWithPolicies(job model.Job, p policy.Policy, policies policy.Set) 
 		probeTimeout = policies.ProbeTimeout()
 	}
 	args := policies.ServerArgs(job.Tool, job.Args)
+	args = policy.ConstrainAutoArgs(job.Tool, args, p.AllowedArgs)
 	return &grpcwire.JobSpec{
 		ProtocolVersion:       grpcwire.AgentProtocolVersion,
 		ID:                    job.ID,

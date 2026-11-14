@@ -203,7 +203,7 @@ func (s *Server) validateScheduleRequest(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return scheduleRequestDetails{}, false
 	}
-	createReq.Args = policies.ServerArgs(createReq.Tool, createReq.Args)
+	createReq.Args = s.jobArgsForScope(r.Context(), createReq, policies)
 	if _, err := policies.ValidateSchedule(createReq); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return scheduleRequestDetails{}, false

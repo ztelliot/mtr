@@ -23,6 +23,8 @@ const DefaultPortRange = "1-65535"
 const (
 	DefaultTCPProbePort = "80"
 	DefaultUDPProbePort = "33434"
+	AutoProtocolsArg    = "auto_protocols"
+	AutoHTTPVersionsArg = "auto_http_versions"
 )
 
 var (
@@ -54,10 +56,10 @@ func PoliciesWithRuntime(runtime config.Runtime) Set {
 	runtime = normalizeRuntime(runtime)
 	probeTimeout := time.Duration(runtime.ProbeStepTimeoutSec) * time.Second
 	return Set{runtime: runtime, byTool: map[model.Tool]Policy{
-		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
-		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
-		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": DefaultPortRange}},
-		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2,1.1"}},
+		model.ToolPing:       {Tool: model.ToolPing, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPing}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": DefaultPortRange}},
+		model.ToolTraceroute: {Tool: model.ToolTraceroute, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolTraceroute}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": DefaultPortRange}},
+		model.ToolMTR:        {Tool: model.ToolMTR, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolMTR}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": DefaultPortRange}},
+		model.ToolHTTP:       {Tool: model.ToolHTTP, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolHTTP}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "3,2,1.1"}},
 		model.ToolDNS:        {Tool: model.ToolDNS, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolDNS}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"type": "A,AAAA,CNAME,MX,TXT,NS"}},
 		model.ToolPort:       {Tool: model.ToolPort, Timeout: TimeoutForJobWithRuntime(model.Job{Tool: model.ToolPort}, runtime), ProbeTimeout: probeTimeout, AllowedArgs: map[string]string{"port": DefaultPortRange}},
 	}}
@@ -331,11 +333,15 @@ func materializeDNSDefaults(args map[string]string) {
 }
 
 func (s Set) ServerArgs(tool model.Tool, args map[string]string) map[string]string {
-	return ServerArgsWithRuntime(tool, args, s.runtime)
+	out := ServerArgsWithRuntime(tool, args, s.runtime)
+	p, _ := s.Get(tool)
+	return ConstrainAutoArgs(tool, out, p.AllowedArgs)
 }
 
 func (s Set) AgentArgs(tool model.Tool, args map[string]string) map[string]string {
-	return AgentArgsWithRuntime(tool, args, s.runtime)
+	out := AgentArgsWithRuntime(tool, args, s.runtime)
+	p, _ := s.Get(tool)
+	return ConstrainAutoArgs(tool, out, p.AllowedArgs)
 }
 
 func (s Set) TimeoutForJob(job model.Job) time.Duration {
@@ -446,7 +452,7 @@ func EffectiveArgs(tool model.Tool, args map[string]string) map[string]string {
 }
 
 // ValidateAllowedArgs validates both submitted arguments and semantic
-// defaults. For auto modes every possible fallback must be authorized.
+// defaults. Auto probes select only authorized concrete candidates.
 func ValidateAllowedArgs(tool model.Tool, args map[string]string, allowedArgs map[string]string) error {
 	effective := EffectiveArgs(tool, args)
 	for key, value := range effective {
@@ -465,44 +471,81 @@ func ValidateAllowedArgs(tool model.Tool, args map[string]string, allowedArgs ma
 		}
 	}
 
-	if isNetworkProbeTool(tool) && effective["protocol"] == "auto" && strings.TrimSpace(effective["port"]) == "" {
-		pattern, ok := allowedArgs["port"]
-		if !ok {
-			return fmt.Errorf("argument %q is not allowed for %s", "port", tool)
-		}
-		for _, port := range []string{DefaultUDPProbePort, DefaultTCPProbePort} {
-			if err := ValidatePortAllowed(pattern, port); err != nil {
-				return fmt.Errorf("argument %q is invalid", "port")
-			}
-		}
+	if isNetworkProbeTool(tool) && effective["protocol"] == "auto" && len(AutoProbeProtocols(args, allowedArgs)) == 0 {
+		return fmt.Errorf("no allowed protocols for %s auto probe", tool)
+	}
+	if tool == model.ToolHTTP && effective["http_version"] == "auto" && len(AutoHTTPVersions(args, allowedArgs)) == 0 {
+		return fmt.Errorf("no allowed HTTP versions for auto probe")
 	}
 	return nil
 }
 
-// AllowedArgPermits is stricter than a literal CSV lookup for auto: granting
-// auto also requires granting every concrete protocol/version it may select.
+// AllowedArgPermits treats auto as selection among allowed concrete values,
+// rather than a separately configurable permission.
 func AllowedArgPermits(tool model.Tool, key string, rule string, value string) bool {
-	if !AllowedArgContains(rule, value) {
-		return false
+	if isNetworkProbeTool(tool) && key == "protocol" && value == "auto" {
+		return AllowedArgContains(rule, "icmp") || AllowedArgContains(rule, "udp") || AllowedArgContains(rule, "tcp")
 	}
-	if value != "auto" {
-		return true
+	if tool == model.ToolHTTP && key == "http_version" && value == "auto" {
+		return AllowedArgContains(rule, "3") || AllowedArgContains(rule, "2") || AllowedArgContains(rule, "1.1")
 	}
-	var candidates []string
-	switch {
-	case isNetworkProbeTool(tool) && key == "protocol":
-		candidates = []string{"icmp", "udp", "tcp"}
-	case tool == model.ToolHTTP && key == "http_version":
-		candidates = []string{"3", "2", "1.1"}
-	default:
-		return true
+	return AllowedArgContains(rule, value)
+}
+
+// AutoProbeProtocols returns the authorized fallback order, intersecting any
+// previously recorded restriction with the current protocol and port policy.
+func AutoProbeProtocols(args, allowedArgs map[string]string) []string {
+	var out []string
+	limit, limited := args[AutoProtocolsArg]
+	for _, protocol := range []string{"icmp", "udp", "tcp"} {
+		if !AllowedArgContains(allowedArgs["protocol"], protocol) || (limited && !AllowedArgContains(limit, protocol)) {
+			continue
+		}
+		if protocol != "icmp" {
+			port := args["port"]
+			if strings.TrimSpace(port) == "" {
+				port = DefaultTCPProbePort
+				if protocol == "udp" {
+					port = DefaultUDPProbePort
+				}
+			}
+			if ValidatePortAllowed(allowedArgs["port"], port) != nil {
+				continue
+			}
+		}
+		out = append(out, protocol)
 	}
-	for _, candidate := range candidates {
-		if !AllowedArgContains(rule, candidate) {
-			return false
+	return out
+}
+
+// AutoHTTPVersions returns the authorized HTTP versions in fallback order.
+func AutoHTTPVersions(args, allowedArgs map[string]string) []string {
+	var out []string
+	limit, limited := args[AutoHTTPVersionsArg]
+	for _, version := range []string{"3", "2", "1.1"} {
+		if AllowedArgContains(allowedArgs["http_version"], version) && (!limited || AllowedArgContains(limit, version)) {
+			out = append(out, version)
 		}
 	}
-	return true
+	return out
+}
+
+// ConstrainAutoArgs records restrictions so later dispatch and execution
+// cannot widen the candidates authorized when the job was created.
+func ConstrainAutoArgs(tool model.Tool, args, allowedArgs map[string]string) map[string]string {
+	var key string
+	var candidates []string
+	switch {
+	case isNetworkProbeTool(tool) && args["protocol"] == "auto":
+		key, candidates = AutoProtocolsArg, AutoProbeProtocols(args, allowedArgs)
+	case tool == model.ToolHTTP && args["http_version"] == "auto":
+		key, candidates = AutoHTTPVersionsArg, AutoHTTPVersions(args, allowedArgs)
+	default:
+		return args
+	}
+	out := cloneStringMap(args)
+	out[key] = strings.Join(candidates, ",")
+	return out
 }
 
 func isNetworkProbeTool(tool model.Tool) bool {
@@ -644,7 +687,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 func isServerOwnedArg(key string) bool {
-	return key == "count" || key == "max_hops"
+	return key == "count" || key == "max_hops" || key == AutoProtocolsArg || key == AutoHTTPVersionsArg
 }
 
 func requiresPinnedAgent(tool model.Tool) bool {

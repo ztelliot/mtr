@@ -966,6 +966,36 @@ func TestPrepareAgentJobRejectsMissingCapability(t *testing.T) {
 	}
 }
 
+func TestPrepareAgentJobConstrainsAutoToLocalPolicy(t *testing.T) {
+	policies := policy.FromConfig(map[string]config.Policy{
+		"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": policy.DefaultPortRange}},
+	}, config.DefaultRuntime())
+	for _, tt := range []struct {
+		name, candidates string
+		limited, wantErr bool
+	}{
+		{name: "auto selection"},
+		{name: "narrow server candidates", candidates: "udp,tcp", limited: true},
+		{name: "disjoint restrictions", candidates: "udp", limited: true, wantErr: true},
+		{name: "empty restrictions", limited: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]string{"protocol": "auto"}
+			if tt.limited {
+				args[policy.AutoProtocolsArg] = tt.candidates
+			}
+			spec := grpcwire.JobSpec{ProtocolVersion: grpcwire.AgentProtocolVersion, ID: "auto-job", Tool: model.ToolPing, Target: "1.1.1.1", Args: args}
+			_, err := prepareAgentJob(&spec, "edge-1", policies, []string{"ping"})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("prepareAgentJob error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if !tt.wantErr && spec.Args[policy.AutoProtocolsArg] != "tcp" {
+				t.Fatalf("execution candidates = %q, want tcp", spec.Args[policy.AutoProtocolsArg])
+			}
+		})
+	}
+}
+
 func TestPrepareAgentJobRejectsMissingProtocolVersion(t *testing.T) {
 	spec := grpcwire.JobSpec{ID: "job-1", Tool: model.ToolPing, Target: "1.1.1.1"}
 	if _, err := prepareAgentJob(&spec, "edge-1", policy.DefaultPolicies(), []string{"ping"}); err == nil || !strings.Contains(err.Error(), "protocol version") {

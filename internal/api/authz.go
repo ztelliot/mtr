@@ -99,6 +99,18 @@ func (s *Server) authorizeJob(ctx context.Context, req model.CreateJobRequest) e
 	return s.authorizeJobWithPolicies(ctx, req, policies)
 }
 
+func (s *Server) jobArgsForScope(ctx context.Context, req model.CreateJobRequest, policies policy.Set) map[string]string {
+	args := policies.ServerArgs(req.Tool, req.Args)
+	scope := principalFromContext(ctx).scope
+	if !scope.All {
+		if toolScope, ok := scope.Tools[req.Tool]; ok && toolScope.AllowedArgs != nil {
+			p, _ := policies.Get(req.Tool)
+			args = policy.ConstrainAutoArgs(req.Tool, args, policy.IntersectAllowedArgs(p.AllowedArgs, toolScope.AllowedArgs))
+		}
+	}
+	return args
+}
+
 func (s *Server) authorizeJobWithPolicies(ctx context.Context, req model.CreateJobRequest, policies policy.Set) error {
 	scope := principalFromContext(ctx).scope
 	if scope.All {

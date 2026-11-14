@@ -5,7 +5,7 @@ import type { Agent, Permissions } from "./types";
 
 const permissions: Permissions = {
   tools: {
-    http: { allowed_args: { method: "GET,HEAD", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
+    http: { allowed_args: { method: "GET,HEAD", http_version: "3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
   },
   schedule_access: "write",
   manage_access: "read"
@@ -76,10 +76,10 @@ describe("schedule page permission helpers", () => {
   it("allows a schedule label when any matching agent can run the form", () => {
     const agents = [
       testAgent("edge-head", ["agent", "id:edge-head", "blue"], {
-        http: { allowed_args: { method: "HEAD", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
+        http: { allowed_args: { method: "HEAD", http_version: "3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
       }),
       testAgent("edge-get", ["agent", "id:edge-get", "blue"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
       })
     ];
 
@@ -97,10 +97,10 @@ describe("schedule page permission helpers", () => {
   it("rejects a selected label when none of its matching agents can run the form", () => {
     const agents = [
       testAgent("edge-head", ["agent", "id:edge-head", "blue"], {
-        http: { allowed_args: { method: "HEAD", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
+        http: { allowed_args: { method: "HEAD", http_version: "3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
       }),
       testAgent("edge-get", ["agent", "id:edge-get", "green"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 4, 6], requires_agent: false }
       })
     ];
 
@@ -118,10 +118,10 @@ describe("schedule page permission helpers", () => {
   it("filters IP version options to versions runnable for every selected label", () => {
     const agents = [
       testAgent("edge-v4", ["agent", "id:edge-v4", "blue"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 4], requires_agent: false }
       }),
       testAgent("edge-v6", ["agent", "id:edge-v6", "green"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 6], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 6], requires_agent: false }
       })
     ];
 
@@ -139,7 +139,7 @@ describe("schedule page permission helpers", () => {
   it("filters IP version options by agent protocol support even when permissions use defaults", () => {
     const agents = [
       testAgent("edge-v4", ["agent", "id:edge-v4", "blue"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, requires_agent: false }
       }, 1)
     ];
 
@@ -157,10 +157,10 @@ describe("schedule page permission helpers", () => {
   it("uses literal target IP version when validating auto IP schedule labels", () => {
     const agents = [
       testAgent("edge-v4", ["agent", "id:edge-v4", "blue"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 4], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 4], requires_agent: false }
       }, 1),
       testAgent("edge-v6", ["agent", "id:edge-v6", "green"], {
-        http: { allowed_args: { method: "GET", http_version: "auto,3,2,1.1" }, ip_versions: [0, 6], requires_agent: false }
+        http: { allowed_args: { method: "GET", http_version: "3,2,1.1" }, ip_versions: [0, 6], requires_agent: false }
       }, 2)
     ];
 

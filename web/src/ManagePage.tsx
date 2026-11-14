@@ -33,10 +33,10 @@ import { canReadManage, canWriteManage } from "./permissions";
 import type { AgentConfig, APITokenPermission, IPVersion, LabelConfigSettings, ManagedAgent, ManagedAgentLabelUpdate, ManagedSettings, OutboundAgentAuth, OutboundAgentConfig, Permissions, PolicySettings, RateLimitConfig, RegisterToken, RuntimeSettings, SchedulerSettings, TokenToolScope, Tool } from "./types";
 
 const tools: Tool[] = ["ping", "traceroute", "mtr", "http", "dns", "port"];
-const pingProtocolOptions = ["auto", "icmp", "udp", "tcp"];
-const routeProtocolOptions = ["auto", "icmp", "udp", "tcp"];
+const pingProtocolOptions = ["icmp", "udp", "tcp"];
+const routeProtocolOptions = ["icmp", "udp", "tcp"];
 const methodOptions = ["GET", "HEAD"];
-const httpVersionOptions = ["auto", "3", "2", "1.1"];
+const httpVersionOptions = ["3", "2", "1.1"];
 const dnsTypeOptions = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
 const ipVersionOptions: IPVersion[] = [0, 4, 6];
 const defaultPortRange = "1-65535";
@@ -2051,12 +2051,12 @@ function selectedTools(record?: Partial<Record<Tool, unknown>>): Tool[] {
 function defaultAllowedArgs(tool: Tool): Record<string, string> {
   switch (tool) {
     case "ping":
-      return { protocol: "auto,icmp,udp,tcp", port: defaultPortRange };
+      return { protocol: "icmp,udp,tcp", port: defaultPortRange };
     case "traceroute":
     case "mtr":
-      return { protocol: "auto,icmp,udp,tcp", port: defaultPortRange };
+      return { protocol: "icmp,udp,tcp", port: defaultPortRange };
     case "http":
-      return { method: "GET,HEAD", http_version: "auto,3,2,1.1" };
+      return { method: "GET,HEAD", http_version: "3,2,1.1" };
     case "dns":
       return { type: "A,AAAA,CNAME,MX,TXT,NS" };
     case "port":

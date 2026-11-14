@@ -6,7 +6,7 @@ describe("i18n", () => {
     expect(resources["zh-CN"].translation.form.target).toBe("目标");
     expect(resources["en-US"].translation.form.target).toBe("Target");
     expect(resources["zh-CN"].translation.form.remoteDns).toBe("远程 DNS");
-    expect(resources["en-US"].translation.form.remoteDns).toBe("Remote DNS");
+    expect(resources["en-US"].translation.form.remoteDns).toBe("R-DNS");
     expect(resources["zh-CN"].translation.errors.targetBlocked).toBe("所选节点不支持该目标或 IP 版本");
     expect(resources["en-US"].translation.errors.targetBlocked).toBe("The selected agent does not support this target or IP version");
     expect(resources["zh-CN"].translation.results.parameters).toBe("参数");

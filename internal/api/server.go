@@ -355,7 +355,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	req.Args = policies.ServerArgs(req.Tool, req.Args)
+	req.Args = s.jobArgsForScope(r.Context(), req, policies)
 	_, err = policies.Validate(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

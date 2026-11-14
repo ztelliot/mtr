@@ -637,7 +637,7 @@ func prepareAgentJob(spec *grpcwire.JobSpec, agentID string, policies policy.Set
 	createReq := model.CreateJobRequest{
 		Tool:           spec.Tool,
 		Target:         spec.Target,
-		Args:           policy.AgentArgs(spec.Tool, spec.Args),
+		Args:           policies.AgentArgs(spec.Tool, spec.Args),
 		IPVersion:      spec.IPVersion,
 		AgentID:        agentID,
 		ResolveOnAgent: spec.ResolveOnAgent,

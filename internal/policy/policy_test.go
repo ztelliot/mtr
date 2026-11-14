@@ -234,7 +234,7 @@ func TestPolicyIntersectionsUseMostRestrictiveArgs(t *testing.T) {
 
 func TestPolicyIntersectionDoesNotInferMissingHTTPVersion(t *testing.T) {
 	args := IntersectAllowedArgs(
-		map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2,1.1"},
+		map[string]string{"method": "GET,HEAD", "http_version": "3,2,1.1"},
 		map[string]string{"method": "HEAD"},
 	)
 	if args["method"] != "HEAD" {
@@ -387,7 +387,7 @@ func TestNetworkProtocolDefaultsAndAutoAreValidatedAgainstPolicy(t *testing.T) {
 		{name: "tcp default denied", protocol: "tcp", allowedPort: "443", wantErr: true},
 		{name: "udp default allowed", protocol: "udp", allowedPort: DefaultUDPProbePort},
 		{name: "udp default denied", protocol: "udp", allowedPort: "53", wantErr: true},
-		{name: "auto requires both defaults", protocol: "auto", allowedPort: DefaultUDPProbePort, wantErr: true},
+		{name: "auto skips denied default ports", protocol: "auto", allowedPort: DefaultUDPProbePort},
 		{name: "auto defaults allowed", protocol: "auto", allowedPort: DefaultTCPProbePort + "," + DefaultUDPProbePort},
 	}
 	for _, tt := range tests {
@@ -395,7 +395,7 @@ func TestNetworkProtocolDefaultsAndAutoAreValidatedAgainstPolicy(t *testing.T) {
 			policies := FromConfig(map[string]config.Policy{
 				string(model.ToolPing): {
 					Enabled:     true,
-					AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": tt.allowedPort},
+					AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": tt.allowedPort},
 				},
 			}, config.DefaultRuntime())
 			_, err := policies.Validate(model.CreateJobRequest{
@@ -410,30 +410,30 @@ func TestNetworkProtocolDefaultsAndAutoAreValidatedAgainstPolicy(t *testing.T) {
 	}
 }
 
-func TestAutoRequiresEveryConcreteCandidate(t *testing.T) {
+func TestAutoAllowsConcreteSubsets(t *testing.T) {
 	policies := FromConfig(map[string]config.Policy{
 		string(model.ToolPing): {
 			Enabled:     true,
-			AllowedArgs: map[string]string{"protocol": "auto,icmp,udp", "port": DefaultPortRange},
+			AllowedArgs: map[string]string{"protocol": "icmp,udp", "port": DefaultPortRange},
 		},
 		string(model.ToolHTTP): {
 			Enabled:     true,
-			AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2"},
+			AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "3,2"},
 		},
 	}, config.DefaultRuntime())
 	if _, err := policies.Validate(model.CreateJobRequest{
 		Tool:   model.ToolPing,
 		Target: "1.1.1.1",
 		Args:   map[string]string{"protocol": "auto", "port": "443"},
-	}); err == nil {
-		t.Fatal("expected protocol auto without every concrete protocol to be rejected")
+	}); err != nil {
+		t.Fatalf("expected protocol auto to use the allowed subset: %v", err)
 	}
 	if _, err := policies.Validate(model.CreateJobRequest{
 		Tool:   model.ToolHTTP,
 		Target: "https://example.com",
 		Args:   map[string]string{"method": "HEAD", "http_version": "auto"},
-	}); err == nil {
-		t.Fatal("expected HTTP auto without every concrete version to be rejected")
+	}); err != nil {
+		t.Fatalf("expected HTTP auto to use the allowed subset: %v", err)
 	}
 }
 
@@ -488,5 +488,53 @@ func TestHTTPPolicyWithoutVersionDoesNotAuthorizeImplicitDefault(t *testing.T) {
 		Target: "https://example.com",
 	}); err == nil {
 		t.Fatal("expected an omitted HTTP version to be rejected by an HTTP/3-only policy")
+	}
+}
+
+func TestAutoProbeCandidatesRespectProtocolPortAndPriorRestrictions(t *testing.T) {
+	for _, tt := range []struct {
+		name, protocols, ports, prior, want string
+		limited                             bool
+	}{
+		{name: "TCP only", protocols: "tcp", ports: "80", want: "tcp"},
+		{name: "UDP only", protocols: "udp", ports: "33434", want: "udp"},
+		{name: "ICMP needs no port", protocols: "icmp", want: "icmp"},
+		{name: "skip denied UDP port", protocols: "icmp,udp,tcp", ports: "80", want: "icmp,tcp"},
+		{name: "no usable default", protocols: "tcp", ports: "443"},
+		{name: "auto alone grants no probe", protocols: "auto", ports: DefaultPortRange},
+		{name: "preserve token restriction", protocols: "icmp,udp,tcp", ports: DefaultPortRange, limited: true, prior: "udp", want: "udp"},
+		{name: "empty intersection stays empty", protocols: "tcp", ports: DefaultPortRange, limited: true, prior: "udp"},
+		{name: "empty candidates stay empty", protocols: "icmp,udp,tcp", ports: DefaultPortRange, limited: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]string{"protocol": "auto"}
+			if tt.limited {
+				args[AutoProtocolsArg] = tt.prior
+			}
+			allowed := map[string]string{"protocol": tt.protocols}
+			if tt.ports != "" {
+				allowed["port"] = tt.ports
+			}
+			got := ConstrainAutoArgs(model.ToolPing, args, allowed)
+			if got[AutoProtocolsArg] != tt.want {
+				t.Fatalf("candidates = %q, want %q", got[AutoProtocolsArg], tt.want)
+			}
+			err := ValidateAllowedArgs(model.ToolPing, got, allowed)
+			if (err != nil) != (tt.want == "") {
+				t.Fatalf("validation error = %v, candidates = %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestHTTPAutoCandidatesCannotWidenRestrictions(t *testing.T) {
+	args := ConstrainAutoArgs(model.ToolHTTP, map[string]string{"http_version": "auto"}, map[string]string{"http_version": "2,1.1"})
+	args = ConstrainAutoArgs(model.ToolHTTP, args, map[string]string{"http_version": "3,2"})
+	if got := args[AutoHTTPVersionsArg]; got != "2" {
+		t.Fatalf("HTTP version intersection = %q, want 2", got)
+	}
+	args = ConstrainAutoArgs(model.ToolHTTP, args, map[string]string{"http_version": "1.1"})
+	if args[AutoHTTPVersionsArg] != "" || ValidateAllowedArgs(model.ToolHTTP, args, map[string]string{"http_version": "1.1", "method": "GET"}) == nil {
+		t.Fatal("disjoint HTTP version restrictions must reject Auto")
 	}
 }

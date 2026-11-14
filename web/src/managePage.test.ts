@@ -13,7 +13,7 @@ describe("manage token helpers", () => {
 
     const editable = __managePageTest.withTokenDefaults(token);
     expect(editable.tools?.http?.allowed_args).toBeUndefined();
-    expect(__managePageTest.displayTokenToolScope("http", editable.tools?.http).allowed_args).toEqual({ method: "GET,HEAD", http_version: "auto,3,2,1.1" });
+    expect(__managePageTest.displayTokenToolScope("http", editable.tools?.http).allowed_args).toEqual({ method: "GET,HEAD", http_version: "3,2,1.1" });
     expect(__managePageTest.normalizeToken(editable).tools?.http?.allowed_args).toBeUndefined();
   });
 
@@ -40,7 +40,7 @@ describe("manage token helpers", () => {
     expect(__managePageTest.effectiveAllowedArgs("http", { method: "HEAD" })).toEqual({ method: "HEAD" });
     expect(__managePageTest.updateAllowedArg("http", undefined, "method", "HEAD")).toEqual({
       method: "HEAD",
-      http_version: "auto,3,2,1.1"
+      http_version: "3,2,1.1"
     });
   });
 

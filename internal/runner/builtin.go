@@ -26,6 +26,7 @@ import (
 	"golang.org/x/net/ipv6"
 
 	"github.com/ztelliot/mtr/internal/model"
+	"github.com/ztelliot/mtr/internal/policy"
 )
 
 const (
@@ -90,7 +91,14 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 		emitPingTimeoutMetric(sink, ctx, err, 1)
 		return result, err
 	}
-	mode := requestedMode
+	modes, err := probeModes(requestedMode, job.Args)
+	if err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
+	}
+	modeIndex := 0
+	mode := modes[modeIndex]
 	targetIP, version, err := resolveOne(ctx, executionTarget(job), job.IPVersion)
 	if err != nil {
 		result := newBuiltinResult(job, -1)
@@ -101,12 +109,12 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 	}
 	emitResolvedTarget(sink, targetIP, version)
 	var conn *icmp.PacketConn
-	if mode == "auto" || mode == "icmp" {
-		mode = "icmp"
+	if mode == "icmp" {
 		conn, err = listenPingICMP(version)
 		if err != nil {
-			if requestedMode == "auto" {
-				mode = "udp"
+			if modeIndex+1 < len(modes) {
+				modeIndex++
+				mode = modes[modeIndex]
 			} else {
 				result := newBuiltinResult(job, -1)
 				result.IPVersion = version
@@ -148,20 +156,16 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 		for {
 			port := parsePort(job.Args, defaultProbePort(mode))
 			rtt, err = probeOnce(ctx, conn, targetIP, version, mode, port, 64, id, seq+1, probeTimeout)
-			if !autoSelecting || err == nil || mode == "tcp" {
+			if !autoSelecting || err == nil || modeIndex+1 == len(modes) {
 				autoSelecting = false
 				break
 			}
-			switch mode {
-			case "icmp":
-				if conn != nil {
-					_ = conn.Close()
-					conn = nil
-				}
-				mode = "udp"
-			case "udp":
-				mode = "tcp"
+			if conn != nil {
+				_ = conn.Close()
+				conn = nil
 			}
+			modeIndex++
+			mode = modes[modeIndex]
 			setPingProtocolSummary(result, requestedMode, mode, job.Args)
 		}
 		setPingProtocolSummary(result, requestedMode, mode, job.Args)
@@ -192,6 +196,18 @@ func runBuiltinPingWithTimeout(ctx context.Context, job model.Job, sink StreamSi
 		result.Summary["status"] = "timeout"
 	}
 	return result, nil
+}
+
+// probeModes keeps auto fallback inside the candidates authorized by the server.
+func probeModes(requested string, args map[string]string) ([]string, error) {
+	if requested != "auto" {
+		return []string{requested}, nil
+	}
+	modes := policy.AutoProbeProtocols(args, map[string]string{"protocol": "icmp,udp,tcp", "port": policy.DefaultPortRange})
+	if len(modes) == 0 {
+		return nil, errors.New("no allowed protocols for auto probe")
+	}
+	return modes, nil
 }
 
 func setPingProtocolSummary(result *model.ToolResult, requested string, actual string, args map[string]string) {
@@ -367,16 +383,21 @@ func runTrace(ctx context.Context, job model.Job, sink StreamSink, maxHops int, 
 	if emitResolved {
 		emitResolvedTarget(sink, targetIP, version)
 	}
-	mode := requestedMode
-	if mode == "auto" {
-		mode = "icmp"
+	modes, err := probeModes(requestedMode, job.Args)
+	if err != nil {
+		result := newBuiltinResult(job, -1)
+		fillErrorSummary(ctx, result, err)
+		return result, err
 	}
+	modeIndex := 0
+	mode := modes[modeIndex]
 	var conn *icmp.PacketConn
 	if mode == "icmp" {
 		conn, err = listenRouteICMP(version)
 		if err != nil {
-			if requestedMode == "auto" {
-				mode = "udp"
+			if modeIndex+1 < len(modes) {
+				modeIndex++
+				mode = modes[modeIndex]
 			} else {
 				result := newBuiltinResult(job, -1)
 				result.IPVersion = version
@@ -424,20 +445,16 @@ func runTrace(ctx context.Context, job model.Job, sink StreamSink, maxHops int, 
 					fillErrorSummary(ctx, result, contextErr)
 					return result, contextErr
 				}
-				if !autoSelecting || mode == "tcp" || !routeErrorAllowsFallback(err) {
+				if !autoSelecting || modeIndex+1 == len(modes) || !routeErrorAllowsFallback(err) {
 					autoSelecting = false
 					break
 				}
-				switch mode {
-				case "icmp":
-					if conn != nil {
-						_ = conn.Close()
-						conn = nil
-					}
-					mode = "udp"
-				case "udp":
-					mode = "tcp"
+				if conn != nil {
+					_ = conn.Close()
+					conn = nil
 				}
+				modeIndex++
+				mode = modes[modeIndex]
 				setRouteProtocolSummary(result, requestedMode, mode, job.Args)
 			}
 			if err != nil {
@@ -766,7 +783,7 @@ func runBuiltinHTTPWithTimeout(ctx context.Context, job model.Job, _ StreamSink,
 		fillErrorSummary(ctx, result, err)
 		return result, err
 	}
-	versions, err := httpVersionCandidates(job.Target, requestedVersion)
+	versions, err := httpVersionCandidates(job.Target, requestedVersion, job.Args)
 	if err != nil {
 		result := newBuiltinResult(job, 1)
 		result.Summary["method"] = method
@@ -1134,16 +1151,22 @@ func httpMethod(raw string) (string, error) {
 	}
 }
 
-func httpVersionCandidates(target string, requested string) ([]string, error) {
+func httpVersionCandidates(target string, requested string, args map[string]string) ([]string, error) {
 	u, err := url.Parse(target)
 	if err != nil {
 		return nil, err
 	}
 	if requested == "auto" {
-		if u.Scheme == "https" {
-			return []string{"3", "2", "1.1"}, nil
+		var versions []string
+		for _, version := range policy.AutoHTTPVersions(args, map[string]string{"http_version": "3,2,1.1"}) {
+			if u.Scheme == "https" || version == "1.1" {
+				versions = append(versions, version)
+			}
 		}
-		return []string{"1.1"}, nil
+		if len(versions) == 0 {
+			return nil, errors.New("no allowed HTTP versions for auto probe target")
+		}
+		return versions, nil
 	}
 	if requested != "1.1" && u.Scheme != "https" {
 		return nil, fmt.Errorf("HTTP/%s requires an https target", requested)

@@ -52,13 +52,13 @@ func TestAuthorizeJobDoesNotInferHTTPVersionForMethodOnlyToken(t *testing.T) {
 	}
 }
 
-func TestAuthorizeJobRequiresAutoFallbacksAndDefaultPorts(t *testing.T) {
+func TestAuthorizeJobAutoFiltersDeniedDefaultPorts(t *testing.T) {
 	server := &Server{policies: policy.DefaultPolicies()}
 	ctx := withPrincipal(context.Background(), principal{scope: TokenScope{
 		Tools: map[model.Tool]ToolScope{
 			model.ToolPing: {
 				AllowedArgs: map[string]string{
-					"protocol": "auto,icmp,udp,tcp",
+					"protocol": "icmp,udp,tcp",
 					"port":     policy.DefaultUDPProbePort,
 				},
 			},
@@ -68,8 +68,8 @@ func TestAuthorizeJobRequiresAutoFallbacksAndDefaultPorts(t *testing.T) {
 		Tool:   model.ToolPing,
 		Target: "1.1.1.1",
 		Args:   map[string]string{"protocol": "auto"},
-	}); err == nil {
-		t.Fatal("expected auto to reject a token that blocks the TCP default port")
+	}); err != nil {
+		t.Fatalf("expected auto to skip the blocked TCP default port: %v", err)
 	}
 	if err := server.authorizeJob(ctx, model.CreateJobRequest{
 		Tool:   model.ToolPing,

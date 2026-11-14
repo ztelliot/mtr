@@ -11,10 +11,10 @@ import (
 func TestValidateAndNormalizeManagedSettingsAcceptsCanonicalSettings(t *testing.T) {
 	settings := config.DefaultManagedSettings()
 	settings.LabelConfigs["edge"] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
-		"ping":       {Enabled: true, AllowedArgs: map[string]string{"protocol": "auto,icmp,udp,tcp", "port": "53,80-443"}},
+		"ping":       {Enabled: true, AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": "53,80-443"}},
 		"traceroute": {Enabled: true, AllowedArgs: map[string]string{"protocol": "icmp,udp", "port": "33434-33534"}},
 		"mtr":        {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": "443"}},
-		"http":       {Enabled: true, AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "auto,3,2,1.1"}},
+		"http":       {Enabled: true, AllowedArgs: map[string]string{"method": "GET,HEAD", "http_version": "3,2,1.1"}},
 		"dns":        {Enabled: true, AllowedArgs: map[string]string{"type": "A,AAAA,CNAME,MX,TXT,NS"}},
 		"port":       {Enabled: true, AllowedArgs: map[string]string{"port": "1-65535"}},
 	}}
@@ -72,6 +72,22 @@ func TestValidateAndNormalizeManagedSettingsRejectsInvalidToolsAndAllowedArgs(t 
 			want: "unknown argument",
 			mutate: func(settings *config.ManagedSettings) {
 				settings.LabelConfigs["edge"] = labelPolicy("ping", map[string]string{"timeout": "1"})
+			},
+		},
+		{
+			name: "auto is not a protocol permission",
+			want: "unsupported value",
+			mutate: func(settings *config.ManagedSettings) {
+				settings.LabelConfigs["edge"] = labelPolicy("ping", map[string]string{"protocol": "auto,tcp"})
+			},
+		},
+		{
+			name: "auto is not an HTTP version permission",
+			want: "unsupported value",
+			mutate: func(settings *config.ManagedSettings) {
+				settings.APITokens = []config.APITokenPermission{{Secret: "token", Tools: map[string]config.APIToolScope{
+					"http": {AllowedArgs: map[string]string{"http_version": "auto,2"}},
+				}}}
 			},
 		},
 		{

@@ -593,13 +593,13 @@ func managedAllowedArgValues(tool model.Tool, name string) (map[string]struct{},
 	var values []string
 	switch {
 	case (tool == model.ToolPing || tool == model.ToolTraceroute || tool == model.ToolMTR) && name == "protocol":
-		values = []string{"auto", "icmp", "udp", "tcp"}
+		values = []string{"icmp", "udp", "tcp"}
 	case (tool == model.ToolPing || tool == model.ToolTraceroute || tool == model.ToolMTR || tool == model.ToolPort) && name == "port":
 		return nil, true
 	case tool == model.ToolHTTP && name == "method":
 		values = []string{"GET", "HEAD"}
 	case tool == model.ToolHTTP && name == "http_version":
-		values = []string{"auto", "3", "2", "1.1"}
+		values = []string{"3", "2", "1.1"}
 	case tool == model.ToolDNS && name == "type":
 		values = []string{"A", "AAAA", "CNAME", "MX", "TXT", "NS"}
 	default:
