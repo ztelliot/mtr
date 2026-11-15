@@ -553,6 +553,7 @@ func (m *Memory) GetManagedSettings(_ context.Context) (config.ManagedSettings, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	settings := config.CloneManagedSettings(m.settings)
+	settings.LabelConfigs = config.NormalizeLabelConfigs(settings.LabelConfigs)
 	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return settings, err
 	}

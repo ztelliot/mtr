@@ -7,6 +7,15 @@ export interface AgentTagCount {
   count: number;
 }
 
+export function isAgentPolicyLabel(label: string): boolean {
+  const value = label.trim();
+  return value === "agent" || value.startsWith("agent:");
+}
+
+export function isPolicyLabel(label: string): boolean {
+  return isAgentPolicyLabel(label) || label.trim().startsWith("id:");
+}
+
 export function normalizeAgentTags(tags: string[]): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];

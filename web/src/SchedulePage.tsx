@@ -20,6 +20,7 @@ import { notifications } from "@mantine/notifications";
 import { AlertTriangle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { agentLocationProviderLabel, agentRegionLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
+import { isAgentPolicyLabel } from "./agentTags";
 import { ApiClient } from "./api";
 import { DynamicFields, targetPlaceholder } from "./dynamicFields";
 import { errorMessage } from "./errors";
@@ -58,6 +59,7 @@ export const __schedulePageTest = {
   scheduleChartTooltipLines,
   scheduleFormState,
   scheduleIPVersionOptions,
+  scheduleLabelsForAgents,
   schedulePermissionFormError
 };
 
@@ -970,7 +972,7 @@ function arraysEqual(left: string[], right: string[]): boolean {
 }
 
 function isReservedScheduleLabel(label: string): boolean {
-  return label === "agent" || label.startsWith("id:");
+  return isAgentPolicyLabel(label) || label.startsWith("id:");
 }
 
 function scheduleLabelDisplay(label: string, agents: Agent[], t: (key: string, options?: Record<string, unknown>) => string): string {

@@ -2006,13 +2006,13 @@ func TestLabelRuntimeSettingsApplyToPinnedJob(t *testing.T) {
 	runtimeB := config.DefaultRuntime()
 	runtimeB.Count = 2
 	settings.LabelConfigs = map[string]config.LabelConfig{
-		"blue": {Runtime: &runtimeA},
-		"fast": {Runtime: &runtimeB},
+		"agent:blue": {Runtime: &runtimeA},
+		"id:edge-1":  {Runtime: &runtimeB},
 	}
 	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
-	upsertTestAgent(t, ctx, st, "edge-1", []string{"blue", "fast"})
+	upsertTestAgent(t, ctx, st, "edge-1", []string{"agent:blue", "fast"})
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	hub.ApplySettings(settings)
@@ -2046,7 +2046,7 @@ func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings.LabelConfigs = map[string]config.LabelConfig{
-		"tcp-only": {
+		"agent:tcp-only": {
 			ToolPolicies: map[string]config.Policy{
 				"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": "443"}},
 			},
@@ -2056,7 +2056,7 @@ func TestLabelToolPolicyFiltersFanoutNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	upsertTestAgent(t, ctx, st, "edge-icmp", []string{"icmp"})
-	upsertTestAgent(t, ctx, st, "edge-tcp", []string{"tcp-only"})
+	upsertTestAgent(t, ctx, st, "edge-tcp", []string{"agent:tcp-only"})
 	policies := policy.DefaultPolicies()
 	hub := scheduler.NewHub(st, policies, 30*time.Second, 10*time.Millisecond, 4, slog.Default())
 	hub.ApplySettings(settings)
@@ -2093,7 +2093,7 @@ func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings.LabelConfigs = map[string]config.LabelConfig{
-		"head-only": {
+		"agent:head-only": {
 			ToolPolicies: map[string]config.Policy{
 				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD", "http_version": "1.1"}},
 			},
@@ -2112,7 +2112,7 @@ func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-head", Labels: []string{"head-only"}}); err != nil {
+	if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: "edge-head", Labels: []string{"head-only", "agent:head-only"}}); err != nil {
 		t.Fatal(err)
 	}
 	policies := policy.FromConfig(map[string]config.Policy{
@@ -2161,6 +2161,9 @@ func TestListAgentsIncludesPerAgentEffectiveTools(t *testing.T) {
 	for _, agent := range agents {
 		byID[agent.ID] = agent
 	}
+	if !reflect.DeepEqual(byID["edge-head"].Labels, []string{"id:edge-head", "head-only"}) {
+		t.Fatalf("user-facing labels must hide agent policy labels and retain groups: %#v", byID["edge-head"].Labels)
+	}
 	if byID["edge-get"].Tools[model.ToolHTTP].AllowedArgs["method"] != "GET,HEAD" {
 		t.Fatalf("edge-get permissions = %#v", byID["edge-get"])
 	}
@@ -2177,7 +2180,7 @@ func TestScheduleTargetsRespectPerAgentLabelPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings.LabelConfigs = map[string]config.LabelConfig{
-		"no-ping": {
+		"agent:no-ping": {
 			ToolPolicies: map[string]config.Policy{
 				"ping": {Enabled: false},
 			},
@@ -2186,7 +2189,7 @@ func TestScheduleTargetsRespectPerAgentLabelPolicies(t *testing.T) {
 	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
-	upsertTestAgent(t, ctx, st, "edge-denied", []string{"blue", "no-ping"})
+	upsertTestAgent(t, ctx, st, "edge-denied", []string{"blue", "agent:no-ping"})
 	policies := policy.DefaultPolicies()
 	handler := New(st, policies, abuse.NewConfiguredLimiter(abuse.RateLimitConfig{
 		Global: abuse.Limit{RequestsPerMinute: 1000, Burst: 1000},
@@ -2210,12 +2213,12 @@ func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings.LabelConfigs = map[string]config.LabelConfig{
-		"head-only": {
+		"agent:head-only": {
 			ToolPolicies: map[string]config.Policy{
 				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "HEAD"}},
 			},
 		},
-		"get-ok": {
+		"agent:get-ok": {
 			ToolPolicies: map[string]config.Policy{
 				"http": {Enabled: true, AllowedArgs: map[string]string{"method": "GET", "http_version": "1.1"}},
 			},
@@ -2229,8 +2232,8 @@ func TestScheduleTargetsValidatePerAgentPolicyArgs(t *testing.T) {
 		id     string
 		labels []string
 	}{
-		{id: "edge-head", labels: []string{"head-only"}},
-		{id: "edge-get", labels: []string{"get-ok"}},
+		{id: "edge-head", labels: []string{"head-only", "agent:head-only"}},
+		{id: "edge-get", labels: []string{"agent:get-ok"}},
 	} {
 		if err := st.UpsertAgent(ctx, model.Agent{
 			ID:           agent.id,
@@ -2384,14 +2387,26 @@ func TestManagedSettingsEndpointsRejectFailOpenSemantics(t *testing.T) {
 		configs map[string]config.LabelConfig
 	}{
 		{
+			name:    "group runtime",
+			configs: map[string]config.LabelConfig{"blue": {Runtime: &config.Runtime{Count: 2}}},
+		},
+		{
+			name:    "group scheduler",
+			configs: map[string]config.LabelConfig{"blue": {Scheduler: &config.Scheduler{MaxInflightPerAgent: 1}}},
+		},
+		{
+			name:    "group tool policy",
+			configs: map[string]config.LabelConfig{"blue": {ToolPolicies: map[string]config.Policy{"ping": {Enabled: false}}}},
+		},
+		{
 			name: "unknown tool",
-			configs: map[string]config.LabelConfig{"edge": {ToolPolicies: map[string]config.Policy{
+			configs: map[string]config.LabelConfig{"agent:edge": {ToolPolicies: map[string]config.Policy{
 				"speedtest": {Enabled: true},
 			}}},
 		},
 		{
 			name: "invalid HTTP version",
-			configs: map[string]config.LabelConfig{"edge": {ToolPolicies: map[string]config.Policy{
+			configs: map[string]config.LabelConfig{"agent:edge": {ToolPolicies: map[string]config.Policy{
 				"http": {Enabled: true, AllowedArgs: map[string]string{"http_version": "h2"}},
 			}}},
 		},
@@ -2735,11 +2750,7 @@ func TestManagedLabelsEndpointKeepsAgentRuntimeAndRemovesSettingsRoute(t *testin
 	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
 
 	payload := managedLabelsPayload{LabelConfigs: map[string]config.LabelConfig{
-		"blue": {
-			ToolPolicies: map[string]config.Policy{
-				"ping": {Enabled: true},
-			},
-		},
+		"blue": {},
 	}}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPut, "/v1/manage/labels", bytes.NewReader(body))
@@ -2886,7 +2897,7 @@ func TestManagedLabelsAndAgentLabelsUpdateAtomically(t *testing.T) {
 	}), nil, "", slog.Default(), TokenConfig{Token: "admin", Scope: TokenScope{All: true, ManageAccess: ScheduleAccessWrite}})
 
 	payload := managedLabelsAndAgentsPayload{
-		LabelConfigs: map[string]config.LabelConfig{"blue": {ToolPolicies: map[string]config.Policy{"ping": {Enabled: true}}}},
+		LabelConfigs: map[string]config.LabelConfig{"blue": {}},
 		Agents:       []managedAgentLabelPatch{{ID: "missing", Labels: []string{"blue"}}},
 	}
 	body, _ := json.Marshal(payload)
@@ -3580,7 +3591,7 @@ func TestManageWriteAuditsAllowedAndDeniedActions(t *testing.T) {
 		t.Fatalf("denied rate limit status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPut, "/v1/manage/labels", strings.NewReader(`{"label_configs":{"blue":{"tool_policies":{"ping":{"enabled":true}}}}}`))
+	req = httptest.NewRequest(http.MethodPut, "/v1/manage/labels", strings.NewReader(`{"label_configs":{"blue":{}}}`))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -3682,6 +3693,52 @@ func TestManageReadCannotAccessTokenEndpoint(t *testing.T) {
 		agent.Outbound.Auth.AccessKey != "test-access-key" || agent.Outbound.Auth.ProjectID != "test-project-id" ||
 		strings.Contains(rec.Body.String(), "test-secret-key") {
 		t.Fatalf("read-only agent detail leaked secret key or lost public credential fields: %#v", agent)
+	}
+}
+
+func TestManagedAgentsLastSeenDoesNotUseConfigUpdateTime(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	lastSeen := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	for _, transport := range []string{"grpc", "http", "event"} {
+		for _, seen := range []bool{false, true} {
+			id := fmt.Sprintf("edge-%s-%t", transport, seen)
+			if seen {
+				if err := st.UpsertAgent(ctx, model.Agent{ID: id, Status: model.AgentOffline, LastSeenAt: lastSeen, CreatedAt: lastSeen}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if transport == "grpc" {
+				if err := st.UpsertAgentConfig(ctx, config.AgentConfig{ID: id}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				node := config.OutboundAgent{ID: id, Transport: transport, Enabled: true, URL: "https://agent.example/" + id, Auth: config.OutboundAgentAuth{Type: config.OutboundAuthNone}}
+				if transport == "event" {
+					node.EventResponse = config.EventResponseDirect
+				}
+				if err := st.UpsertOutboundAgent(ctx, node); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	server := &Server{store: st}
+	agents, err := server.managedAgents(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 6 {
+		t.Fatalf("managed nodes = %d, want 6", len(agents))
+	}
+	for _, agent := range agents {
+		if strings.HasSuffix(agent.ID, "-true") {
+			if !agent.LastSeenAt.Equal(lastSeen) {
+				t.Fatalf("%s last online time changed after editing config: %v", agent.ID, agent.LastSeenAt)
+			}
+		} else if !agent.LastSeenAt.IsZero() {
+			t.Fatalf("%s has never been online, got last seen %v", agent.ID, agent.LastSeenAt)
+		}
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 
 func TestValidateAndNormalizeManagedSettingsAcceptsCanonicalSettings(t *testing.T) {
 	settings := config.DefaultManagedSettings()
-	settings.LabelConfigs["edge"] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
+	settings.LabelConfigs["agent:edge"] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
 		"ping":       {Enabled: true, AllowedArgs: map[string]string{"protocol": "icmp,udp,tcp", "port": "53,80-443"}},
 		"traceroute": {Enabled: true, AllowedArgs: map[string]string{"protocol": "icmp,udp", "port": "33434-33534"}},
 		"mtr":        {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": "443"}},
@@ -40,6 +40,36 @@ func TestValidateAndNormalizeManagedSettingsAcceptsCanonicalSettings(t *testing.
 	}
 }
 
+func TestManagedLabelPolicyScopes(t *testing.T) {
+	for label, allowed := range map[string]bool{"agent": true, "agent:grpc": true, "agent:custom": true, "id:edge-1": true, "blue": false, "agent-blue": false, "agents": false, "region:asia": false} {
+		t.Run(label, func(t *testing.T) {
+			runtime := config.DefaultRuntime()
+			var scheduler config.Scheduler
+			config.DefaultScheduler(&scheduler)
+			for _, cfg := range []config.LabelConfig{
+				{Runtime: &runtime},
+				{Scheduler: &scheduler},
+				{ToolPolicies: map[string]config.Policy{"ping": {Enabled: false}}},
+			} {
+				settings := config.DefaultManagedSettings()
+				settings.LabelConfigs[label] = cfg
+				err := ValidateAndNormalizeManagedSettings(&settings)
+				if allowed && err != nil {
+					t.Fatalf("policy label rejected: %v", err)
+				}
+				if !allowed && (err == nil || !strings.Contains(err.Error(), "only agent, agent:* and id:*")) {
+					t.Fatalf("group execution settings accepted: %v", err)
+				}
+			}
+			settings := config.DefaultManagedSettings()
+			settings.LabelConfigs[label] = config.LabelConfig{}
+			if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
+				t.Fatalf("empty label config rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateAndNormalizeManagedSettingsRejectsInvalidToolsAndAllowedArgs(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -50,7 +80,7 @@ func TestValidateAndNormalizeManagedSettingsRejectsInvalidToolsAndAllowedArgs(t 
 			name: "unknown label tool",
 			want: "unknown tool",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = config.LabelConfig{ToolPolicies: map[string]config.Policy{"speedtest": {Enabled: true}}}
+				settings.LabelConfigs["agent:edge"] = config.LabelConfig{ToolPolicies: map[string]config.Policy{"speedtest": {Enabled: true}}}
 			},
 		},
 		{
@@ -71,14 +101,14 @@ func TestValidateAndNormalizeManagedSettingsRejectsInvalidToolsAndAllowedArgs(t 
 			name: "unknown argument",
 			want: "unknown argument",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("ping", map[string]string{"timeout": "1"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("ping", map[string]string{"timeout": "1"})
 			},
 		},
 		{
 			name: "auto is not a protocol permission",
 			want: "unsupported value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("ping", map[string]string{"protocol": "auto,tcp"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("ping", map[string]string{"protocol": "auto,tcp"})
 			},
 		},
 		{
@@ -94,70 +124,70 @@ func TestValidateAndNormalizeManagedSettingsRejectsInvalidToolsAndAllowedArgs(t 
 			name: "invalid protocol",
 			want: "unsupported value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("mtr", map[string]string{"protocol": "raw"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("mtr", map[string]string{"protocol": "raw"})
 			},
 		},
 		{
 			name: "invalid HTTP version alias",
 			want: "unsupported value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("http", map[string]string{"http_version": "h2"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("http", map[string]string{"http_version": "h2"})
 			},
 		},
 		{
 			name: "invalid HTTP method case",
 			want: "unsupported value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("http", map[string]string{"method": "get"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("http", map[string]string{"method": "get"})
 			},
 		},
 		{
 			name: "invalid DNS type",
 			want: "unsupported value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("dns", map[string]string{"type": "SOA"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("dns", map[string]string{"type": "SOA"})
 			},
 		},
 		{
 			name: "invalid port range",
 			want: "valid port range",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("port", map[string]string{"port": "0-65536"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("port", map[string]string{"port": "0-65536"})
 			},
 		},
 		{
 			name: "noncanonical port range",
 			want: "valid port range",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("port", map[string]string{"port": "80, 443"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("port", map[string]string{"port": "80, 443"})
 			},
 		},
 		{
 			name: "empty port range segment",
 			want: "valid port range",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("port", map[string]string{"port": "80,,443"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("port", map[string]string{"port": "80,,443"})
 			},
 		},
 		{
 			name: "port range with leading zero",
 			want: "valid port range",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("port", map[string]string{"port": "080"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("port", map[string]string{"port": "080"})
 			},
 		},
 		{
 			name: "empty rule",
 			want: "non-empty canonical rule",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("http", map[string]string{"method": ""})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("http", map[string]string{"method": ""})
 			},
 		},
 		{
 			name: "duplicate enum value",
 			want: "duplicate value",
 			mutate: func(settings *config.ManagedSettings) {
-				settings.LabelConfigs["edge"] = labelPolicy("http", map[string]string{"method": "GET,GET"})
+				settings.LabelConfigs["agent:edge"] = labelPolicy("http", map[string]string{"method": "GET,GET"})
 			},
 		},
 		{

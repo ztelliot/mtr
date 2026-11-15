@@ -573,17 +573,17 @@ body,
   width: 78px;
 }
 
-.manage-http-status-column {
+.manage-node-status-column {
   max-width: 72px;
   min-width: 72px;
   width: 72px;
 }
 
-.manage-http-status-column .mantine-Group-root {
+.manage-node-status-column .mantine-Group-root {
   flex-wrap: nowrap;
 }
 
-.manage-http-status-column .mantine-Badge-root {
+.manage-node-status-column .mantine-Badge-root {
   flex: 0 0 auto;
 }
 

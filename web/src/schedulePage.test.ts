@@ -12,6 +12,15 @@ const permissions: Permissions = {
 };
 
 describe("schedule page permission helpers", () => {
+  it("hides agent policy labels while keeping groups, all nodes and individual nodes", () => {
+    const agents = [testAgent("edge-1", ["agent", "agent:grpc", "agent:custom", "id:edge-1", "blue"], {})];
+    const options = __schedulePageTest.scheduleLabelsForAgents(agents, (key) => key);
+    const flat = options.flatMap((option) => "items" in option ? option.items : [option]);
+    expect(flat.map((option) => option.value)).toEqual(["agent", "blue", "id:edge-1"]);
+    expect(flat[0].label).toBe("schedule.allNodes");
+    expect(flat.every((option) => !option.label.startsWith("agent:"))).toBe(true);
+  });
+
   it("requires a five-field crontab expression", () => {
     expect(__schedulePageTest.cronExpressionIsValid("*/5 * * * *")).toBe(true);
     expect(__schedulePageTest.cronExpressionIsValid("0 8 * * 1-5")).toBe(true);

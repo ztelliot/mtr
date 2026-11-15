@@ -103,9 +103,12 @@ proxy the only process that can reach the listener.
 Server runtime policy is stored in persisted managed settings, not in
 `server.yaml`. This includes API tokens, Agent register tokens, rate limits,
 global and label-based tool policies, label-based scheduler/runtime knobs,
-probe counts, timeouts, and outbound Agents. Per-node tuning is label-based:
-every node has the reserved `agent` and `id:<agent-id>` labels, so global,
-grouped, and single-node rules share one mechanism. An empty store is initialized
+probe counts, timeouts, and outbound Agents. Only `agent`, `agent:*`, and `id:*`
+labels may configure execution parameters and tool policies; other labels only
+group nodes for selection and access scopes. Every node carries `agent`, its
+transport-specific `agent:*` label, and `id:<agent-id>` for global, node-type,
+and per-node configuration. User interfaces hide `agent` and `agent:*` policy
+labels while retaining group and individual-node selection. An empty store is initialized
 only from the token in `bootstrap_admin_token_file` (or
 `MTR_BOOTSTRAP_ADMIN_TOKEN_FILE`). The file must be regular, no larger than 4
 KiB, non-executable, not group-writable, and inaccessible to world users;

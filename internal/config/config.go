@@ -181,6 +181,12 @@ type LabelConfig struct {
 	ToolPolicies map[string]Policy `yaml:"tool_policies,omitempty" json:"tool_policies,omitempty"`
 }
 
+// IsPolicyLabel identifies labels that may configure agent execution. Other
+// labels only group nodes for selection and access scopes.
+func IsPolicyLabel(label string) bool {
+	return label == AgentAllLabel || strings.HasPrefix(label, "agent:") || strings.HasPrefix(label, AgentIDLabelPrefix)
+}
+
 const (
 	OutboundTransportHTTP  = "http"
 	OutboundTransportEvent = "event"
@@ -371,6 +377,11 @@ func NormalizeLabelConfigs(configs map[string]LabelConfig) map[string]LabelConfi
 	for label, cfg := range configs {
 		label = strings.TrimSpace(label)
 		if label == "" {
+			continue
+		}
+		if !IsPolicyLabel(label) {
+			// Keep legacy group labels, but discard their execution settings.
+			out[label] = LabelConfig{}
 			continue
 		}
 		if cfg.Runtime != nil {

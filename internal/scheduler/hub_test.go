@@ -2084,6 +2084,45 @@ func TestHubInflightLimit(t *testing.T) {
 	}
 }
 
+func TestAgentSettingsUsePolicyLabelsAndIgnoreGroupExecutionSettings(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewTestMemory()
+	upsertHubTestAgent(t, ctx, st, model.Agent{ID: "edge-1", Status: model.AgentOffline})
+	upsertHubTestAgentConfigLabels(t, ctx, st, "edge-1", []string{"blue", "agent:custom"})
+	hub := NewHub(st, policy.DefaultPolicies(), time.Minute, time.Millisecond, 4, slog.Default())
+	groupRuntime := config.DefaultRuntime()
+	groupRuntime.Count = 1
+	groupScheduler := config.Scheduler{MaxInflightPerAgent: 1}
+	typeRuntime := config.DefaultRuntime()
+	typeRuntime.Count = 4
+	idRuntime := config.DefaultRuntime()
+	idRuntime.Count = 2
+	hub.ApplySettings(config.ManagedSettings{LabelConfigs: map[string]config.LabelConfig{
+		"blue":         {Runtime: &groupRuntime, Scheduler: &groupScheduler, ToolPolicies: map[string]config.Policy{"ping": {Enabled: false}}},
+		"agent:custom": {Runtime: &typeRuntime},
+		"id:edge-1": {Runtime: &idRuntime, Scheduler: &config.Scheduler{MaxInflightPerAgent: 2}, ToolPolicies: map[string]config.Policy{
+			"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": "tcp", "port": "443"}},
+		}},
+	}})
+	scheduler, runtime, policies, err := hub.settingsForAgent(ctx, "edge-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Count != 2 || scheduler.MaxInflightPerAgent != 2 || !policies["ping"].Enabled || policies["ping"].AllowedArgs["protocol"] != "tcp" {
+		t.Fatalf("policy label settings were not applied: runtime=%#v scheduler=%#v policies=%#v", runtime, scheduler, policies)
+	}
+	// Dropping the per-node label configuration leaves the custom agent policy
+	// active; the ordinary group's stricter settings must still have no effect.
+	hub.ApplySettings(config.ManagedSettings{LabelConfigs: map[string]config.LabelConfig{
+		"blue":         {Runtime: &groupRuntime, Scheduler: &groupScheduler, ToolPolicies: map[string]config.Policy{"ping": {Enabled: false}}},
+		"agent:custom": {Runtime: &typeRuntime},
+	}})
+	scheduler, runtime, policies, err = hub.settingsForAgent(ctx, "edge-1")
+	if err != nil || runtime.Count != 4 || scheduler.MaxInflightPerAgent != 4 || len(policies) != 0 {
+		t.Fatalf("group settings affected execution: runtime=%#v scheduler=%#v policies=%#v err=%v", runtime, scheduler, policies, err)
+	}
+}
+
 func waitHubTestEvent(t *testing.T, events <-chan model.JobEvent) model.JobEvent {
 	t.Helper()
 	select {

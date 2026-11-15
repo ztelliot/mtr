@@ -1991,6 +1991,9 @@ func (h *Hub) labelConfigsFor(labels []string) []config.LabelConfig {
 	configs := h.labelConfigsSnapshot()
 	out := make([]config.LabelConfig, 0, len(labels))
 	for _, label := range labels {
+		if !config.IsPolicyLabel(label) {
+			continue
+		}
 		if cfg, ok := configs[label]; ok {
 			out = append(out, cfg)
 		}

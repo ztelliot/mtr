@@ -24,8 +24,8 @@ func TestScheduledAutoPingIncludesRestrictedNodesAndConstrainsDispatch(t *testin
 			ID: "edge-" + label, Capabilities: []model.Tool{model.ToolPing}, Protocols: model.ProtocolAll,
 			Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now,
 		})
-		upsertHubTestAgentConfigLabels(t, ctx, st, "edge-"+label, []string{label, "probe"})
-		settings.LabelConfigs[label] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
+		upsertHubTestAgentConfigLabels(t, ctx, st, "edge-"+label, []string{"agent:" + label, "probe"})
+		settings.LabelConfigs["agent:"+label] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
 			"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": protocols, "port": policy.DefaultPortRange}},
 		}}
 	}

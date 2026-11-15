@@ -32,10 +32,10 @@ func TestAutoPingDispatchIncludesRestrictedNodes(t *testing.T) {
 		if label == "blocked" {
 			port = "443"
 		}
-		settings.LabelConfigs[label] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
+		settings.LabelConfigs["agent:"+label] = config.LabelConfig{ToolPolicies: map[string]config.Policy{
 			"ping": {Enabled: true, AllowedArgs: map[string]string{"protocol": protocol, "port": port}},
 		}}
-		upsertTestAgent(t, ctx, st, "edge-"+label, []string{label})
+		upsertTestAgent(t, ctx, st, "edge-"+label, []string{label, "agent:" + label})
 	}
 	if settings, err = st.UpdateManagedSettings(ctx, settings); err != nil {
 		t.Fatal(err)

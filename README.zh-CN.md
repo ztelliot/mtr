@@ -89,8 +89,8 @@ Server 进程配置和 Agent 配置字段也都可以通过环境变量提供。
 
 Server 运行时策略保存在持久化托管配置（managed settings）中，而不是 `server.yaml` 中。
 这包括 API token、Agent 注册 token、限流、全局和按标签生效的工具策略、
-按标签生效的调度/运行参数、探测次数、超时以及出站 Agent。节点级调整通过标签完成：
-每个节点都会自动带有保留标签 `agent` 和 `id:<agent-id>`，因此全局、分组和单节点规则可以使用同一套标签机制。
+按标签生效的调度/运行参数、探测次数、超时以及出站 Agent。只有 `agent`、`agent:*` 和 `id:*` 标签可以配置参数与工具策略；其他标签仅用于节点分组和范围选择。
+每个节点都会自动带有 `agent`、对应传输类型的 `agent:*` 和 `id:<agent-id>` 标签，分别支持全局、节点类型和单节点配置。用户界面隐藏 `agent`、`agent:*` 策略标签，保留分组与单节点选择。
 空存储只会使用 `bootstrap_admin_token_file`（或
 `MTR_BOOTSTRAP_ADMIN_TOKEN_FILE`）所指文件中的 token 完成初始化。该路径必须是普通文件，
 大小不得超过 4 KiB，不得可执行或允许 group 写入，也不能允许 world 用户访问；`0600`

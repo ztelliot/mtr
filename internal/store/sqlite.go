@@ -574,6 +574,7 @@ func (s *SQLite) RegisterAgent(ctx context.Context, a model.Agent, suppliedToken
 		return model.Agent{}, false, err
 	}
 	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
+	settings.LabelConfigs = config.NormalizeLabelConfigs(settings.LabelConfigs)
 	if err := ValidateAndNormalizeManagedSettings(&settings); err != nil {
 		return model.Agent{}, false, err
 	}
@@ -804,6 +805,7 @@ func (s *SQLite) GetManagedSettings(ctx context.Context) (config.ManagedSettings
 		return settings, err
 	}
 	settings.UpdatedAt = updated.Format(time.RFC3339Nano)
+	settings.LabelConfigs = config.NormalizeLabelConfigs(settings.LabelConfigs)
 	return settings, ValidateAndNormalizeManagedSettings(&settings)
 }
 

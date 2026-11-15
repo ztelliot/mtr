@@ -16,6 +16,60 @@ func newTestSQLite(ctx context.Context, dsn string) (*SQLite, error) {
 	return store, err
 }
 
+func TestSQLiteReadsLegacyGroupLabelsWithoutExecutionSettings(t *testing.T) {
+	ctx := context.Background()
+	dsn := "sqlite://" + t.TempDir() + "/legacy-labels.db"
+	st, err := newTestSQLite(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := st.GetManagedSettings(ctx)
+	if err != nil {
+		st.Close()
+		t.Fatal(err)
+	}
+	runtime := config.DefaultRuntime()
+	runtime.Count = 2
+	settings.LabelConfigs["blue"] = config.LabelConfig{Runtime: &runtime, ToolPolicies: map[string]config.Policy{"ping": {Enabled: false}}}
+	settings.LabelConfigs["id:edge-1"] = config.LabelConfig{Runtime: &runtime}
+	settings.RegisterTokens = []config.RegisterToken{{ID: "legacy-register", Token: "legacy-register", RemainingUses: 1}}
+	raw, err := marshalJSONString(settings)
+	if err == nil {
+		_, err = st.db.ExecContext(ctx, `update managed_settings set value=? where id='default'`, raw)
+	}
+	st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := NewSQLite(ctx, dsn, "")
+	if err != nil {
+		t.Fatalf("legacy group settings prevented reopening: %v", err)
+	}
+	defer reopened.Close()
+	saved, err := reopened.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, ok := saved.LabelConfigs["blue"]
+	if !ok || group.Runtime != nil || len(group.ToolPolicies) != 0 {
+		t.Fatalf("legacy group was not preserved without execution settings: %#v", group)
+	}
+	if cfg := saved.LabelConfigs["id:edge-1"]; cfg.Runtime == nil || cfg.Runtime.Count != 2 {
+		t.Fatalf("single-node policy was lost: %#v", cfg)
+	}
+	now := time.Now().UTC()
+	if _, _, err := reopened.RegisterAgent(ctx, model.Agent{ID: "edge-legacy", Status: model.AgentOnline, LastSeenAt: now, CreatedAt: now}, "legacy-register"); err != nil {
+		t.Fatalf("legacy settings prevented agent registration: %v", err)
+	}
+	saved, err = reopened.GetManagedSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.UpdateManagedSettings(ctx, saved); err != nil {
+		t.Fatalf("normalized legacy settings cannot be saved: %v", err)
+	}
+}
+
 func TestSQLiteBootstrapAdminToken(t *testing.T) {
 	ctx := context.Background()
 	dsn := "sqlite://" + t.TempDir() + "/bootstrap.db"

@@ -792,6 +792,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func agentView(agent model.Agent, tools map[model.Tool]ToolPermission) model.AgentView {
+	labels := make([]string, 0, len(agent.Labels))
+	for _, label := range agent.Labels {
+		if label != model.AgentAllLabel && !strings.HasPrefix(label, "agent:") {
+			labels = append(labels, label)
+		}
+	}
 	return model.AgentView{
 		ID:         agent.ID,
 		Country:    agent.Country,
@@ -799,7 +805,7 @@ func agentView(agent model.Agent, tools map[model.Tool]ToolPermission) model.Age
 		Provider:   agent.Provider,
 		ISP:        agent.ISP,
 		Version:    agent.Version,
-		Labels:     append([]string(nil), agent.Labels...),
+		Labels:     labels,
 		Tools:      tools,
 		Protocols:  agent.Protocols,
 		Status:     agent.Status,
@@ -1315,14 +1321,12 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 				continue
 			}
 			createdAt := parseManagedTime(cfg.CreatedAt)
-			updatedAt := parseManagedTime(cfg.UpdatedAt)
 			out = append(out, ManagedAgent{
 				Agent: model.Agent{
-					ID:         cfg.ID,
-					Labels:     model.NormalizeAgentLabels(cfg.ID, model.AgentTransportGRPC, cfg.Labels),
-					Status:     model.AgentOffline,
-					LastSeenAt: updatedAt,
-					CreatedAt:  createdAt,
+					ID:        cfg.ID,
+					Labels:    model.NormalizeAgentLabels(cfg.ID, model.AgentTransportGRPC, cfg.Labels),
+					Status:    model.AgentOffline,
+					CreatedAt: createdAt,
 				},
 				Transport: "grpc",
 				Config:    cfg,
@@ -1343,13 +1347,11 @@ func (s *Server) managedAgents(ctx context.Context, transport string) ([]Managed
 				continue
 			}
 			createdAt := parseManagedTime(node.CreatedAt)
-			updatedAt := parseManagedTime(node.UpdatedAt)
 			agent := model.Agent{
-				ID:         node.ID,
-				Labels:     append([]string(nil), node.Labels...),
-				Status:     model.AgentOffline,
-				LastSeenAt: updatedAt,
-				CreatedAt:  createdAt,
+				ID:        node.ID,
+				Labels:    append([]string(nil), node.Labels...),
+				Status:    model.AgentOffline,
+				CreatedAt: createdAt,
 			}
 			if live, ok := agentByID[node.ID]; ok {
 				agent = live
@@ -2479,6 +2481,9 @@ func headerIP(raw string) (netip.Addr, bool) {
 func labelConfigsForLabels(configs map[string]config.LabelConfig, labels []string) []config.LabelConfig {
 	out := make([]config.LabelConfig, 0, len(labels))
 	for _, label := range labels {
+		if !config.IsPolicyLabel(label) {
+			continue
+		}
 		if cfg, ok := configs[label]; ok {
 			out = append(out, cfg)
 		}

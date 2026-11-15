@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentTagCounts, agentTagLabel, filterAgentsByTags, normalizeAgentTags, normalizeSelectableAgentTags } from "./agentTags";
+import { agentTagCounts, agentTagLabel, filterAgentsByTags, isPolicyLabel, normalizeAgentTags, normalizeSelectableAgentTags } from "./agentTags";
 import type { Agent } from "./types";
 
 const agents: Agent[] = [
@@ -9,6 +9,16 @@ const agents: Agent[] = [
 ];
 
 describe("agent tag helpers", () => {
+  it("allows policies only for agent and id namespaces", () => {
+    for (const label of ["agent", "agent:grpc", "agent:custom", "id:edge-blue"]) {
+      expect(isPolicyLabel(label)).toBe(true);
+    }
+    for (const label of ["blue", "agent-blue", "agents", "region:asia"]) {
+      expect(isPolicyLabel(label)).toBe(false);
+    }
+    expect(normalizeSelectableAgentTags(["agent", "agent:custom", "agent:grpc", "blue"])).toEqual(["blue"]);
+  });
+
   it("normalizes tag selections without changing their order", () => {
     expect(normalizeAgentTags([" blue ", "", "green", "blue"])).toEqual(["blue", "green"]);
     expect(normalizeSelectableAgentTags([

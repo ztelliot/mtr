@@ -1,8 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { __managePageTest } from "./ManagePage";
+import { formatDateTime } from "./formatters";
 import type { APITokenPermission, ManagedAgent, OutboundAgentConfig } from "./types";
 
 describe("manage token helpers", () => {
+  it("uses the last online time for every transport and leaves unseen nodes blank", () => {
+    const lastSeen = "2026-11-14T09:00:00Z";
+    for (const transport of ["grpc", "http", "event"] as const) {
+      const agent = { ...managedAgent("edge-1", []), transport, last_seen_at: lastSeen, config: { id: "edge-1", updated_at: "2026-11-15T09:00:00Z" } };
+      expect(__managePageTest.managedAgentLastSeen(agent)).toBe(formatDateTime(lastSeen));
+      expect(__managePageTest.managedAgentLastSeen({ ...agent, last_seen_at: "" })).toBe("-");
+      expect(__managePageTest.managedAgentLastSeen({ ...agent, last_seen_at: "0001-01-01T00:00:00Z" })).toBe("-");
+    }
+    expect(__managePageTest.managedOutboundAgentFromConfig({
+      id: "new-node", transport: "http", enabled: true, url: "https://agent.example", auth: { type: "none" }, updated_at: "2026-11-15T09:00:00Z"
+    }).last_seen_at).toBe("");
+  });
+
+  it("saves ordinary labels as groups without hidden execution settings", () => {
+    const policyConfig = { tool_policies: { ping: { enabled: false } } };
+    expect(__managePageTest.normalizeLabelConfig("blue", policyConfig)).toEqual({});
+    expect(__managePageTest.normalizeLabelConfig("agent-blue", policyConfig)).toEqual({});
+    expect(__managePageTest.normalizeLabelConfig("agent:custom", policyConfig).tool_policies).toEqual(policyConfig.tool_policies);
+    expect(__managePageTest.normalizeLabelConfig("id:edge-1", policyConfig).tool_policies).toEqual(policyConfig.tool_policies);
+    const globalConfig = __managePageTest.normalizeLabelConfig("agent", {});
+    expect(globalConfig.runtime).toBeDefined();
+    expect(globalConfig.scheduler).toBeDefined();
+    expect(__managePageTest.normalizeLabelConfig("blue", globalConfig)).toEqual({});
+  });
+
   it("preserves inherited token allowed_args while showing editable defaults", () => {
     const token: APITokenPermission = {
       secret: "secret",
@@ -241,17 +267,23 @@ describe("manage token helpers", () => {
     expect(updates).toEqual([{ id: "edge-1", labels: ["new"] }]);
   });
 
-  it("sorts system labels before custom labels and id labels", () => {
+  it("sorts built-in and custom agent labels before groups and keeps id labels last", () => {
     const summaries = __managePageTest.labelSummaries([
-      managedAgent("edge-1", ["agent", "agent:grpc", "id:edge-1", "local"]),
-      { ...managedAgent("edge-http-1", ["agent", "agent:http", "id:edge-http-1", "local"]), transport: "http" }
-    ], {});
+      managedAgent("edge-1", ["id:edge-1", "local", "agent:zebra", "agent:grpc", "agent"]),
+      { ...managedAgent("edge-http-1", ["id:edge-http-1", "agent:aaa", "agent:http", "agent", "aaa"]), transport: "http" }
+    ], { "agent:event": {}, "agent:custom": {}, "id:aaa": {} });
 
     expect(summaries.map((summary) => summary.label)).toEqual([
       "agent",
+      "agent:event",
       "agent:grpc",
       "agent:http",
+      "agent:aaa",
+      "agent:custom",
+      "agent:zebra",
+      "aaa",
       "local",
+      "id:aaa",
       "id:edge-1",
       "id:edge-http-1"
     ]);

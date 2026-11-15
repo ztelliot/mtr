@@ -27,6 +27,7 @@ import { AlertTriangle, Pencil, Plus, RefreshCw, RotateCcw, Save, Trash2, X } fr
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { ApiClient } from "./api";
+import { isAgentPolicyLabel, isPolicyLabel } from "./agentTags";
 import { errorMessage } from "./errors";
 import { formatDateTime, formatHTTPVersion } from "./formatters";
 import { canReadManage, canWriteManage } from "./permissions";
@@ -123,7 +124,9 @@ export const __managePageTest = {
   effectiveAgentStatus,
   outboundAgentRequiredFieldsMissing,
   labelSummaries,
+  normalizeLabelConfig,
   managedOutboundAgentFromConfig,
+  managedAgentLastSeen,
   normalizeIPVersions,
   parseOutboundHeaders,
   normalizeRegisterAgentIDs,
@@ -159,7 +162,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [labelModalOpen, setLabelModalOpen] = useState(false);
   const [savingRegisterTokenID, setSavingRegisterTokenID] = useState<string | null>(null);
-  const [section, setSection] = useState("outboundAgents");
+  const [section, setSection] = useState("nodes");
   const [loading, setLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAgentConfig, setSavingAgentConfig] = useState(false);
@@ -187,7 +190,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
 
   useEffect(() => {
     if (!writable && section === "tokens") {
-      setSection("outboundAgents");
+      setSection("nodes");
     }
   }, [section, writable]);
 
@@ -685,7 +688,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         value={section}
         onChange={setSection}
         data={[
-          { value: "outboundAgents", label: t("manage.nodesTab") },
+          { value: "nodes", label: t("manage.nodesTab") },
           { value: "labels", label: t("manage.labelsTab") },
           ...(writable ? [{ value: "tokens", label: t("manage.tokensTab") }] : []),
           { value: "settings", label: t("manage.rateLimitTab") }
@@ -708,86 +711,48 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
         </Stack>
       )}
 
-      {section === "outboundAgents" && (
-        <Stack gap="lg">
-          <Paper className="manage-agent-box" withBorder p="md">
-            <Stack gap="md">
-              <SectionHeader title={t("manage.agents")} />
-              <Table.ScrollContainer minWidth={760}>
-                <Table className="manage-table" verticalSpacing="xs">
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>{t("manage.id")}</Table.Th>
-                      <Table.Th>{t("manage.labels")}</Table.Th>
-                      <Table.Th>{t("manage.status")}</Table.Th>
-                      <Table.Th>{t("manage.lastSeen")}</Table.Th>
-                      <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {agents.map((agent) => (
+      {section === "nodes" && (
+        <Paper className="manage-agent-box" withBorder p="md">
+          <Stack gap="md">
+            <SectionHeader title={t("manage.nodesManagement")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewOutboundAgentModal}><ResponsiveActionLabel full={t("manage.addOutboundAgent")} compact={t("actions.add")} /></GuardedButton>} />
+            <Table.ScrollContainer minWidth={820}>
+              <Table className="manage-table" verticalSpacing="xs">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>{t("manage.id")}</Table.Th>
+                    <Table.Th>{t("manage.transport")}</Table.Th>
+                    <Table.Th>{t("manage.labels")}</Table.Th>
+                    <Table.Th className="manage-node-status-column">{t("manage.status")}</Table.Th>
+                    <Table.Th className="manage-date-column">{t("manage.lastSeen")}</Table.Th>
+                    <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {allManagedAgents.map((agent) => {
+                    const transport = managedAgentType(agent);
+                    const node = transport === "grpc" ? null : withOutboundAgentDefaults(agent.outbound ?? { ...emptyOutboundAgent, id: agent.id, transport });
+                    return (
                       <Table.Tr key={agent.id}>
                         <Table.Td><Text fw={600}>{agent.id}</Text></Table.Td>
+                        <Table.Td><Badge variant="light">{transport === "grpc" ? "gRPC" : transport}</Badge></Table.Td>
                         <Table.Td><LabelBadges labels={agent.labels} /></Table.Td>
-                        <Table.Td><AgentBadges agent={agent} t={t} /></Table.Td>
-                        <Table.Td>{formatDateTime(agent.last_seen_at)}</Table.Td>
+                        <Table.Td className="manage-node-status-column">{node ? <OutboundAgentBadges agent={agent} node={node} t={t} /> : <AgentBadges agent={agent} t={t} />}</Table.Td>
+                        <Table.Td className="manage-date-column">{managedAgentLastSeen(agent)}</Table.Td>
                         <Table.Td className="manage-table-actions">
                           <Group gap="xs" justify="flex-end">
-                            <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editAgent(agent)}><Pencil size={16} /></ActionIcon></Tooltip>
-                            <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => deleteAgent(agent.id)}><Trash2 size={16} /></GuardedActionIcon>
+                            <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => node ? editOutboundAgent(node) : editAgent(agent)}><Pencil size={16} /></ActionIcon></Tooltip>
+                            <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => node ? deleteOutboundAgent(agent.id) : deleteAgent(agent.id)}><Trash2 size={16} /></GuardedActionIcon>
                           </Group>
                         </Table.Td>
                       </Table.Tr>
-                    ))}
-                    {agents.length === 0 && <EmptyRow colSpan={5} label={t("manage.noAgents")} />}
-                  </Table.Tbody>
-                </Table>
-              </Table.ScrollContainer>
-            </Stack>
-          </Paper>
-          <Paper className="manage-agent-box" withBorder p="md">
-            <Stack gap="md">
-              <SectionHeader title={t("manage.outboundAgents")} action={<GuardedButton leftSection={<Plus size={16} />} disabled={!writable} disabledReason={t("manage.writeRequired")} onClick={openNewOutboundAgentModal}><ResponsiveActionLabel full={t("manage.addOutboundAgent")} compact={t("actions.add")} /></GuardedButton>} />
-              <Table.ScrollContainer minWidth={920}>
-                <Table className="manage-table" verticalSpacing="xs">
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>{t("manage.id")}</Table.Th>
-                      <Table.Th>{t("manage.transport")}</Table.Th>
-                      <Table.Th>{t("manage.url")}</Table.Th>
-                      <Table.Th>{t("manage.labels")}</Table.Th>
-                      <Table.Th className="manage-http-status-column">{t("manage.status")}</Table.Th>
-                      <Table.Th className="manage-date-column">{t("manage.updated")}</Table.Th>
-                      <Table.Th className="manage-table-actions">{t("schedule.actions")}</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {outboundAgents.map((agent) => {
-                      const node = withOutboundAgentDefaults(agent.outbound ?? { ...emptyOutboundAgent, id: agent.id, transport: agent.transport === "event" ? "event" : "http" });
-                      return (
-                        <Table.Tr key={agent.id}>
-                          <Table.Td><Text fw={600}>{agent.id}</Text></Table.Td>
-                          <Table.Td><Badge variant="light">{node.transport}</Badge></Table.Td>
-                          <Table.Td>{node.url}</Table.Td>
-                          <Table.Td><LabelBadges labels={agent.labels ?? node.labels} /></Table.Td>
-                          <Table.Td className="manage-http-status-column"><OutboundAgentBadges agent={agent} node={node} t={t} /></Table.Td>
-                          <Table.Td className="manage-date-column">{formatDateTime(node.updated_at || agent.last_seen_at)}</Table.Td>
-                          <Table.Td className="manage-table-actions">
-                            <Group gap="xs" justify="flex-end">
-                              <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => editOutboundAgent(node)}><Pencil size={16} /></ActionIcon></Tooltip>
-                              <GuardedActionIcon label={t("schedule.delete")} disabled={!writable} disabledReason={t("manage.writeRequired")} color="red" variant="subtle" onClick={() => deleteOutboundAgent(agent.id)}><Trash2 size={16} /></GuardedActionIcon>
-                            </Group>
-                          </Table.Td>
-                        </Table.Tr>
-                      );
-                    })}
-                    {outboundAgents.length === 0 && <EmptyRow colSpan={7} label={t("manage.noOutboundAgentConfigs")} />}
-                  </Table.Tbody>
-                </Table>
-              </Table.ScrollContainer>
-            </Stack>
-          </Paper>
-        </Stack>
+                    );
+                  })}
+                  {allManagedAgents.length === 0 && <EmptyRow colSpan={6} label={t("manage.noNodes")} />}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
+          </Stack>
+        </Paper>
       )}
 
       {writable && section === "tokens" && (
@@ -895,8 +860,8 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
                     <Table.Tr key={row.label}>
                       <Table.Td><Text fw={600}>{row.label}</Text></Table.Td>
                       <Table.Td>{row.count}</Table.Td>
-                      <Table.Td><ConfigBadges config={row.config} t={t} /></Table.Td>
-                      <Table.Td><ToolPolicyBadges policies={row.config.tool_policies} /></Table.Td>
+                      <Table.Td>{isPolicyLabel(row.label) ? <ConfigBadges config={row.config} t={t} /> : "—"}</Table.Td>
+                      <Table.Td>{isPolicyLabel(row.label) ? <ToolPolicyBadges policies={row.config.tool_policies} /> : "—"}</Table.Td>
                       <Table.Td className="manage-table-actions">
                         <Group gap="xs" justify="flex-end">
                           <Tooltip label={t("schedule.edit")}><ActionIcon variant="subtle" onClick={() => openLabelModal(row.label)}><Pencil size={16} /></ActionIcon></Tooltip>
@@ -1050,21 +1015,25 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
               </SimpleGrid>
               <MultiSelect mt="md" label={t("manage.nodes")} data={nodeOptions} value={labelNodes} disabled={!writable || isReservedLabel(editingLabel)} searchable onChange={setLabelNodes} />
             </ManageSection>
-            <ManageSection
-              title={t("manage.runtime")}
-              action={<OverrideSwitch label={t("manage.overrideRuntime")} checked={isAgentLabel(editingLabel) || Boolean(labelForm.runtime)} disabled={!writable || isAgentLabel(editingLabel)} onChange={(checked) => setLabelForm({ ...labelForm, runtime: checked ? cloneRuntime(labelForm.runtime) : null })} />}
-            >
-              {(labelForm.runtime || isAgentLabel(editingLabel)) && <RuntimeEditor value={cloneRuntime(labelForm.runtime)} disabled={!writable} t={t} onChange={(runtime) => setLabelForm({ ...labelForm, runtime })} />}
-            </ManageSection>
-            <ManageSection
-              title={t("manage.scheduler")}
-              action={<OverrideSwitch label={t("manage.overrideScheduler")} checked={isAgentLabel(editingLabel) || Boolean(labelForm.scheduler)} disabled={!writable || isAgentLabel(editingLabel)} onChange={(checked) => setLabelForm({ ...labelForm, scheduler: checked ? cloneScheduler(labelForm.scheduler) : null })} />}
-            >
-              {(labelForm.scheduler || isAgentLabel(editingLabel)) && <SchedulerEditor value={cloneScheduler(labelForm.scheduler)} disabled={!writable} t={t} onChange={(scheduler) => setLabelForm({ ...labelForm, scheduler })} />}
-            </ManageSection>
-            <ManageSection title={t("manage.policies")}>
-              <ToolPolicySections value={labelForm.tool_policies ?? {}} disabled={!writable} t={t} onChange={(tool, policy) => setLabelForm({ ...labelForm, tool_policies: { ...(labelForm.tool_policies ?? {}), [tool]: policy } })} />
-            </ManageSection>
+            {isPolicyLabel(editingLabel) && (
+              <>
+                <ManageSection
+                  title={t("manage.runtime")}
+                  action={<OverrideSwitch label={t("manage.overrideRuntime")} checked={isAgentLabel(editingLabel) || Boolean(labelForm.runtime)} disabled={!writable || isAgentLabel(editingLabel)} onChange={(checked) => setLabelForm({ ...labelForm, runtime: checked ? cloneRuntime(labelForm.runtime) : null })} />}
+                >
+                  {(labelForm.runtime || isAgentLabel(editingLabel)) && <RuntimeEditor value={cloneRuntime(labelForm.runtime)} disabled={!writable} t={t} onChange={(runtime) => setLabelForm({ ...labelForm, runtime })} />}
+                </ManageSection>
+                <ManageSection
+                  title={t("manage.scheduler")}
+                  action={<OverrideSwitch label={t("manage.overrideScheduler")} checked={isAgentLabel(editingLabel) || Boolean(labelForm.scheduler)} disabled={!writable || isAgentLabel(editingLabel)} onChange={(checked) => setLabelForm({ ...labelForm, scheduler: checked ? cloneScheduler(labelForm.scheduler) : null })} />}
+                >
+                  {(labelForm.scheduler || isAgentLabel(editingLabel)) && <SchedulerEditor value={cloneScheduler(labelForm.scheduler)} disabled={!writable} t={t} onChange={(scheduler) => setLabelForm({ ...labelForm, scheduler })} />}
+                </ManageSection>
+                <ManageSection title={t("manage.policies")}>
+                  <ToolPolicySections value={labelForm.tool_policies ?? {}} disabled={!writable} t={t} onChange={(tool, policy) => setLabelForm({ ...labelForm, tool_policies: { ...(labelForm.tool_policies ?? {}), [tool]: policy } })} />
+                </ManageSection>
+              </>
+            )}
             <ModalActions loading={savingSettings} disabled={!writable || !editingLabel.trim()} disabledReason={!writable ? t("manage.writeRequired") : t("manage.requiredFields")} onCancel={closeLabelModal} submitLabel={t("manage.saveLabel")} t={t} />
           </Stack>
         </form>
@@ -1503,7 +1472,7 @@ function effectiveAgentStatus(status: ManagedAgent["status"], disabled: boolean)
 }
 
 function LabelBadges({ labels }: { labels?: string[] }) {
-  const normalized = uniqueStrings(labels ?? []);
+  const normalized = sortedLabels(labels ?? []);
   if (normalized.length === 0) {
     return <Text c="dimmed">-</Text>;
   }
@@ -1693,6 +1662,11 @@ function managedAgentType(agent: ManagedAgent): ManagedAgent["transport"] {
   return agent.transport;
 }
 
+function managedAgentLastSeen(agent: ManagedAgent): string {
+  const value = agent.last_seen_at;
+  return !value || value.startsWith("0001-") ? "-" : formatDateTime(value);
+}
+
 function managedOutboundAgentFromConfig(node: OutboundAgentConfig, previous?: ManagedAgent): ManagedAgent {
   return {
     ...previous,
@@ -1701,7 +1675,7 @@ function managedOutboundAgentFromConfig(node: OutboundAgentConfig, previous?: Ma
     capabilities: previous?.capabilities ?? [],
     protocols: previous?.protocols ?? 0,
     status: node.enabled ? previous?.status ?? "offline" : "offline",
-    last_seen_at: previous?.last_seen_at ?? node.updated_at ?? "",
+    last_seen_at: previous?.last_seen_at ?? "",
     created_at: previous?.created_at ?? node.created_at ?? "",
     transport: node.transport,
     config: {
@@ -1806,13 +1780,16 @@ function labelSummaries(agents: ManagedAgent[], configs: Record<string, LabelCon
       labels.add(label);
     }
   }
-  return [...labels]
-    .sort((a, b) => labelSortKey(a).localeCompare(labelSortKey(b)))
+  return sortedLabels([...labels])
     .map((label) => ({
       label,
       count: agentIDsForLabel(agents, label).length,
       config: withLabelConfigDefaults(configs[label])
     }));
+}
+
+function sortedLabels(labels: string[]): string[] {
+  return uniqueStrings(labels).sort((a, b) => labelSortKey(a).localeCompare(labelSortKey(b)));
 }
 
 function labelSortKey(label: string): string {
@@ -1822,10 +1799,13 @@ function labelSortKey(label: string): string {
   if (label === "agent:grpc" || label === "agent:http" || label === "agent:event") {
     return `1:${label}`;
   }
-  if (!label.startsWith("id:")) {
+  if (isAgentPolicyLabel(label)) {
     return `2:${label}`;
   }
-  return `3:${label}`;
+  if (!label.startsWith("id:")) {
+    return `3:${label}`;
+  }
+  return `4:${label}`;
 }
 
 function agentIDsForLabel(agents: ManagedAgent[], label: string): string[] {
@@ -1922,6 +1902,9 @@ function firstAvailableLabelName(configs: Record<string, LabelConfigSettings>, a
 }
 
 function normalizeLabelConfig(label: string, config: LabelConfigSettings): LabelConfigSettings {
+  if (!isPolicyLabel(label)) {
+    return {};
+  }
   return {
     runtime: config.runtime || isAgentLabel(label) ? cloneRuntime(config.runtime) : undefined,
     scheduler: config.scheduler || isAgentLabel(label) ? cloneScheduler(config.scheduler) : undefined,

@@ -355,7 +355,7 @@ func TestNormalizeManagedSettingsGeneratesAndRejectsDuplicateTokens(t *testing.T
 func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
 	settings := DefaultManagedSettings()
 	settings.LabelConfigs = map[string]LabelConfig{
-		" edge ": {
+		" agent:edge ": {
 			Runtime:   &Runtime{Count: 2},
 			Scheduler: &Scheduler{MaxInflightPerAgent: 1},
 			ToolPolicies: map[string]Policy{
@@ -367,7 +367,7 @@ func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
 	if err := NormalizeManagedSettings(&settings); err != nil {
 		t.Fatal(err)
 	}
-	cfg, ok := settings.LabelConfigs["edge"]
+	cfg, ok := settings.LabelConfigs["agent:edge"]
 	if !ok || len(settings.LabelConfigs) != 2 {
 		t.Fatalf("label configs not normalized: %#v", settings.LabelConfigs)
 	}
@@ -382,6 +382,29 @@ func TestNormalizeManagedSettingsNormalizesLabelConfigs(t *testing.T) {
 	}
 	if cfg.ToolPolicies["ping"].AllowedArgs["protocol"] != "tcp" {
 		t.Fatalf("label policy not preserved: %#v", cfg.ToolPolicies)
+	}
+}
+
+func TestNormalizeLabelConfigsDropsLegacyGroupExecutionSettings(t *testing.T) {
+	runtime := DefaultRuntime()
+	runtime.Count = 2
+	var scheduler Scheduler
+	DefaultScheduler(&scheduler)
+	cfg := LabelConfig{Runtime: &runtime, Scheduler: &scheduler, ToolPolicies: map[string]Policy{"ping": {Enabled: false}}}
+	configs := NormalizeLabelConfigs(map[string]LabelConfig{
+		"blue": cfg, "agent-blue": cfg, "region:asia": cfg,
+		"agent": cfg, "agent:custom": cfg, "id:edge-1": cfg,
+	})
+	for _, label := range []string{"blue", "agent-blue", "region:asia"} {
+		group, ok := configs[label]
+		if !ok || group.Runtime != nil || group.Scheduler != nil || len(group.ToolPolicies) != 0 {
+			t.Fatalf("group %s must remain without execution settings: %#v", label, group)
+		}
+	}
+	for _, label := range []string{"agent", "agent:custom", "id:edge-1"} {
+		if configs[label].Runtime == nil || configs[label].Runtime.Count != 2 || configs[label].Scheduler == nil || len(configs[label].ToolPolicies) != 1 {
+			t.Fatalf("policy label %s lost its settings: %#v", label, configs[label])
+		}
 	}
 }
 
@@ -410,7 +433,7 @@ func TestNormalizeManagedSettingsRejectsRuntimeOutsideEffectiveBounds(t *testing
 			DefaultScheduler(&scheduler)
 			cfg := LabelConfig{Runtime: &runtime, Scheduler: &scheduler}
 			tt.configure(&cfg)
-			settings := ManagedSettings{LabelConfigs: map[string]LabelConfig{"edge": cfg}}
+			settings := ManagedSettings{LabelConfigs: map[string]LabelConfig{"agent:edge": cfg}}
 			if err := NormalizeManagedSettings(&settings); err == nil {
 				t.Fatal("expected out-of-range managed setting to be rejected")
 			}

@@ -463,6 +463,9 @@ func validateManagedLabelConfigs(configs map[string]config.LabelConfig) error {
 			return fmt.Errorf("label_configs label %q must not have surrounding whitespace", label)
 		}
 		cfg := configs[label]
+		if !config.IsPolicyLabel(label) && (cfg.Runtime != nil || cfg.Scheduler != nil || len(cfg.ToolPolicies) > 0) {
+			return fmt.Errorf("label_configs[%q]: only agent, agent:* and id:* labels may configure runtime, scheduler or tool policies", label)
+		}
 		for _, name := range sortedMapKeys(cfg.ToolPolicies) {
 			tool, err := validateManagedTool(fmt.Sprintf("label_configs[%q].tool_policies", label), name)
 			if err != nil {
