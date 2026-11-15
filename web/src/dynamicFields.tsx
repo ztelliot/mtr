@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Input, Select, Switch, TextInput } from "@mantine/core";
 import { dnsTypeOptions, effectivePermissions, httpMethodOptions, httpVersionOptions, protocolOptions, resolveOnAgentValue } from "./permissions";
 import type { Agent, JobFormState, Permissions, Tool } from "./types";
@@ -8,7 +9,8 @@ export function DynamicFields({
   agents,
   updateForm,
   disabled,
-  t
+  t,
+  renderLabel = (label) => label
 }: {
   form: JobFormState;
   permissions: Permissions | null;
@@ -16,6 +18,7 @@ export function DynamicFields({
   updateForm: <Key extends keyof JobFormState>(key: Key, value: JobFormState[Key]) => void;
   disabled: boolean;
   t: (key: string, options?: Record<string, unknown>) => string;
+  renderLabel?: (label: string) => ReactNode;
 }) {
   const selectedAgent = (agents ?? []).find((agent) => agent.id === form.agentId) ?? null;
   if (form.tool === "dns") {
@@ -23,7 +26,7 @@ export function DynamicFields({
       <Select
         className="dynamic-field"
         checkIconPosition="left"
-        label={t("form.recordType")}
+        label={renderLabel(t("form.recordType"))}
         disabled={disabled}
         data={dnsTypeOptions(permissions, selectedAgent)}
         value={form.dnsType}
@@ -41,7 +44,7 @@ export function DynamicFields({
             className="dynamic-field http-method-field"
             checkIconPosition="left"
             disabled={disabled || methods.length === 1}
-            label={t("form.method")}
+            label={renderLabel(t("form.method"))}
             data={methods}
             value={form.method}
             onChange={(value) => updateForm("method", (value ?? methods[0].value) as JobFormState["method"])}
@@ -52,7 +55,7 @@ export function DynamicFields({
             className="dynamic-field http-version-field"
             checkIconPosition="left"
             disabled={disabled || versions.length === 1}
-            label={t("form.httpVersion")}
+            label={renderLabel(t("form.httpVersion"))}
             data={versions}
             value={form.httpVersion}
             onChange={(value) => updateForm("httpVersion", (value ?? versions[0].value) as JobFormState["httpVersion"])}
@@ -74,7 +77,7 @@ export function DynamicFields({
         className="dynamic-field protocol-field"
         checkIconPosition="left"
         disabled={disabled || protocols.length === 1}
-        label={t("form.protocol")}
+        label={renderLabel(t("form.protocol"))}
         data={protocols}
         value={form.protocol}
         onChange={(value) => updateForm("protocol", (value ?? protocols[0].value) as JobFormState["protocol"])}
@@ -84,7 +87,7 @@ export function DynamicFields({
           className="dynamic-field probe-port-field"
           disabled={disabled}
           inputMode="numeric"
-          label={t("form.port")}
+          label={renderLabel(t("form.port"))}
           placeholder={form.protocol === "udp" ? "33434" : form.protocol === "tcp" ? "80" : "80 / 33434"}
           value={form.port}
           onChange={(event) => updateForm("port", event.currentTarget.value)}
@@ -101,7 +104,8 @@ export function RemoteDNSSwitch({
   agents,
   permissions,
   t,
-  updateForm
+  updateForm,
+  renderLabel = (label) => label
 }: {
   className?: string;
   disabled: boolean;
@@ -110,10 +114,11 @@ export function RemoteDNSSwitch({
   permissions: Permissions | null;
   t: (key: string, options?: Record<string, unknown>) => string;
   updateForm: <Key extends keyof JobFormState>(key: Key, value: JobFormState[Key]) => void;
+  renderLabel?: (label: string) => ReactNode;
 }) {
   const selectedAgent = (agents ?? []).find((agent) => agent.id === form.agentId) ?? null;
   return (
-    <Input.Wrapper className={className} label={t("form.remoteDns")}>
+    <Input.Wrapper className={className} label={renderLabel(t("form.remoteDns"))}>
       <Switch
         aria-label={t("form.remoteDns")}
         checked={resolveOnAgentValue(permissions, form, agents)}

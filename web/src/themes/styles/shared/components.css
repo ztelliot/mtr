@@ -1,0 +1,497 @@
+/* Component bindings shared by Fluent, Material and P5R. Each theme supplies
+   color, shape and elevation tokens; layout and sidebar rules live separately. */
+
+body.theme-modern {
+  --ui-field-height: 56px;
+  --mantine-font-family: var(--ui-font);
+  --mantine-font-family-headings: var(--ui-font);
+  --mantine-radius-default: var(--ui-control-radius);
+  --mantine-color-body: var(--ui-surface);
+  --mantine-color-text: var(--ui-text);
+  --mantine-color-dimmed: var(--ui-muted);
+  --mantine-color-error: var(--ui-danger);
+  --mantine-primary-color-filled: var(--ui-primary);
+  --mantine-primary-color-filled-hover: var(--ui-primary-hover);
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  font-family: var(--ui-font);
+}
+
+.theme-modern :is(#root, .page) {
+  background: var(--ui-bg);
+}
+
+.theme-modern ::selection {
+  background: var(--ui-primary-container);
+  color: var(--ui-on-primary-container);
+}
+
+.theme-modern .top-nav {
+  background: var(--ui-nav-bg);
+  gap: 24px;
+}
+
+.theme-modern .brand {
+  color: var(--ui-text) !important;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.6px;
+}
+
+.theme-modern .nav-actions {
+  gap: 20px;
+}
+
+.theme-modern :is(.tool-tabs, .manage-tabs) {
+  gap: 4px;
+}
+
+.theme-modern .tool-tabs {
+  flex-wrap: nowrap;
+}
+
+.theme-modern :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab {
+  border-radius: var(--ui-nav-radius);
+  color: var(--ui-muted);
+  font-family: var(--ui-font);
+  font-size: 14px;
+  font-weight: 500;
+  min-height: 40px;
+  padding: 10px 12px;
+}
+
+.theme-modern :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--ui-text);
+}
+
+.theme-modern :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab[data-active] {
+  background: var(--ui-nav-selected);
+  color: var(--ui-nav-selected-text);
+}
+
+.theme-modern :is(.query-panel, .schedule-panel, .result-table, .manage-agent-box, .manage-tool-policy-card, .schedule-chart-shell) {
+  background: var(--ui-surface);
+  border-color: var(--ui-border);
+  border-radius: var(--ui-panel-radius);
+  box-shadow: var(--ui-panel-shadow);
+}
+
+.theme-modern .mantine-Input-wrapper {
+  --input-radius: var(--ui-control-radius);
+  --input-bg: var(--ui-field);
+  --input-bd: var(--ui-outline);
+  --input-bd-focus: var(--ui-primary);
+  --input-color: var(--ui-text);
+  --input-placeholder-color: var(--ui-muted);
+  --input-disabled-bg: var(--ui-container);
+  --input-disabled-color: var(--ui-muted);
+}
+
+.theme-modern .mantine-Input-input {
+  background: var(--ui-field);
+  border-color: var(--ui-outline);
+  border-radius: var(--ui-control-radius);
+  color: var(--ui-text);
+  font-family: var(--ui-font);
+}
+
+.theme-modern .mantine-Input-input:focus-within {
+  border-color: var(--ui-focus-border);
+  box-shadow: var(--ui-field-focus);
+  outline: none;
+}
+
+.theme-modern .mantine-Input-input:is(:disabled, [data-disabled], :has(input:disabled)) {
+  background: var(--ui-container);
+  color: var(--ui-muted);
+  opacity: 0.6;
+}
+
+.theme-modern .mantine-Input-input:is([data-error], [aria-invalid="true"]) {
+  border-color: var(--ui-danger);
+}
+
+.theme-modern .mantine-Input-input:is([data-error], [aria-invalid="true"]):focus-within {
+  box-shadow: inset 0 0 0 1px var(--ui-danger);
+}
+
+.theme-modern .mantine-PillsInputField-field:focus {
+  box-shadow: none;
+  outline: none;
+}
+
+.theme-modern .mantine-InputWrapper-label {
+  color: var(--ui-muted);
+  font-family: var(--ui-font);
+  font-weight: 500;
+}
+
+.theme-modern :is(.query-grid, .schedule-form-grid) .mantine-InputWrapper-label {
+  font-size: 14px;
+}
+
+.theme-modern :is(.query-grid, .schedule-form-grid) .mantine-Input-input {
+  font-size: 16px;
+  min-height: var(--ui-field-height);
+}
+
+.theme-modern :is(.agent-tags-field, .schedule-label-field) .mantine-MultiSelect-input {
+  height: var(--ui-field-height);
+}
+
+.theme-modern .run-button {
+  height: var(--ui-field-height);
+}
+
+.theme-modern :is(.mantine-Select-dropdown, .mantine-MultiSelect-dropdown, .mantine-TagsInput-dropdown, .mantine-Combobox-dropdown) {
+  background: var(--ui-menu);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-menu-radius);
+  box-shadow: var(--ui-menu-shadow);
+  color: var(--ui-text);
+  padding: 4px !important;
+}
+
+.theme-modern :is(.mantine-Select-dropdown, .mantine-MultiSelect-dropdown, .mantine-TagsInput-dropdown) .mantine-ScrollArea-viewport {
+  padding-inline-start: 0 !important;
+}
+
+.theme-modern [data-combobox-option] {
+  background: transparent;
+  border-radius: var(--ui-option-radius);
+  color: var(--ui-text);
+  min-height: 36px;
+  padding-inline: 38px 12px !important;
+}
+
+.theme-modern [data-combobox-option]:hover:not([data-combobox-disabled]) {
+  background: var(--ui-hover);
+}
+
+.theme-modern [data-combobox-option][data-checked] {
+  background: var(--ui-primary-container);
+  color: var(--ui-on-primary-container);
+}
+
+.theme-modern [data-combobox-option][data-checked]:hover:not([data-combobox-disabled]) {
+  background: color-mix(in srgb, var(--ui-on-primary-container) 8%, var(--ui-primary-container));
+}
+
+.theme-modern [data-combobox-option][data-combobox-selected]:not([data-combobox-disabled]) {
+  box-shadow: inset 0 0 0 2px var(--ui-primary);
+}
+
+.theme-modern [data-combobox-option] > svg {
+  color: inherit;
+  height: 14px;
+  inset-inline-start: 12px !important;
+  margin: 0 !important;
+  min-width: 14px;
+  opacity: 1;
+  position: absolute !important;
+  right: auto !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  width: 14px;
+}
+
+.theme-modern [data-combobox-option] > div:empty {
+  display: none;
+}
+
+.theme-modern :is(.mantine-CloseButton-root, .mantine-InputClearButton-root) {
+  background: transparent !important;
+  border-radius: var(--ui-control-radius);
+  color: var(--ui-muted);
+}
+
+.theme-modern :is(.mantine-CloseButton-root, .mantine-InputClearButton-root):hover:not(:disabled) {
+  background: var(--ui-hover) !important;
+  color: var(--ui-text);
+}
+
+.theme-modern .mantine-Pill-root {
+  background: var(--ui-primary-container);
+  border: 1px solid var(--ui-chip-border);
+  border-radius: var(--ui-chip-radius);
+  color: var(--ui-on-primary-container);
+  font-size: 13px;
+  height: 26px;
+  padding-inline: 8px 0;
+}
+
+.theme-modern .mantine-Pill-remove {
+  --cb-icon-size: 12px;
+  border-radius: 0 var(--ui-chip-radius) var(--ui-chip-radius) 0;
+  color: inherit;
+  margin-inline-start: 4px;
+}
+
+.theme-modern .mantine-Pill-remove:hover:not(:disabled) {
+  background: var(--ui-primary) !important;
+  color: var(--ui-on-primary);
+}
+
+.theme-modern .mantine-Pill-root[data-disabled] {
+  color: var(--ui-muted);
+  opacity: 0.6;
+}
+
+.theme-modern .mantine-Button-root {
+  background: var(--ui-button) !important;
+  border: 1px solid var(--ui-button-border) !important;
+  border-radius: var(--ui-button-radius);
+  color: var(--ui-text) !important;
+  font-family: var(--ui-font);
+  font-weight: 500;
+}
+
+.theme-modern .mantine-Button-root:hover:not(:disabled):not([data-disabled]) {
+  background: var(--ui-hover) !important;
+  color: var(--ui-text) !important;
+}
+
+.theme-modern :is(.run-button, .schedule-submit, .mantine-Button-root[type="submit"], .mantine-Button-root[data-variant="filled"]) {
+  background: var(--ui-primary) !important;
+  border-color: transparent !important;
+  color: var(--ui-on-primary) !important;
+}
+
+.theme-modern :is(.run-button, .schedule-submit, .mantine-Button-root[type="submit"], .mantine-Button-root[data-variant="filled"]):hover:not(:disabled):not([data-disabled]) {
+  background: var(--ui-primary-hover) !important;
+  color: var(--ui-on-primary) !important;
+}
+
+.theme-modern .run-button .mantine-Loader-root {
+  --loader-color: var(--ui-on-primary) !important;
+}
+
+.theme-modern .mantine-ActionIcon-root {
+  border-radius: var(--ui-button-radius);
+}
+
+.theme-modern .mantine-ActionIcon-root[data-variant="subtle"] {
+  background: transparent !important;
+  color: var(--ui-primary) !important;
+}
+
+.theme-modern .mantine-ActionIcon-root[data-variant="subtle"]:hover:not(:disabled) {
+  background: var(--ui-primary-container) !important;
+}
+
+.theme-modern :is(.mantine-ActionIcon-root[data-color="red"], .schedule-delete) {
+  color: var(--ui-danger) !important;
+}
+
+.theme-modern :is(.mantine-ActionIcon-root[data-color="red"], .schedule-delete):hover:not(:disabled) {
+  background: var(--ui-danger-container) !important;
+}
+
+.theme-modern .schedule-cancel {
+  background: var(--ui-button);
+  color: var(--ui-text);
+}
+
+.theme-modern :is(.mantine-Button-root, .mantine-ActionIcon-root):is(:disabled, [data-disabled]) {
+  opacity: 0.4;
+}
+
+.theme-modern .mantine-Switch-track {
+  background: var(--ui-container) !important;
+  border: 1px solid var(--ui-outline);
+}
+
+.theme-modern .mantine-Switch-thumb {
+  background: var(--ui-muted);
+  box-shadow: none;
+}
+
+.theme-modern .mantine-Switch-input:checked + .mantine-Switch-track {
+  background: var(--ui-primary) !important;
+  border-color: var(--ui-primary);
+}
+
+.theme-modern .mantine-Switch-input:checked + * > .mantine-Switch-thumb {
+  background: var(--ui-on-primary);
+}
+
+.theme-modern .mantine-Switch-input:disabled + .mantine-Switch-track {
+  opacity: 0.4;
+}
+
+.theme-modern .mantine-Switch-input:focus-visible + .mantine-Switch-track {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 3px;
+}
+
+.theme-modern .mantine-NumberInput-control {
+  border-radius: 0;
+}
+
+.theme-modern .mantine-NumberInput-control:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.theme-modern .mantine-SegmentedControl-root {
+  background: var(--ui-container);
+  border-radius: var(--ui-button-radius);
+}
+
+.theme-modern .mantine-SegmentedControl-indicator {
+  background: var(--ui-primary-container);
+  border-radius: var(--ui-button-radius);
+  box-shadow: none;
+}
+
+.theme-modern .mantine-SegmentedControl-label[data-active] {
+  color: var(--ui-on-primary-container);
+}
+
+.theme-modern .mantine-Modal-content {
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-dialog-radius);
+  box-shadow: var(--ui-menu-shadow);
+}
+
+.theme-modern .mantine-Modal-header {
+  background: var(--ui-surface);
+}
+
+.theme-modern .mantine-Modal-title {
+  color: var(--ui-text);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.theme-modern .mantine-Notification-root {
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-panel-radius);
+  box-shadow: var(--ui-menu-shadow);
+}
+
+.theme-modern .mantine-Alert-root {
+  border-radius: var(--ui-panel-radius);
+}
+
+.theme-modern .mantine-Tooltip-tooltip {
+  background: var(--ui-text);
+  border-radius: var(--ui-control-radius);
+  color: var(--ui-surface);
+}
+
+.theme-modern .schedule-chart-tooltip {
+  background: var(--ui-menu);
+  border-color: var(--ui-border);
+  border-radius: var(--ui-menu-radius);
+  box-shadow: var(--ui-menu-shadow);
+  color: var(--ui-text);
+  font-family: var(--ui-font);
+}
+
+.theme-modern .mantine-Badge-root {
+  border-radius: var(--ui-chip-radius);
+  font-weight: 500;
+  text-transform: none;
+}
+
+.theme-modern .mantine-Table-table {
+  --table-striped-color: var(--ui-table-stripe);
+  --table-hover-color: var(--ui-hover);
+  --table-border-color: var(--ui-border);
+}
+
+.theme-modern :is(.result-table th, .manage-table th, .schedule-table th, .schedule-metric-table th, .schedule-dns-history-table th) {
+  background: var(--ui-container);
+  border-color: var(--ui-border);
+  color: var(--ui-muted);
+  font-family: var(--ui-font);
+  font-weight: 500;
+  text-transform: none;
+}
+
+.theme-modern :is(.result-table td, .manage-table td, .schedule-table td, .schedule-metric-table td, .schedule-dns-history-table td) {
+  border-color: var(--ui-border);
+  color: var(--ui-text);
+}
+
+/* These labels previously used literal light/dark neutrals. A theme can use
+   dark surfaces in either system mode, so resolve them through surface roles. */
+
+.theme-modern :is(.mono-label, .geoip-primary, .mtr-summary-value, .mtr-agent-value, .readonly-result-summary-value, .schedule-metric-title, .schedule-section-title, .manage-tool-policy-name) {
+  color: var(--ui-text);
+}
+
+.theme-modern :is(.geoip-detail, .dns-record-line, .geoip-asn, .mtr-summary-label, .agent-protocol-suffix, .manage-section-override-switch .mantine-Switch-label) {
+  color: var(--ui-muted);
+}
+
+.theme-modern :is(.geoip-ip-button, .geoip-asn-link):hover {
+  color: var(--ui-primary);
+}
+
+.theme-modern :is(.mtr-summary-item, .readonly-result-summary-item) {
+  background: var(--ui-container);
+}
+
+.theme-modern .schedule-row.selected td {
+  background: var(--ui-primary-container) !important;
+}
+
+.theme-modern .manage-section-marker {
+  background: var(--ui-primary);
+}
+
+.theme-modern .manage-section-title {
+  color: var(--ui-muted);
+}
+
+.theme-modern .app-footer {
+  border-color: var(--ui-border);
+}
+
+.theme-modern :is(button, a):focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1080px) {
+  .theme-modern .top-nav {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .theme-modern .nav-actions {
+    justify-content: flex-start !important;
+    width: 100%;
+  }
+
+  .theme-modern .tool-tabs-root {
+    width: 100%;
+  }
+
+  .theme-modern .tool-tabs {
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  body.theme-modern {
+    --ui-field-height: 48px;
+  }
+
+  .theme-modern .brand {
+    font-size: 26px;
+  }
+
+  .theme-modern .tool-tabs .mantine-Tabs-tab {
+    flex: 0 0 auto;
+  }
+
+  .theme-modern :is(.query-panel, .schedule-editor-panel) {
+    padding: 18px 16px;
+  }
+}

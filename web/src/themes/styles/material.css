@@ -1,0 +1,144 @@
+/* Material 3 color roles and shape scale, mapped to shared component tokens.
+   https://material-web.dev/theming/color/ */
+
+body.theme-material {
+  --md-sys-color-primary: light-dark(#6750a4, #d0bcff);
+  --md-sys-color-on-primary: light-dark(#ffffff, #381e72);
+  --md-sys-color-primary-container: light-dark(#eaddff, #4f378b);
+  --md-sys-color-on-primary-container: light-dark(#21005d, #eaddff);
+  --md-sys-color-surface: light-dark(#fffbfe, #141218);
+  --md-sys-color-surface-container-low: light-dark(#f7f2fa, #1d1b20);
+  --md-sys-color-surface-container: light-dark(#f3edf7, #211f26);
+  --md-sys-color-on-surface: light-dark(#1d1b20, #e6e0e9);
+  --md-sys-color-on-surface-variant: light-dark(#49454f, #cac4d0);
+  --md-sys-color-outline: light-dark(#79747e, #938f99);
+  --md-sys-color-outline-variant: light-dark(#cac4d0, #49454f);
+  --md-sys-color-error: light-dark(#b3261e, #f2b8b5);
+  --md-sys-color-error-container: light-dark(#f9dedc, #601410);
+  --ui-bg: var(--md-sys-color-surface);
+  --ui-surface: var(--md-sys-color-surface-container-low);
+  --ui-container: var(--md-sys-color-surface-container);
+  --ui-field: var(--md-sys-color-surface);
+  --ui-menu: var(--md-sys-color-surface-container);
+  --ui-text: var(--md-sys-color-on-surface);
+  --ui-muted: var(--md-sys-color-on-surface-variant);
+  --ui-border: var(--md-sys-color-outline-variant);
+  --ui-outline: var(--md-sys-color-outline);
+  --ui-primary: var(--md-sys-color-primary);
+  --ui-primary-hover: color-mix(in srgb, var(--ui-primary) 92%, var(--ui-on-primary));
+  --ui-on-primary: var(--md-sys-color-on-primary);
+  --ui-primary-container: var(--md-sys-color-primary-container);
+  --ui-on-primary-container: var(--md-sys-color-on-primary-container);
+  --ui-danger: var(--md-sys-color-error);
+  --ui-danger-container: var(--md-sys-color-error-container);
+  --ui-hover: color-mix(in srgb, var(--ui-text) 8%, var(--ui-surface));
+  --ui-nav-bg: var(--ui-bg);
+  --ui-nav-selected: var(--ui-primary-container);
+  --ui-nav-selected-text: var(--ui-on-primary-container);
+  --ui-button: var(--ui-surface);
+  --ui-button-border: var(--ui-outline);
+  --ui-chip-border: transparent;
+  --ui-table-stripe: color-mix(in srgb, var(--ui-container) 45%, var(--ui-surface));
+  --ui-control-radius: 4px;
+  --ui-panel-radius: 24px;
+  --ui-menu-radius: 12px;
+  --ui-option-radius: 8px;
+  --ui-dialog-radius: 28px;
+  --ui-button-radius: 999px;
+  --ui-chip-radius: 8px;
+  --ui-nav-radius: 999px;
+  --ui-focus-border: var(--ui-primary);
+  --ui-field-focus: inset 0 0 0 1px var(--ui-primary);
+  --ui-panel-shadow: none;
+  --ui-menu-shadow: 0 4px 12px rgb(0 0 0 / 0.15);
+}
+
+.theme-material .brand {
+  color: var(--ui-primary) !important;
+  font-size: 30px;
+  font-weight: 500;
+}
+
+.theme-material :is(.query-panel, .schedule-editor-panel, .manage-agent-box) {
+  border-color: transparent;
+}
+
+.theme-material :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab::after {
+  display: none;
+}
+
+.theme-material .mantine-Modal-content {
+  background: var(--ui-container);
+  border-color: transparent;
+}
+
+.theme-material .mantine-Modal-header {
+  background: var(--ui-container);
+  padding: 24px 24px 12px;
+}
+
+.theme-material .mantine-Modal-body {
+  padding: 12px 24px 24px;
+}
+
+.theme-material .mantine-Modal-title {
+  font-size: 24px;
+  font-weight: 400;
+}
+
+.theme-material .mantine-Switch-root {
+  --switch-height: 28px;
+  --switch-width: 48px;
+  --switch-thumb-size: 20px;
+  --switch-track-label-padding: 3px;
+}
+
+.theme-material .mantine-Switch-track {
+  border-width: 2px;
+}
+
+.theme-material .mantine-Switch-thumb::before {
+  display: none;
+}
+
+.theme-material .manage-section-marker {
+  border-radius: 4px;
+  width: 4px;
+}
+
+.theme-material .app-footer {
+  border-top: 0;
+}
+
+.theme-material .workspace-main {
+  background: var(--ui-surface);
+  border-radius: 32px;
+  padding: 32px;
+}
+
+.theme-material .query-panel {
+  background: var(--ui-container);
+  padding: 24px;
+}
+
+.theme-material .result-table {
+  background: var(--ui-field);
+  border-color: transparent;
+}
+
+.theme-material .workspace-title {
+  font-weight: 500 !important;
+}
+
+@media (max-width: 1080px) {
+  .theme-material .workspace-main {
+    padding: 24px;
+  }
+}
+
+@media (max-width: 720px) {
+  .theme-material .workspace-main {
+    border-radius: 24px;
+    padding: 20px 12px;
+  }
+}

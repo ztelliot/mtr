@@ -1,0 +1,19 @@
+/* Noto Sans SC, Google Fonts; SIL OFL 1.1 (see assets/fonts/noto-sans-sc/OFL.txt).
+   One self-hosted variable WOFF2, with the same Unicode coverage as the
+   original 101 subsets and real weights 100–900. */
+
+@font-face {
+  font-family: "MTR Sans";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("../../../assets/fonts/noto-sans-sc/noto-sans-sc-variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "MTR Pixel";
+  font-display: swap;
+  font-style: normal;
+  font-weight: 100 900;
+  src: url("../../../assets/fonts/fusion-pixel/fusion-pixel-12px-monospaced-zh_hans.otf.woff2") format("woff2");
+}

@@ -3,6 +3,8 @@
 !Dockerfile.agent
 !Dockerfile.server
 !Dockerfile.web
+!LICENSE
+!NOTICE
 !go.mod
 !go.sum
 !cmd/

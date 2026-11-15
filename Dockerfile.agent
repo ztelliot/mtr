@@ -26,11 +26,14 @@ ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
 LABEL org.opencontainers.image.title="mtr-agent" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/ztelliot/mtr" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILT_AT}"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/mtr-agent /usr/local/bin/mtr-agent
+COPY LICENSE NOTICE /usr/share/licenses/mtr/
 EXPOSE 8000 9000
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/mtr-agent"]

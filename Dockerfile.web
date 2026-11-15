@@ -5,6 +5,7 @@ COPY web/package.json web/pnpm-lock.yaml ./
 RUN npm install -g pnpm@latest && pnpm install --frozen-lockfile
 
 COPY web/ ./
+COPY LICENSE NOTICE /
 ARG VERSION=dev
 ARG COMMIT=
 ENV VITE_APP_VERSION=${VERSION}
@@ -43,6 +44,8 @@ ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
 LABEL org.opencontainers.image.title="mtr-web" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/ztelliot/mtr" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILT_AT}"
@@ -56,6 +59,7 @@ COPY --from=caddy-runtime --chown=65532:65532 /config /config
 COPY --from=caddy-runtime --chown=65532:65532 /data /data
 COPY --from=build /tmp/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /app/dist /usr/share/caddy
+COPY LICENSE NOTICE /usr/share/licenses/mtr/
 EXPOSE 8080
 USER 65532:65532
 ENTRYPOINT ["/usr/bin/caddy"]

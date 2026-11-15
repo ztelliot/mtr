@@ -1,0 +1,88 @@
+/* WinUI 3: neutral layered surfaces, 4px controls, 8px flyouts.
+   https://learn.microsoft.com/windows/apps/design/signature-experiences/geometry */
+
+body.theme-fluent {
+  --ui-bg: light-dark(#f3f3f3, #202020);
+  --ui-surface: light-dark(#ffffff, #2b2b2b);
+  --ui-container: light-dark(#f6f6f6, #323232);
+  --ui-field: light-dark(#ffffff, #333333);
+  --ui-menu: light-dark(#fcfcfc, #2c2c2c);
+  --ui-text: light-dark(#1b1b1b, #f5f5f5);
+  --ui-muted: light-dark(#5c5c5c, #c5c5c5);
+  --ui-border: light-dark(#e5e5e5, #3e3e3e);
+  --ui-outline: light-dark(#b8b8b8, #767676);
+  --ui-primary: light-dark(#0067c0, #60cdff);
+  --ui-primary-hover: light-dark(#005aab, #83d8ff);
+  --ui-on-primary: light-dark(#ffffff, #00334d);
+  --ui-primary-container: light-dark(#e5f1fb, #183e52);
+  --ui-on-primary-container: light-dark(#005a9e, #9dddff);
+  --ui-danger: light-dark(#c42b1c, #ffb4ab);
+  --ui-danger-container: light-dark(#fde7e9, #442421);
+  --ui-hover: light-dark(#f0f0f0, #3a3a3a);
+  --ui-nav-bg: light-dark(rgb(243 243 243 / 0.95), rgb(32 32 32 / 0.95));
+  --ui-nav-selected: light-dark(#e8e8e8, #383838);
+  --ui-nav-selected-text: var(--ui-text);
+  --ui-button: light-dark(#fdfdfd, #373737);
+  --ui-button-border: light-dark(#d1d1d1, #595959);
+  --ui-chip-border: var(--ui-border);
+  --ui-table-stripe: light-dark(#fafafa, #2e2e2e);
+  --ui-control-radius: 4px;
+  --ui-panel-radius: 8px;
+  --ui-menu-radius: 8px;
+  --ui-option-radius: 4px;
+  --ui-dialog-radius: 8px;
+  --ui-button-radius: 4px;
+  --ui-chip-radius: 4px;
+  --ui-nav-radius: 4px;
+  --ui-focus-border: var(--ui-outline);
+  --ui-field-focus: inset 0 -2px 0 var(--ui-primary);
+  --ui-panel-shadow: 0 1px 2px rgb(0 0 0 / 0.03);
+  --ui-menu-shadow: 0 8px 24px rgb(0 0 0 / 0.16), 0 1px 3px rgb(0 0 0 / 0.08);
+}
+
+.theme-fluent :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab::after {
+  border-radius: 2px;
+  bottom: 3px;
+  height: 3px;
+  left: calc(50% - 8px);
+  right: calc(50% - 8px);
+}
+
+.theme-fluent :is(.tool-tabs, .manage-tabs) .mantine-Tabs-tab[data-active]::after {
+  background: var(--ui-primary);
+}
+
+.theme-fluent .mantine-Input-input {
+  border-bottom-color: light-dark(#8a8a8a, #a0a0a0);
+}
+
+.theme-fluent [data-combobox-option][data-checked]::before {
+  background: var(--ui-primary);
+  border-radius: 2px;
+  content: "";
+  height: 18px;
+  inset-inline-start: 0;
+  position: absolute;
+  top: calc(50% - 9px);
+  width: 3px;
+}
+
+.theme-fluent .mantine-Switch-root {
+  --switch-height: 20px;
+  --switch-width: 40px;
+  --switch-thumb-size: 12px;
+  --switch-track-label-padding: 3px;
+}
+
+.theme-fluent .mantine-Switch-thumb::before {
+  display: none;
+}
+
+.theme-fluent .workspace-title {
+  font-size: 36px !important;
+}
+
+.theme-fluent .workspace-metric {
+  border: 1px solid var(--ui-border);
+  border-radius: 8px !important;
+}

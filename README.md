@@ -5,6 +5,26 @@ DNS, and TCP port probes from managed edge Agents.
 
 Chinese version: [README.zh-CN.md](README.zh-CN.md)
 
+## License
+
+Except where otherwise noted, this project is licensed under the
+[GNU Affero General Public License, version 3 only](LICENSE)
+(`AGPL-3.0-only`). See [NOTICE](NOTICE) for the project copyright notice and
+third-party license scope. Commercial use, modification, and redistribution
+are permitted subject to the license; the software comes without warranty.
+
+When distributing binaries or container images, provide access to the complete
+Corresponding Source as required by the license. If you modify the program and
+let users interact with it remotely over a network, section 13 requires a
+prominent offer of free access to the Corresponding Source of your version.
+Include your modifications and the necessary build and installation scripts;
+an upstream repository link alone does not cover a modified deployment.
+
+Third-party dependencies and assets retain their own licenses, including the
+bundled fonts. Web builds publish the project license and third-party notices
+under `dist/licenses/`; container images include the project notices under
+`/usr/share/licenses/mtr/`.
+
 ## Components
 
 - `cmd/server`: REST API, gRPC Agent control plane, storage, policy, scheduling,

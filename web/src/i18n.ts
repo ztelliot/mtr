@@ -8,6 +8,16 @@ export const resources = {
   "zh-CN": {
     translation: {
       brand: "QwQ MTR",
+      workspace: {
+        schedules: "定时观测",
+        manage: "管理控制台",
+        diagnosticsDescription: "选择目标与节点，查看实时探测结果。",
+        schedulesDescription: "持续观测网络状态，追踪每一次变化。",
+        manageDescription: "管理节点、访问权限与运行策略。",
+        onlineNodes: "在线节点",
+        totalNodes: "共 {{count}} 个节点",
+        results: "探测结果",
+      },
       nav: {
         ping: "Ping",
         dns: "DNS",
@@ -208,6 +218,19 @@ export const resources = {
         light: "浅色",
         dark: "夜间",
       },
+      appearance: {
+        theme: "主题",
+        selectTheme: "选择主题",
+        colorMode: "明暗模式",
+        toggleScheme: "切换明暗模式",
+        toggleLanguage: "切换中英语言",
+        useLight: "切换至浅色模式",
+        useDark: "切换至深色模式",
+        collapseSidebar: "收窄侧栏",
+        expandSidebar: "展开侧栏",
+        themes: { pixel: "点阵", classic: "经典", metro: "Metro", fluent: "Fluent", material: "Material", p5r: "P5R" },
+        descriptions: { pixel: "点阵字形与网格", classic: "简洁与中性", metro: "纯色磁贴与大字号", fluent: "轻量侧栏与分层表面", material: "导航轨道与柔和色阶", p5r: "红黑撞色与斜切构图" },
+      },
       footer: {
         copyright: "© {{year}} {{brand}}",
         version: "v{{version}}",
@@ -218,11 +241,6 @@ export const resources = {
       },
       token: {
         title: "调试",
-        theme: "主题",
-        themeOptions: {
-          pixel: "点阵",
-          classic: "经典",
-        },
         apiBaseUrl: "API 地址",
         apiToken: "API 令牌",
         savedTitle: "令牌已更新",
@@ -529,6 +547,16 @@ export const resources = {
   "en-US": {
     translation: {
       brand: "QwQ MTR",
+      workspace: {
+        schedules: "Scheduled monitoring",
+        manage: "Management console",
+        diagnosticsDescription: "Choose a target and nodes to inspect live network results.",
+        schedulesDescription: "Monitor network health and track changes over time.",
+        manageDescription: "Manage nodes, access permissions, and runtime policies.",
+        onlineNodes: "Online",
+        totalNodes: "{{count}} nodes in total",
+        results: "Results",
+      },
       nav: {
         ping: "Ping",
         dns: "DNS",
@@ -652,6 +680,19 @@ export const resources = {
         light: "Light",
         dark: "Dark",
       },
+      appearance: {
+        theme: "Theme",
+        selectTheme: "Choose theme",
+        colorMode: "Color mode",
+        toggleScheme: "Toggle light and dark mode",
+        toggleLanguage: "Switch Chinese and English",
+        useLight: "Switch to light mode",
+        useDark: "Switch to dark mode",
+        collapseSidebar: "Collapse sidebar",
+        expandSidebar: "Expand sidebar",
+        themes: { pixel: "Pixel", classic: "Classic", metro: "Metro", fluent: "Fluent", material: "Material", p5r: "P5R" },
+        descriptions: { pixel: "Pixel type and a dotted grid", classic: "Simple and neutral", metro: "Solid tiles and bold type", fluent: "Light navigation and layered surfaces", material: "Navigation rail and tonal surfaces", p5r: "Red, black, and sharp angles" },
+      },
       footer: {
         copyright: "© {{year}} {{brand}}",
         version: "v{{version}}",
@@ -662,11 +703,6 @@ export const resources = {
       },
       token: {
         title: "Debug",
-        theme: "Theme",
-        themeOptions: {
-          pixel: "Pixel",
-          classic: "Classic",
-        },
         apiBaseUrl: "API URL",
         apiToken: "API Token",
         savedTitle: "API settings updated",

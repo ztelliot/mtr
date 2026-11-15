@@ -1,0 +1,621 @@
+/* Metro is scoped to the body so portaled menus, dialogs and notifications
+   follow the selected theme as well as the main application. */
+
+body.theme-metro {
+  --metro-bg: light-dark(#f5f7fa, #111820);
+  --metro-surface: light-dark(#ffffff, #19232e);
+  --metro-subtle: light-dark(#edf4fa, #202f3e);
+  --metro-text: light-dark(#172b3e, #edf4fc);
+  --metro-muted: light-dark(#526779, #acbed0);
+  --metro-border: light-dark(#cedae5, #3b4c5f);
+  --metro-accent: light-dark(#006bb3, #68c2ff);
+  --metro-tile: #006bb3;
+  --metro-hover: #005a96;
+  --metro-danger: light-dark(#c42b1c, #ff978b);
+  --mantine-radius-default: 0px;
+  --mantine-font-family: var(--metro-font);
+  --mantine-font-family-headings: var(--metro-font);
+  --mantine-color-body: var(--metro-surface);
+  --mantine-color-text: var(--metro-text);
+  --mantine-color-dimmed: var(--metro-muted);
+  --mantine-primary-color-filled: var(--metro-tile);
+  --mantine-primary-color-filled-hover: var(--metro-hover);
+  background: var(--metro-bg);
+  color: var(--metro-text);
+  font-family: var(--metro-font);
+}
+
+.theme-metro :is(#root, .page) {
+  background: var(--metro-bg);
+}
+
+.theme-metro ::selection {
+  background: var(--metro-tile);
+  color: white;
+}
+
+.theme-metro .page-shell {
+  padding-top: 36px;
+}
+
+.theme-metro .top-nav {
+  align-items: center;
+  background: var(--metro-bg);
+  backdrop-filter: none;
+  display: grid;
+  gap: 28px 24px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-bottom: 32px;
+  padding: 0;
+  position: static;
+}
+
+.theme-metro .brand {
+  color: var(--metro-accent) !important;
+  font-size: 44px;
+  font-weight: 300;
+  letter-spacing: -1.5px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.theme-metro .nav-actions {
+  display: contents;
+}
+
+.theme-metro .desktop-settings {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.theme-metro .tool-tabs-root {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  width: 100%;
+}
+
+.theme-metro .tool-tabs {
+  display: contents;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  overflow: visible;
+  padding: 0;
+  width: 100%;
+}
+
+.theme-metro .metro-node-tile {
+  align-items: flex-start;
+  background: var(--metro-subtle);
+  color: var(--metro-accent);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 96px;
+  justify-content: center;
+  min-width: 0;
+  padding: 12px 16px;
+}
+
+.theme-metro .metro-node-tile .node-status-count {
+  font-size: 32px;
+  font-weight: 400;
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab {
+  align-items: flex-start;
+  background: var(--metro-subtle);
+  border: 0;
+  border-radius: 0;
+  color: var(--metro-accent);
+  font-family: var(--metro-font);
+  font-size: 17px;
+  font-weight: 400;
+  flex-direction: column;
+  gap: 12px;
+  height: 96px;
+  min-width: 0;
+  padding: 14px 16px;
+  text-align: left;
+  transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab:hover:not(:disabled) {
+  background: light-dark(#dcecf9, #2a4055);
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab[data-active] {
+  background: var(--metro-tile);
+  color: white;
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab[data-active]:hover:not(:disabled) {
+  background: var(--metro-hover);
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tab::after {
+  display: none;
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tabSection {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.theme-metro .tool-tabs .mantine-Tabs-tabLabel {
+  flex: 0 0 auto;
+  text-align: left;
+}
+
+.theme-metro :is(.mantine-Paper-root, .mantine-Modal-content, .mantine-Popover-dropdown, .mantine-Combobox-dropdown, .mantine-Notification-root, .mantine-Alert-root, .mantine-Input-input, .mantine-Button-root, .mantine-ActionIcon-root, .mantine-Badge-root, .mantine-Pill-root, .mantine-SegmentedControl-root, .mantine-SegmentedControl-indicator, .manage-agent-box, .manage-tool-policy-card, .schedule-chart-shell) {
+  border-radius: 0 !important;
+  box-shadow: none;
+}
+
+.theme-metro :is(.query-panel, .schedule-panel, .result-table, .manage-agent-box, .manage-tool-policy-card, .schedule-chart-shell, .mantine-Modal-content, .mantine-Popover-dropdown, .mantine-Combobox-dropdown) {
+  background: var(--metro-surface);
+  border-color: var(--metro-border);
+}
+
+.theme-metro :is(.query-panel, .schedule-editor-panel) {
+  border-top: 3px solid var(--metro-tile);
+}
+
+.theme-metro :is(.mantine-Title-root, .schedule-section-title, .schedule-metric-title) {
+  font-family: var(--metro-font);
+  font-weight: 300;
+}
+
+.theme-metro .mantine-InputWrapper-label {
+  color: var(--metro-muted);
+  font-weight: 400;
+}
+
+.theme-metro :is(.query-grid, .schedule-form-grid) .mantine-InputWrapper-label {
+  color: var(--metro-muted);
+  font-family: var(--metro-font);
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.theme-metro .mantine-Input-input {
+  background: var(--metro-surface);
+  border-color: var(--metro-border);
+  color: var(--metro-text);
+  font-family: var(--metro-font);
+}
+
+.theme-metro .mantine-Input-wrapper {
+  --input-radius: 0px;
+  --input-bg: var(--metro-surface);
+  --input-bd: var(--metro-border);
+  --input-color: var(--metro-text);
+  --input-placeholder-color: var(--metro-muted);
+  --input-disabled-bg: var(--metro-subtle);
+  --input-disabled-color: var(--metro-muted);
+}
+
+.theme-metro .mantine-Input-input:focus-within {
+  border-color: var(--metro-accent);
+  box-shadow: inset 0 0 0 1px var(--metro-accent);
+  outline: none;
+}
+
+.theme-metro .mantine-Input-input:disabled,
+.theme-metro .mantine-Input-input[data-disabled] {
+  background: var(--metro-subtle);
+  color: var(--metro-muted);
+  opacity: 0.65;
+}
+
+.theme-metro .mantine-Input-input:is([aria-invalid="true"], [data-error]) {
+  border-color: var(--mantine-color-error);
+}
+
+.theme-metro .mantine-Input-input:is([aria-invalid="true"], [data-error]):focus-within {
+  box-shadow: inset 0 0 0 1px var(--mantine-color-error);
+}
+
+.theme-metro .mantine-PillsInputField-field:focus {
+  box-shadow: none;
+  outline: none;
+}
+
+.theme-metro [data-combobox-option] {
+  background: transparent;
+  border-radius: 0;
+  color: var(--metro-text);
+  min-height: 36px;
+  padding-inline: 38px 12px !important;
+}
+
+.theme-metro [data-combobox-option]:hover:not([data-combobox-disabled]) {
+  background: var(--metro-subtle);
+}
+
+.theme-metro [data-combobox-option][data-checked] {
+  background: var(--metro-tile);
+  color: white;
+}
+
+.theme-metro [data-combobox-option][data-checked]:hover:not([data-combobox-disabled]) {
+  background: var(--metro-hover);
+}
+
+.theme-metro [data-combobox-option][data-combobox-selected]:not([data-combobox-disabled]) {
+  box-shadow: inset 0 0 0 2px var(--metro-accent);
+}
+
+/* Mantine renders the check on either side of the label. Reserve one stable
+   gutter in both cases, including menus rendered outside the page tree. */
+
+.theme-metro [data-combobox-option] > svg {
+  color: inherit;
+  height: 14px;
+  inset-inline-start: 12px !important;
+  margin: 0 !important;
+  min-width: 14px;
+  opacity: 1;
+  position: absolute !important;
+  right: auto !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  width: 14px;
+}
+
+.theme-metro [data-combobox-option] > div:empty {
+  display: none;
+}
+
+.theme-metro :is(.mantine-CloseButton-root, .mantine-InputClearButton-root) {
+  background: transparent !important;
+  border-radius: 0;
+  color: var(--metro-muted);
+}
+
+.theme-metro :is(.mantine-CloseButton-root, .mantine-InputClearButton-root):hover:not(:disabled):not([data-disabled]) {
+  background: var(--metro-subtle) !important;
+  color: var(--metro-accent);
+}
+
+.theme-metro .mantine-Pill-root {
+  background: var(--metro-subtle);
+  border: 1px solid var(--metro-border);
+  color: var(--metro-accent);
+  font-size: 13px;
+  height: 26px;
+  padding-inline: 8px 0;
+}
+
+.theme-metro .mantine-Pill-remove {
+  --cb-icon-size: 12px;
+  border-inline-start: 1px solid var(--metro-border);
+  border-radius: 0;
+  color: inherit;
+  margin-inline-start: 6px;
+  padding-inline: 4px;
+}
+
+.theme-metro .mantine-Pill-remove:hover:not(:disabled) {
+  background: var(--metro-tile) !important;
+  color: white;
+}
+
+.theme-metro .mantine-Pill-root[data-disabled] {
+  color: var(--metro-muted);
+  opacity: 0.6;
+}
+
+.theme-metro .mantine-Modal-header {
+  background: var(--metro-surface);
+}
+
+.theme-metro .mantine-Modal-title {
+  font-size: 26px;
+  font-weight: 300;
+}
+
+.theme-metro .mantine-Button-root {
+  font-family: var(--metro-font);
+  font-weight: 400;
+}
+
+.theme-metro .mantine-Button-root[data-variant="default"]:not(.run-button):not([type="submit"]) {
+  background: var(--metro-surface) !important;
+  border: 1px solid var(--metro-border) !important;
+  color: var(--metro-text) !important;
+}
+
+.theme-metro .mantine-Button-root[data-variant="default"]:not(.run-button):not([type="submit"]):hover:not(:disabled):not([data-disabled]) {
+  background: var(--metro-subtle) !important;
+  border-color: var(--metro-accent) !important;
+}
+
+.theme-metro :is(.run-button, .schedule-submit, .mantine-Button-root[type="submit"]) {
+  background: var(--metro-tile) !important;
+  border: 1px solid var(--metro-tile) !important;
+  color: white !important;
+}
+
+.theme-metro :is(.run-button, .schedule-submit, .mantine-Button-root[type="submit"]):hover:not(:disabled):not([data-disabled]) {
+  background: var(--metro-hover) !important;
+}
+
+.theme-metro :is(.mantine-Button-root, .mantine-ActionIcon-root):is(:disabled, [data-disabled]) {
+  opacity: 0.45;
+}
+
+.theme-metro .mantine-ActionIcon-root[data-variant="subtle"] {
+  background: transparent !important;
+  color: var(--metro-accent) !important;
+}
+
+.theme-metro .mantine-ActionIcon-root[data-variant="subtle"]:hover:not(:disabled):not([data-disabled]) {
+  background: var(--metro-subtle) !important;
+}
+
+.theme-metro .mantine-ActionIcon-root[data-color="red"] {
+  color: var(--metro-danger) !important;
+}
+
+.theme-metro .mantine-ActionIcon-root[data-color="red"]:hover:not(:disabled):not([data-disabled]) {
+  background: color-mix(in srgb, var(--metro-danger) 12%, var(--metro-surface)) !important;
+}
+
+.theme-metro .schedule-cancel {
+  background: var(--metro-surface);
+  border-color: var(--metro-border);
+  color: var(--metro-text);
+}
+
+.theme-metro :is(.mantine-Switch-track, .mantine-Switch-thumb) {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.theme-metro .mantine-Switch-track {
+  --switch-bg: var(--metro-border);
+  border-color: var(--metro-border);
+}
+
+.theme-metro .mantine-Switch-input:checked + .mantine-Switch-track {
+  --switch-bg: var(--metro-tile);
+  background: var(--metro-tile);
+  border-color: var(--metro-tile);
+}
+
+.theme-metro .mantine-Switch-thumb {
+  background: white;
+  border-color: transparent;
+}
+
+.theme-metro .mantine-Switch-input:focus-visible + .mantine-Switch-track {
+  outline: 2px solid var(--metro-accent);
+  outline-offset: 3px;
+}
+
+.theme-metro .mantine-NumberInput-control {
+  border-radius: 0;
+}
+
+.theme-metro .mantine-NumberInput-control:hover:not(:disabled) {
+  background: var(--metro-subtle);
+}
+
+.theme-metro .mantine-SegmentedControl-root {
+  background: var(--metro-subtle);
+}
+
+.theme-metro .mantine-SegmentedControl-indicator {
+  background: var(--metro-tile);
+}
+
+.theme-metro .mantine-SegmentedControl-label[data-active] {
+  color: white;
+}
+
+.theme-metro .mantine-Tooltip-tooltip {
+  background: var(--metro-text);
+  border-radius: 0;
+  color: var(--metro-surface);
+}
+
+.theme-metro .schedule-chart-tooltip {
+  background: var(--metro-surface);
+  border-color: var(--metro-border);
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--metro-text);
+  font-family: var(--metro-font);
+}
+
+.theme-metro .mantine-Badge-root {
+  font-weight: 500;
+  text-transform: none;
+}
+
+.theme-metro .mantine-Table-table {
+  --table-striped-color: light-dark(#f8fbfd, #1d2935);
+  --table-hover-color: var(--metro-subtle);
+  --table-border-color: var(--metro-border);
+}
+
+.theme-metro :is(.result-table th, .schedule-table th, .manage-table th, .schedule-metric-table th, .schedule-dns-history-table th) {
+  background: var(--metro-subtle);
+  border-color: var(--metro-border);
+  color: var(--metro-muted);
+  font-family: var(--metro-font);
+  font-weight: 500;
+  text-transform: none;
+}
+
+.theme-metro :is(.result-table td, .schedule-table td, .manage-table td, .schedule-metric-table td, .schedule-dns-history-table td) {
+  border-color: var(--metro-border);
+}
+
+.theme-metro .result-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.theme-metro :is(.mtr-summary-item, .readonly-result-summary-item) {
+  background: var(--metro-subtle);
+}
+
+.theme-metro :is(.mtr-summary-label, .manage-section-title) {
+  color: var(--metro-accent);
+}
+
+.theme-metro .manage-section-marker {
+  background: var(--metro-tile);
+  border-radius: 0;
+}
+
+.theme-metro :is(.manage-section-header, .region-flag) {
+  border-radius: 0;
+}
+
+.theme-metro .manage-tabs .mantine-Tabs-tab {
+  font-weight: 400;
+}
+
+.theme-metro .manage-tabs .mantine-Tabs-tab[data-active] {
+  color: var(--metro-accent);
+}
+
+.theme-metro .schedule-row.selected td {
+  background: var(--metro-subtle) !important;
+}
+
+.theme-metro .app-footer {
+  border-color: var(--metro-border);
+}
+
+.theme-metro :is(button, a):focus-visible {
+  outline: 2px solid var(--metro-accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1080px) {
+  .theme-metro .top-nav {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .theme-metro .tool-tabs-root {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .theme-metro .page-shell {
+    padding-top: 24px;
+  }
+
+  .theme-metro .top-nav {
+    gap: 20px;
+    margin-bottom: 24px;
+  }
+
+  .theme-metro .brand {
+    font-size: 36px;
+  }
+
+  .theme-metro .tool-tabs {
+    gap: 6px;
+  }
+
+  .theme-metro .tool-tabs-root {
+    gap: 6px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .theme-metro .metro-node-tile {
+    height: 84px;
+    padding: 10px;
+  }
+
+  .theme-metro .metro-node-tile .node-status-label {
+    font-size: 10px;
+    gap: 4px;
+  }
+
+  .theme-metro .metro-node-tile .node-status-count {
+    font-size: 26px;
+  }
+
+  .theme-metro .tool-tabs .mantine-Tabs-tab {
+    font-size: 14px;
+    height: 84px;
+    padding: 10px 8px;
+    gap: 10px;
+  }
+
+  .theme-metro :is(.query-panel, .schedule-editor-panel) {
+    padding: 18px 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-metro .tool-tabs .mantine-Tabs-tab {
+    transition: none;
+  }
+
+  .theme-metro .tool-tabs .mantine-Tabs-tab:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+.theme-metro .page-shell {
+  max-width: 1600px;
+}
+
+.theme-metro .query-panel {
+  background: var(--metro-tile);
+  border: 0;
+  padding: 26px 24px;
+}
+
+.theme-metro .query-panel .mantine-InputWrapper-label {
+  color: white;
+}
+
+.theme-metro .query-panel .run-button {
+  background: white !important;
+  border-color: white !important;
+  color: #005a96 !important;
+}
+
+.theme-metro .query-panel .run-button:hover:not(:disabled) {
+  background: #e5f1fb !important;
+}
+
+.theme-metro .query-panel .run-button .mantine-Loader-root {
+  --loader-color: #005a96 !important;
+}
+
+.theme-metro .query-panel .mantine-Switch-track {
+  border-color: rgb(255 255 255 / 0.75);
+}
+
+.theme-metro .query-panel .mantine-Switch-input:checked + .mantine-Switch-track {
+  background: white;
+  border-color: white;
+}
+
+.theme-metro .query-panel .mantine-Switch-input:checked + * > .mantine-Switch-thumb {
+  background: var(--metro-tile);
+}
+
+@media (max-width: 720px) {
+  .theme-metro .query-panel {
+    padding: 20px 16px;
+  }
+}

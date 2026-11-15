@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Alert,
   Anchor,
   Badge,
@@ -17,12 +18,11 @@ import {
   Tabs,
   Text,
   TextInput,
-  Title,
-  useComputedColorScheme,
-  useMantineColorScheme
+  Title
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { AlertTriangle, GitBranch, Globe2, Moon, Play, Sun, Wifi } from "lucide-react";
+import { useMediaQuery } from "@mantine/hooks";
+import { Activity, AlertTriangle, CalendarClock, Cable, GitBranch, Globe2, Network, PanelLeftClose, PanelLeftOpen, Play, Radio, Route, Settings2, Wifi } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { useTranslation } from "react-i18next";
@@ -38,7 +38,6 @@ import { fetchGeoIPQueued, normalizeIPAddress } from "./geoip";
 import { jobEventFailureType, shouldSuppressFanoutNodeFailure } from "./jobFailures";
 import { buildCreateJobRequest, defaultFormState, formStateFromJob, formStateFromLocation, formStatePath, jobResultPath, locationHasExplicitTarget, locationHasExplicitTool, navTools, normalizeFormTarget, normalizeTargetForTool, supportsAgentTags } from "./jobForm";
 import { jobHasTerminalEvent } from "./jobStatus";
-import { setLanguage, supportedLanguages, type SupportedLanguage } from "./i18n";
 import { ManagePage } from "./ManagePage";
 import { canReadManage, canReadSchedules, dnsTypeOptions, effectivePermissions, filterAgentsByPermissions, formWithPermissionDefaults, httpMethodOptions, httpVersionOptions, ipVersionOptions, localizedFormError, permissionFormError, protocolOptions, requiresAgentForTool, toolAllowed, toolAllowedForAgent } from "./permissions";
 import { buildMtrRows, buildNodeRows, capableAgents, isFanoutTool } from "./pingRows";
@@ -46,35 +45,21 @@ import { collectGeoIPTargets, MtrResultTable, NodeResultTable } from "./resultTa
 import { SchedulePage } from "./SchedulePage";
 import { jobEventFromStreamMessage, mergeEvent, targetResolvedIP } from "./streamEvents";
 import { StatusFallbackPoller } from "./statusFallback";
+import { themes } from "./themes";
+import { AppearanceControls } from "./themes/components/AppearanceControls";
+import { NodeStatus } from "./themes/components/NodeStatus";
+import { P5NodeNote } from "./themes/components/p5r/P5NodeNote";
+import { P5CutoutText } from "./themes/components/p5r/P5CutoutText";
+import { useUITheme } from "./themes/useUITheme";
 import type { Agent, GeoIPInfo, IPVersion, Job, JobEvent, JobFormState, Permissions, RuntimeConfig, Tool, VersionInfo } from "./types";
 import { appVersionLabel } from "./version";
 
-const debugThemeStorageKey = "mtr.debug-theme";
-const debugThemes = ["pixel", "classic"] as const;
-type DebugTheme = (typeof debugThemes)[number];
 type AppPage = "diagnostics" | "schedules" | "manage";
 
-const debugThemeBodyClasses: Record<DebugTheme, string[]> = {
-  pixel: ["debug-pixel-theme"],
-  classic: []
-};
-
-function isDebugTheme(value: string | null): value is DebugTheme {
-  return debugThemes.includes(value as DebugTheme);
-}
-
-function storedDebugTheme(): DebugTheme {
-  if (typeof window === "undefined") {
-    return "pixel";
-  }
-  const stored = window.localStorage.getItem(debugThemeStorageKey);
-  return isDebugTheme(stored) ? stored : "pixel";
-}
+const navToolIcons = { ping: Activity, traceroute: Route, mtr: Network, http: Globe2, dns: Radio, port: Cable } satisfies Record<Tool, typeof Activity>;
 
 export function App() {
-  const { t, i18n } = useTranslation();
-  const { colorScheme, setColorScheme } = useMantineColorScheme();
-  const computedColorScheme = useComputedColorScheme("light");
+  const { t } = useTranslation();
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [permissions, setPermissions] = useState<Permissions | null>(null);
@@ -96,7 +81,17 @@ export function App() {
   const [geoIPByIP, setGeoIPByIP] = useState<Record<string, GeoIPInfo | null>>({});
   const [serverVersion, setServerVersion] = useState<VersionInfo | null>(null);
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
-  const [debugTheme, setDebugTheme] = useState<DebugTheme>(storedDebugTheme);
+  const [theme, setTheme] = useUITheme();
+  const navIconSize = themes[theme].navIconSize;
+  const wideNavigation = useMediaQuery("(min-width: 1081px)", undefined, { getInitialValueInEffect: false });
+  const sidebarActive = wideNavigation && themes[theme].navigation === "sidebar";
+  const navigationOrientation = sidebarActive ? "vertical" : "horizontal";
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return window.localStorage.getItem("mtr.sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem("mtr.sidebar-collapsed", String(sidebarCollapsed)); } catch { /* Keep the in-memory preference. */ }
+  }, [sidebarCollapsed]);
   const [apiBaseUrlDraft, setApiBaseUrlDraft] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState("");
   const sourcesRef = useRef<JobStream[]>([]);
@@ -202,19 +197,6 @@ export function App() {
     void refreshServerVersion(client);
     void refreshPermissionsAndAgents(client);
   }, [client]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") {
-      return;
-    }
-    const themeClasses = Array.from(document.body.classList).filter((className) =>
-      className.startsWith("debug-") && className.endsWith("-theme")
-    );
-    themeClasses.forEach((className) => document.body.classList.remove(className));
-    debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.add(className));
-    window.localStorage.setItem(debugThemeStorageKey, debugTheme);
-    return () => debugThemeBodyClasses[debugTheme].forEach((className) => document.body.classList.remove(className));
-  }, [debugTheme]);
 
   useEffect(() => {
     if (!client || !routeJobID || page !== "diagnostics") {
@@ -785,6 +767,10 @@ export function App() {
   function saveApiTokenOverride() {
     const apiBaseUrl = normalizeBaseUrl(apiBaseUrlDraft);
     const apiToken = apiTokenDraft.trim();
+    if (apiBaseUrl === normalizeBaseUrl(config?.apiBaseUrl ?? "") && apiToken === (config?.apiToken ?? "").trim()) {
+      setTokenDialogOpen(false);
+      return;
+    }
     saveStoredApiBaseUrl(apiBaseUrl);
     saveStoredApiToken(apiToken);
     closeStreams();
@@ -809,73 +795,80 @@ export function App() {
     });
   }
 
-  const settingsControls = (className: string) => (
-    <Group gap="md" className={className}>
-      <Select
-        aria-label={t("language")}
-        checkIconPosition="left"
-        className="language-select"
-        data={supportedLanguages.map((language) => ({
-          value: language,
-          label: language === "zh-CN" ? "中文" : "English"
-        }))}
-        leftSection={<Globe2 size={15} />}
-        value={i18n.language}
-        onChange={(value) => value && setLanguage(value as SupportedLanguage)}
-      />
-      <Switch
-        aria-label={computedColorScheme === "dark" ? t("theme.dark") : t("theme.light")}
-        checked={computedColorScheme === "dark"}
-        offLabel={<Sun size={13} />}
-        onLabel={<Moon size={13} />}
-        onChange={(event) => setColorScheme(event.currentTarget.checked ? "dark" : "light")}
-      />
-    </Group>
+  const settingsControls = (className: string, sidebar = false) => (
+    <AppearanceControls theme={theme} onThemeChange={setTheme} className={className} sidebar={sidebar} />
+  );
+  const formLabel = (label: string) => theme === "p5r" ? <P5CutoutText text={label} variant="label" /> : label;
+  const navigationLabel = (label: string) => (
+    <span className={theme === "p5r" ? "p5r-nav-silhouette" : undefined}>
+      {theme === "p5r" ? <P5CutoutText text={label.toUpperCase()} /> : label}
+    </span>
+  );
+  const brandElement = brandHref ? (
+    <Anchor href={brandHref} underline="never" className="brand" c="inherit" aria-label={brandText} onClick={onBrandClick}>
+      <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>{brandText}</Title>
+    </Anchor>
+  ) : (
+    <Box component="span" className="brand" c="inherit">
+      <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>{brandText}</Title>
+    </Box>
   );
 
   return (
     <Box className="page">
-      <Container className="page-shell" size="xl" px="md">
+      <Container className="page-shell" data-navigation={sidebarActive ? "sidebar" : "top"} data-sidebar-collapsed={sidebarCollapsed || undefined} size="xl" px="md">
         <header className="top-nav">
-          {brandHref ? (
-            <Anchor href={brandHref} underline="never" className="brand" c="inherit" onClick={onBrandClick}>
-              <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
-                {brandText}
-              </Title>
-            </Anchor>
-          ) : (
-            <Box component="span" className="brand" c="inherit">
-              <Title order={1} style={{ fontSize: "inherit", fontWeight: "inherit", lineHeight: "inherit" }}>
-                {brandText}
-              </Title>
-            </Box>
+          <div className="sidebar-header">
+          {brandElement}
+          {sidebarActive && (
+            <ActionIcon variant="subtle" className="sidebar-toggle" aria-label={sidebarCollapsed ? t("appearance.expandSidebar") : t("appearance.collapseSidebar")} title={sidebarCollapsed ? t("appearance.expandSidebar") : t("appearance.collapseSidebar")} aria-expanded={!sidebarCollapsed} aria-controls="workspace-navigation" onClick={() => setSidebarCollapsed((value) => !value)}>
+              {sidebarCollapsed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}
+            </ActionIcon>
           )}
+          </div>
           <Group gap="lg" justify="flex-end" className="nav-actions">
-            <Tabs className="tool-tabs-root" value={activeNavValue} onChange={(value) => value && changeNav(value)}>
-              <Tabs.List className="tool-tabs">
-                {visibleNavTools.map((tool) => (
-                  <Tabs.Tab key={tool} value={tool} disabled={controlsLocked || !toolAllowed(permissions, tool)}>
-                    {t(`nav.${tool}`)}
-                  </Tabs.Tab>
-                ))}
+            <Tabs className="tool-tabs-root" orientation={navigationOrientation} value={activeNavValue} onChange={(value) => value && changeNav(value)}>
+              <Tabs.List id="workspace-navigation" className="tool-tabs">
+                {visibleNavTools.map((tool) => {
+                  const Icon = navToolIcons[tool];
+                  return (
+                    <Tabs.Tab key={tool} value={tool} aria-label={t(`nav.${tool}`)} title={sidebarActive && sidebarCollapsed ? t(`nav.${tool}`) : undefined} leftSection={navIconSize ? <Icon size={navIconSize} strokeWidth={1.5} aria-hidden="true" /> : undefined} disabled={controlsLocked || !toolAllowed(permissions, tool)}>
+                      {navigationLabel(t(`nav.${tool}`))}
+                    </Tabs.Tab>
+                  );
+                })}
                 {canReadSchedules(permissions) && (
-                  <Tabs.Tab className="watch-tab" value="schedules" disabled={controlsLocked}>
-                    {t("nav.schedules")}
+                  <Tabs.Tab className="watch-tab" value="schedules" aria-label={t("nav.schedules")} title={sidebarActive && sidebarCollapsed ? t("nav.schedules") : undefined} leftSection={navIconSize ? <CalendarClock size={navIconSize} strokeWidth={1.5} aria-hidden="true" /> : undefined} disabled={controlsLocked}>
+                    {navigationLabel(t("nav.schedules"))}
                   </Tabs.Tab>
                 )}
                 {canReadManage(permissions) && (
-                  <Tabs.Tab className="watch-tab" value="manage" disabled={controlsLocked}>
-                    {t("nav.manage")}
+                  <Tabs.Tab className="watch-tab" value="manage" aria-label={t("nav.manage")} title={sidebarActive && sidebarCollapsed ? t("nav.manage") : undefined} leftSection={navIconSize ? <Settings2 size={navIconSize} strokeWidth={1.5} aria-hidden="true" /> : undefined} disabled={controlsLocked}>
+                    {navigationLabel(t("nav.manage"))}
                   </Tabs.Tab>
                 )}
               </Tabs.List>
+              {theme === "metro" && <NodeStatus className="metro-node-tile" online={onlineAgents} total={visibleAgents.length} />}
             </Tabs>
-            {settingsControls("settings-controls desktop-settings")}
+            {settingsControls("settings-controls desktop-settings", sidebarActive)}
           </Group>
         </header>
 
+        <main className="workspace-main">
+          {sidebarActive && <div className="workspace-heading">
+            <div className="workspace-intro">
+              <Title order={2} className="workspace-title">
+                {page === "diagnostics" ? t(`nav.${form.tool}`) : t(`workspace.${page}`)}
+              </Title>
+              <Text className="workspace-description">{t(`workspace.${page}Description`)}</Text>
+            </div>
+            <div className="workspace-metric">
+              <div className="workspace-metric-label"><Wifi size={16} aria-hidden="true" />{t("workspace.onlineNodes")}</div>
+              <div className="workspace-metric-value">{onlineAgents}<span> / {visibleAgents.length}</span></div>
+            </div>
+          </div>}
         {page === "schedules" ? (
-          <SchedulePage client={client} permissions={permissions} agents={visibleAgents} t={t} />
+          <SchedulePage client={client} permissions={permissions} agents={visibleAgents} t={t} renderLabel={formLabel} />
         ) : page === "manage" ? (
           <ManagePage client={client} permissions={permissions} t={t} />
         ) : (
@@ -883,11 +876,12 @@ export function App() {
             {canSubmitCurrentTool && (
               <form onSubmit={submitJob}>
                 <Paper className="query-panel" withBorder>
+                  {theme === "p5r" && <P5NodeNote online={onlineAgents} total={visibleAgents.length} />}
                   <div className={`query-grid tool-${form.tool}`}>
                     <TextInput
                       className="target-input"
                       disabled={controlsLocked}
-                      label={t("form.target")}
+                      label={formLabel(t("form.target"))}
                       value={form.target}
                       onChange={(event) => updateForm("target", event.currentTarget.value)}
                       onBlur={cleanTargetInput}
@@ -898,20 +892,20 @@ export function App() {
                         className="ip-version-field"
                         checkIconPosition="left"
                         disabled={controlsLocked}
-                        label={t("form.ipVersion")}
+                        label={formLabel(t("form.ipVersion"))}
                         data={ipVersionOptions(permissions, form.tool, selectedFormAgent)}
                         value={String(form.ipVersion)}
                         onChange={(value) => updateForm("ipVersion", Number(value ?? 0) as IPVersion)}
                       />
                     )}
-                    <DynamicFields form={form} permissions={permissions} agents={visibleAgents} updateForm={updateForm} disabled={controlsLocked} t={t} />
+                    <DynamicFields form={form} permissions={permissions} agents={visibleAgents} updateForm={updateForm} disabled={controlsLocked} t={t} renderLabel={formLabel} />
                     {requiresAgentForTool(permissions, form.tool) && (
                       <Select
                         className="agent-field"
                         checkIconPosition="left"
                         disabled={controlsLocked}
                         error={noRouteAgents}
-                        label={t("form.agent")}
+                        label={formLabel(t("form.agent"))}
                         data={routeAgents.map((agent) => ({
                           value: agent.id,
                           label: agentSelectLabel(agent, t)
@@ -927,7 +921,7 @@ export function App() {
                         checkIconPosition="left"
                         clearable
                         disabled={controlsLocked}
-                        label={t("form.agentTags")}
+                        label={formLabel(t("form.agentTags"))}
                         data={agentTagOptions}
                         leftSection={(
                           <span className="agent-tags-summary">
@@ -953,10 +947,13 @@ export function App() {
                         permissions={permissions}
                         t={t}
                         updateForm={updateForm}
+                        renderLabel={formLabel}
                       />
                     )}
                     <Button
                       className="run-button"
+                      data-running={controlsLocked || undefined}
+                      aria-busy={controlsLocked}
                       disabled={runDisabled}
                       leftSection={controlsLocked ? <Loader size={16} color="white" /> : <Play size={16} />}
                       type="submit"
@@ -966,17 +963,17 @@ export function App() {
                     </Button>
                   </div>
                   {noRouteAgents && (
-                    <Alert className="query-form-alert" color="yellow" icon={<AlertTriangle size={18} />} mt="md" radius="md">
+                    <Alert className="query-form-alert" color="yellow" data-color="yellow" icon={<AlertTriangle size={18} />} mt="md" radius="md">
                       {t("errors.noAvailableNodes")}
                     </Alert>
                   )}
                   {showFormError && (
-                    <Alert className="query-form-alert" color="yellow" mt="md" radius="md">
+                    <Alert className="query-form-alert" color="yellow" data-color="yellow" mt="md" radius="md">
                       {formError}
                     </Alert>
                   )}
                   {showNoFanoutAgents && (
-                    <Alert className="query-form-alert" color="yellow" mt="md" radius="md">
+                    <Alert className="query-form-alert" color="yellow" data-color="yellow" mt="md" radius="md">
                       {t("form.noAvailableAgents")}
                     </Alert>
                   )}
@@ -987,9 +984,10 @@ export function App() {
               <ReadonlyResultHeader job={currentJob} t={t} />
             )}
 
-            <Group justify="space-between" mt="xl" mb="md">
+            <Group className="results-toolbar" justify="space-between">
               <Group gap="xs">
-                <Badge variant="light" color={onlineAgents > 0 ? "green" : "gray"} leftSection={<Wifi size={12} />}>
+                <Text className="results-title">{formLabel(t("workspace.results"))}</Text>
+                <Badge className="online-agents-badge" variant="light" color={onlineAgents > 0 ? "green" : "gray"} leftSection={<Wifi size={12} />}>
                   {t("status.agentsOnline", { online: onlineAgents, total: visibleAgents.length })}
                 </Badge>
                 <Badge variant="light" color={jobRunning ? "green" : "gray"}>
@@ -1005,11 +1003,11 @@ export function App() {
             </Group>
 
             {error && (
-              <Alert color="red" icon={<AlertTriangle size={18} />} mb="md" radius="md">
+              <Alert color="red" data-color="red" icon={<AlertTriangle size={18} />} mb="md" radius="md">
                 {error}
               </Alert>
             )}
-            <Paper withBorder className="result-table">
+            <Paper withBorder className="result-table" aria-busy={jobRunning}>
               {isFanout ? (
                 <NodeResultTable tool={resultTool} rows={nodeRows} compact={compact} geoIPByIP={geoIPByIP} onTraceIP={jumpToMtr} showHTTPDownloadMetrics={showHTTPDownloadMetrics} t={t} />
               ) : (
@@ -1018,6 +1016,7 @@ export function App() {
             </Paper>
           </>
         )}
+        </main>
         <footer className="app-footer">
           <div className="mobile-settings-footer">
             {settingsControls("settings-controls")}
@@ -1045,17 +1044,6 @@ export function App() {
           saveApiTokenOverride();
         }}>
           <Stack gap="md">
-            <Select
-              checkIconPosition="left"
-              className="token-field"
-              data={debugThemes.map((theme) => ({
-                value: theme,
-                label: t(`token.themeOptions.${theme}`)
-              }))}
-              label={t("token.theme")}
-              value={debugTheme}
-              onChange={(value) => setDebugTheme(isDebugTheme(value) ? value : "pixel")}
-            />
             <TextInput
               autoFocus
               className="token-field"

@@ -1,0 +1,278 @@
+/* Desktop navigation shared by Fluent and Material, including collapse geometry. */
+
+@media (min-width: 1081px) {
+  /* overflow:hidden on an ancestor creates a separate scrolling context and
+     prevents viewport stickiness. clip preserves clipping without scrolling. */
+
+  body:is(.theme-fluent, .theme-material),
+  body:is(.theme-fluent, .theme-material) :is(#root, .page) {
+    overflow-x: clip;
+    overflow-y: visible;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell {
+    --sidebar-width: 212px;
+    column-gap: 32px;
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    max-width: 1760px;
+    padding: 28px 24px 24px !important;
+    row-gap: 24px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .top-nav {
+    align-items: stretch;
+    align-self: start;
+    background: transparent;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    grid-column: 1;
+    grid-row: 1 / -1;
+    height: calc(100dvh - 56px);
+    margin: 0;
+    min-height: 0;
+    padding: 16px 0;
+    position: sticky;
+    justify-content: flex-start;
+    top: 28px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .nav-actions {
+    display: contents;
+  }
+
+  body:is(.theme-fluent, .theme-material) .tool-tabs-root {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    width: 100%;
+  }
+
+  body:is(.theme-fluent, .theme-material) .tool-tabs {
+    flex-direction: column;
+    gap: 6px;
+    overflow: visible;
+    width: 100%;
+  }
+
+  body:is(.theme-fluent, .theme-material) .tool-tabs .mantine-Tabs-tab {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    min-height: 46px;
+    width: 100%;
+  }
+
+  body:is(.theme-fluent, .theme-material) .tool-tabs .mantine-Tabs-tabLabel {
+    flex: 0 0 auto;
+    text-align: left;
+  }
+
+  body:is(.theme-fluent, .theme-material) .desktop-settings {
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: auto;
+    width: 100%;
+  }
+
+  body:is(.theme-fluent, .theme-material) .workspace-main {
+    grid-column: 2;
+    grid-row: 1;
+    padding-top: 12px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .app-footer {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 0;
+  }
+
+  .theme-fluent .top-nav {
+    border-inline-end: 1px solid var(--ui-border);
+    padding-inline-end: 20px !important;
+  }
+
+  .theme-fluent .brand {
+    font-size: 24px;
+    letter-spacing: -0.8px;
+    margin-bottom: 8px;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .theme-fluent .tool-tabs .mantine-Tabs-tab::after {
+    bottom: calc(50% - 10px);
+    height: 20px;
+    left: 0;
+    right: auto;
+    width: 3px;
+  }
+
+  body.theme-material .page-shell {
+    --sidebar-width: 112px;
+    column-gap: 24px !important;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) !important;
+  }
+
+  .theme-material .top-nav {
+    align-items: center !important;
+    gap: 24px !important;
+    padding-top: 8px !important;
+  }
+
+  .theme-material .brand {
+    font-size: 18px;
+    line-height: 1.5;
+    text-align: center;
+    white-space: normal;
+    width: 100%;
+  }
+
+  .theme-material .tool-tabs .mantine-Tabs-tab {
+    align-items: center;
+    background: transparent !important;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 72px;
+    padding: 4px 8px;
+  }
+
+  .theme-material .tool-tabs .mantine-Tabs-tabSection {
+    border-radius: 999px;
+    margin: 0;
+    padding: 7px 20px;
+  }
+
+  .theme-material .tool-tabs .mantine-Tabs-tab[data-active] .mantine-Tabs-tabSection {
+    background: var(--ui-primary-container);
+  }
+
+  .theme-material .tool-tabs .mantine-Tabs-tab:hover .mantine-Tabs-tabSection {
+    background: var(--ui-hover);
+  }
+
+  .theme-material .desktop-settings {
+    flex-direction: column;
+  }
+
+  .theme-material .workspace-main {
+    padding-top: 32px !important;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] {
+    --sidebar-width: 76px;
+    column-gap: 24px !important;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .top-nav {
+    align-items: stretch !important;
+    border-inline-end: 0;
+    padding-inline: 0 !important;
+    padding-inline-end: 0 !important;
+  }
+
+  body.theme-fluent .page-shell[data-sidebar-collapsed="true"] .top-nav {
+    background: var(--ui-container);
+    border: 1px solid var(--ui-border) !important;
+    border-radius: 8px;
+    justify-self: center;
+    padding-block: 12px;
+    width: 64px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs-root {
+    scrollbar-width: none;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs-root::-webkit-scrollbar {
+    display: none;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .sidebar-header {
+    flex-direction: column;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .sidebar-toggle {
+    height: 44px;
+    margin-inline: auto;
+    width: 44px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .brand,
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs .mantine-Tabs-tabLabel,
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .sidebar-setting-button > span {
+    display: none;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs .mantine-Tabs-tab {
+    align-items: center;
+    justify-content: center;
+    background: transparent !important;
+    border-radius: var(--ui-control-radius);
+    height: 44px;
+    margin-inline: 0;
+    min-height: 44px;
+    padding: 0;
+    width: 44px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs .mantine-Tabs-tabSection {
+    margin: 0;
+    align-items: center;
+    border-radius: var(--ui-button-radius);
+    display: flex;
+    height: 40px;
+    justify-content: center;
+    padding: 0;
+    width: 40px;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs .mantine-Tabs-tab[data-active] .mantine-Tabs-tabSection {
+    background: var(--ui-primary-container);
+    color: var(--ui-on-primary-container);
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .tool-tabs {
+    align-items: center;
+    gap: 10px;
+  }
+
+  body.theme-fluent .page-shell[data-sidebar-collapsed="true"] .tool-tabs .mantine-Tabs-tab::after {
+    display: none;
+  }
+
+  body:is(.theme-fluent, .theme-material) .page-shell[data-sidebar-collapsed="true"] .sidebar-setting-button {
+    flex-direction: row;
+    height: 44px;
+    justify-content: center;
+    margin-inline: auto;
+    min-height: 44px;
+    padding: 0;
+    width: 44px;
+  }
+}
+
+@media (min-width: 1081px) {
+  .theme-material .sidebar-header {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .theme-material .sidebar-settings .sidebar-setting-button {
+    border-radius: 16px;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    min-height: 52px;
+    padding: 6px;
+  }
+
+  .theme-material .sidebar-settings .sidebar-setting-button > span {
+    font-size: 11px;
+  }
+}

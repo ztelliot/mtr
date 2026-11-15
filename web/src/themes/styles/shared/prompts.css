@@ -1,0 +1,124 @@
+body.theme-modern {
+  --prompt-surface: var(--ui-surface);
+  --prompt-text: var(--ui-text);
+  --prompt-muted: var(--ui-muted);
+  --prompt-border: var(--ui-border);
+  --prompt-accent: var(--ui-primary);
+  --prompt-radius: 8px;
+  --prompt-shadow: var(--ui-menu-shadow);
+}
+
+body.theme-metro {
+  --prompt-surface: var(--metro-surface);
+  --prompt-text: var(--metro-text);
+  --prompt-muted: var(--metro-muted);
+  --prompt-border: var(--metro-border);
+  --prompt-accent: var(--metro-accent);
+  --prompt-radius: 0px;
+  --prompt-shadow: 0 6px 20px rgb(0 0 0 / 0.12);
+}
+
+body.theme-material {
+  --prompt-radius: 12px;
+}
+
+body:is(.theme-modern, .theme-metro) :is(.mantine-Alert-root, .mantine-Notification-root) {
+  --prompt-tone: var(--alert-color, var(--notification-color, var(--prompt-accent)));
+  border: 1px solid var(--prompt-border);
+  border-inline-start: 3px solid var(--prompt-tone);
+  border-radius: var(--prompt-radius) !important;
+  color: var(--prompt-text);
+  font-family: var(--mtr-font-ui);
+  padding: 14px 16px !important;
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Alert-root {
+  background: color-mix(in srgb, var(--prompt-tone) 7%, var(--prompt-surface));
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Alert-root[data-color="red"] {
+  --prompt-tone: var(--ui-danger, var(--metro-danger));
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Alert-root[data-color="yellow"] {
+  --prompt-tone: light-dark(#976100, #f7c948);
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Notification-root {
+  align-items: flex-start;
+  background: var(--prompt-surface);
+  box-shadow: var(--prompt-shadow);
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Notification-root::before {
+  display: none;
+}
+
+body:is(.theme-modern, .theme-metro) :is(.mantine-Alert-icon, .mantine-Notification-icon) {
+  background: transparent;
+  border-radius: 0;
+  color: var(--prompt-tone);
+  flex: 0 0 20px;
+  height: 20px;
+  margin-inline-end: 12px;
+  width: 20px;
+}
+
+body:is(.theme-modern, .theme-metro) :is(.mantine-Alert-title, .mantine-Notification-title) {
+  color: var(--prompt-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+body:is(.theme-modern, .theme-metro) :is(.mantine-Alert-message, .mantine-Notification-description) {
+  color: var(--prompt-muted);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+body:is(.theme-modern, .theme-metro) :is(.mantine-Alert-closeButton, .mantine-Notification-closeButton) {
+  align-self: flex-start;
+  background: transparent !important;
+  border: 0;
+  border-radius: var(--prompt-radius);
+  color: var(--prompt-muted);
+  margin-top: 0;
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Modal-overlay {
+  background: rgb(0 0 0 / 0.32) !important;
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Modal-content {
+  border: 1px solid var(--prompt-border);
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Modal-header {
+  min-height: 68px;
+  padding: 20px 24px 12px;
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Modal-body {
+  padding: 12px 24px 24px !important;
+}
+
+body:is(.theme-modern, .theme-metro) .mantine-Modal-title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  body:is(.theme-modern, .theme-metro) .mantine-Modal-header {
+    padding-inline: 20px;
+  }
+
+  body:is(.theme-modern, .theme-metro) .mantine-Modal-body {
+    padding-inline: 20px !important;
+  }
+}

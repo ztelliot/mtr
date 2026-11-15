@@ -1,0 +1,12 @@
+Noto Sans SC variable font, version 2.004
+
+Upstream: https://github.com/google/fonts/tree/main/ofl/notosanssc
+Font source: NotoSansSC[wght].ttf
+License: SIL Open Font License 1.1; see OFL.txt in this directory.
+
+The bundled WOFF2 is a subset of the upstream variable font, preserving
+the 13,635 Unicode code points covered by the previous webfont subsets.
+It retains the upstream copyright, license and author metadata and the
+100-900 weight axis. The upstream Reserved Font Name is "Source"; that
+name is not used as the bundled font's family name. "MTR Sans" is the
+application's CSS alias for this font.

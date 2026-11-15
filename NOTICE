@@ -1,0 +1,27 @@
+MTR Agent/Server
+Copyright (C) 2026 MTR contributors
+
+SPDX-License-Identifier: AGPL-3.0-only
+
+Except where a file or component carries a different license notice, this
+project is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License, version 3 only, as
+published by the Free Software Foundation. See LICENSE for the full text.
+
+This program is distributed WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Project source: https://github.com/ztelliot/mtr
+
+Third-party dependencies and assets retain their original copyright notices
+and licenses. In particular, the bundled Noto Sans SC and Fusion Pixel font
+files remain under their included font licenses. The project license does
+not replace those licenses or grant rights to third-party trademarks.
+
+Web builds include this notice, the project license, bundled JavaScript
+dependency licenses and font notices under licenses/ in the output directory.
+
+Anyone distributing a modified build or operating a modified version over a
+network must meet the applicable AGPLv3 source availability requirements.
+The upstream source URL above does not provide the source for local changes;
+provide the complete Corresponding Source for the version actually supplied.

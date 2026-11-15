@@ -19,6 +19,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { AlertTriangle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { agentLocationProviderLabel, agentRegionLabel, agentSelectLabel, ispProtocolLabel, ispProtocolProviderLabel, ProviderCell, RegionCell, StatusBadge } from "./agentDisplay";
 import { isAgentPolicyLabel } from "./agentTags";
 import { ApiClient } from "./api";
@@ -67,12 +68,14 @@ export function SchedulePage({
   client,
   permissions,
   agents,
-  t
+  t,
+  renderLabel = (label) => label
 }: {
   client: ApiClient | null;
   permissions: Permissions | null;
   agents: Agent[];
   t: (key: string, options?: Record<string, unknown>) => string;
+  renderLabel?: (label: string) => ReactNode;
 }) {
   const [form, setForm] = useState<JobFormState>(defaultFormState);
   const [name, setName] = useState("");
@@ -495,7 +498,7 @@ export function SchedulePage({
 
   if (permissions && !canReadSchedules(permissions)) {
     return (
-      <Alert color="yellow" radius="md">
+      <Alert color="yellow" data-color="yellow" radius="md">
         {t("errors.scheduleNotAllowed")}
       </Alert>
     );
@@ -510,7 +513,7 @@ export function SchedulePage({
               <TextInput
                 className="schedule-name-field"
                 disabled={submitting}
-                label={t("schedule.name")}
+                label={renderLabel(t("schedule.name"))}
                 value={name}
                 onChange={(event) => setName(event.currentTarget.value)}
                 placeholder={t("schedule.namePlaceholder")}
@@ -519,7 +522,7 @@ export function SchedulePage({
                 className="schedule-tool-field"
                 checkIconPosition="left"
                 disabled={submitting}
-                label={t("schedule.tool")}
+                label={renderLabel(t("schedule.tool"))}
                 data={allowedTools.map((tool) => ({ value: tool, label: t(`nav.${tool}`) }))}
                 value={form.tool}
                 onChange={(value) => value && changeScheduleTool(value as Tool)}
@@ -527,7 +530,7 @@ export function SchedulePage({
               <TextInput
                 className="schedule-target-field"
                 disabled={submitting}
-                label={t("form.target")}
+                label={renderLabel(t("form.target"))}
                 value={form.target}
                 onChange={(event) => updateForm("target", event.currentTarget.value)}
                 onBlur={cleanTargetInput}
@@ -536,7 +539,7 @@ export function SchedulePage({
               <TextInput
                 className="schedule-cron-field"
                 disabled={submitting}
-                label={t("schedule.cron")}
+                label={renderLabel(t("schedule.cron"))}
                 placeholder="*/5 * * * *"
                 value={cronExpression}
                 onChange={(event) => setCronExpression(event.currentTarget.value)}
@@ -546,20 +549,20 @@ export function SchedulePage({
                   className="schedule-ip-field"
                   checkIconPosition="left"
                   disabled={submitting}
-                  label={t("form.ipVersion")}
+                  label={renderLabel(t("form.ipVersion"))}
                   data={scheduleIPOptions}
                   value={String(form.ipVersion)}
                   onChange={(value) => updateForm("ipVersion", Number(value ?? 0) as IPVersion)}
                 />
               )}
-              <DynamicFields form={schedulePermissionForm} permissions={permissions} agents={routeAgents} updateForm={updateForm} disabled={submitting} t={t} />
+              <DynamicFields form={schedulePermissionForm} permissions={permissions} agents={routeAgents} updateForm={updateForm} disabled={submitting} t={t} renderLabel={renderLabel} />
               <MultiSelect
                 className="schedule-label-field"
                 checkIconPosition="left"
                 clearable
                 data={scheduleLabelOptions}
                 disabled={submitting}
-                label={t("schedule.tags")}
+                label={renderLabel(t("schedule.tags"))}
                 leftSection={<span className="schedule-label-summary">{scheduleLabels.length > 0 ? t("schedule.selectedCount", { count: scheduleLabels.length }) : t("schedule.tagsPlaceholder")}</span>}
                 leftSectionPointerEvents="none"
                 leftSectionWidth="calc(100% - 76px)"
@@ -571,7 +574,7 @@ export function SchedulePage({
               <div className={`schedule-controls-group ${form.tool === "dns" ? "dns-controls" : ""}`}>
                 <div className="schedule-switch-stack">
                   {form.tool !== "dns" && (
-                    <Input.Wrapper className="schedule-remote-dns-field schedule-switch-field" label={t("form.remoteDns")}>
+                    <Input.Wrapper className="schedule-remote-dns-field schedule-switch-field" label={renderLabel(t("form.remoteDns"))}>
                       <Switch
                         aria-label={t("form.remoteDns")}
                         checked={resolveOnAgentValue(permissions, schedulePermissionForm)}
@@ -581,7 +584,7 @@ export function SchedulePage({
                       />
                     </Input.Wrapper>
                   )}
-                  <Input.Wrapper className="schedule-enabled-field schedule-switch-field" label={t("schedule.enabled")}>
+                  <Input.Wrapper className="schedule-enabled-field schedule-switch-field" label={renderLabel(t("schedule.enabled"))}>
                     <Switch checked={enabled} className="schedule-enabled-switch" disabled={submitting} onChange={(event) => setEnabled(event.currentTarget.checked)} />
                   </Input.Wrapper>
                 </div>
@@ -607,12 +610,12 @@ export function SchedulePage({
       )}
 
       {error && (
-        <Alert color="red" icon={<AlertTriangle size={18} />} radius="md">
+        <Alert color="red" data-color="red" icon={<AlertTriangle size={18} />} radius="md">
           {error}
         </Alert>
       )}
       {showFormError && (
-        <Alert color="yellow" radius="md">
+        <Alert color="yellow" data-color="yellow" radius="md">
           {formError || scheduleTargetError || cronError}
         </Alert>
       )}
@@ -626,7 +629,6 @@ export function SchedulePage({
             disabled={!client || loadingSchedules}
             leftSection={<RotateCcw className={loadingSchedules ? "button-progress-icon is-spinning" : "button-progress-icon"} size={16} />}
             onClick={() => void loadSchedules()}
-            size="xs"
             variant="default"
           >
             {t("schedule.refresh")}

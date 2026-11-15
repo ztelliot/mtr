@@ -1,9 +1,11 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { licenseNotices } from "./build/licenseNotices.mjs";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), licenseNotices()],
   build: {
+    license: { fileName: "licenses/frontend-dependencies.txt" },
     cssMinify: false,
     rolldownOptions: {
       output: {

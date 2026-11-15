@@ -1,0 +1,196 @@
+/* Shared workspace landmarks, result spacing and responsive form layout.
+   Desktop navigation lives in sidebar.css; the Classic baseline is styles.css. */
+
+.workspace-main {
+  flex: 1;
+  min-width: 0;
+}
+
+body:is(.theme-metro, .theme-fluent, .theme-material) .results-toolbar {
+  margin-top: 16px;
+  margin-bottom: 10px;
+}
+
+.workspace-heading,
+.results-title {
+  display: none;
+}
+
+.node-status-label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.node-status-count {
+  display: block;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.node-status-count > span {
+  font-size: 13px;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-main {
+  container-type: inline-size;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-heading {
+  align-items: center;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  margin-bottom: 32px;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-intro {
+  min-width: 0;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-title {
+  color: var(--ui-text, var(--metro-text));
+  font-size: 40px;
+  font-weight: 600;
+  letter-spacing: -1px;
+  line-height: 1.2;
+  margin-bottom: 12px;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-description {
+  color: var(--ui-muted, var(--metro-muted));
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-metric {
+  background: var(--ui-primary-container, var(--metro-subtle));
+  border-radius: var(--ui-panel-radius, 0px);
+  color: var(--ui-on-primary-container, var(--metro-accent));
+  flex: 0 0 auto;
+  min-width: 150px;
+  padding: 16px 24px;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-metric-label {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-metric-value {
+  font-size: 36px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+body:is(.theme-modern, .theme-metro) .workspace-metric-value > span {
+  font-size: 16px;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+body:is(.theme-modern, .theme-metro) .results-title {
+  color: var(--ui-text, var(--metro-text));
+  display: block;
+  font-size: 18px;
+  font-weight: 600;
+  margin-inline-end: 8px;
+}
+
+body:is(.theme-modern, .theme-metro) .online-agents-badge {
+  display: none;
+}
+
+body.theme-modern .page-shell[data-navigation="top"] .online-agents-badge {
+  display: inline-flex;
+}
+
+body.theme-p5r .page-shell[data-navigation="top"] .online-agents-badge {
+  display: none;
+}
+
+@container (max-width: 1100px) {
+  .theme-modern .query-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .theme-modern .query-grid > * {
+    grid-column: auto !important;
+    grid-row: auto !important;
+    justify-self: stretch !important;
+    width: auto !important;
+  }
+
+  .theme-modern .query-grid .target-input {
+    grid-column: 1 / -1 !important;
+  }
+}
+
+@container (max-width: 600px) {
+  .theme-modern .query-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .theme-modern .query-grid .remote-dns-field {
+    align-items: center;
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    min-height: 48px;
+  }
+
+  .theme-modern .query-grid .remote-dns-field .mantine-InputWrapper-label {
+    margin-bottom: 0;
+  }
+
+  .theme-modern .query-grid .remote-dns-field .mantine-InputWrapper-input {
+    height: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  body:is(.theme-modern, .theme-metro) .workspace-heading {
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  body:is(.theme-modern, .theme-metro) .workspace-title {
+    font-size: 32px !important;
+  }
+
+  body:is(.theme-modern, .theme-metro) .workspace-description {
+    font-size: 12px;
+  }
+
+  body:is(.theme-modern, .theme-metro) .workspace-metric {
+    min-width: 104px !important;
+    padding: 12px;
+  }
+
+  body:is(.theme-modern, .theme-metro) .workspace-metric-value {
+    font-size: 28px;
+  }
+}
+
+@media (max-width: 380px) {
+  body:is(.theme-modern, .theme-metro) .workspace-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  body:is(.theme-modern, .theme-metro) .workspace-metric {
+    align-items: center;
+    display: flex;
+    gap: 16px;
+    justify-content: space-between;
+    width: 100%;
+  }
+}

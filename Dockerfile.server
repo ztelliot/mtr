@@ -26,11 +26,14 @@ ARG VERSION=dev
 ARG COMMIT=
 ARG BUILT_AT=
 LABEL org.opencontainers.image.title="mtr-server" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/ztelliot/mtr" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILT_AT}"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/mtr-server /usr/local/bin/mtr-server
+COPY LICENSE NOTICE /usr/share/licenses/mtr/
 EXPOSE 8080 8443
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/mtr-server"]

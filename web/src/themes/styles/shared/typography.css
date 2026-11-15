@@ -1,0 +1,111 @@
+/* One variable family covers Latin and Chinese at the same real weight.
+   Pixel deliberately retains its existing bitmap family. */
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) {
+  --mtr-font-ui: "MTR Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ui-font: var(--mtr-font-ui);
+  --metro-font: var(--mtr-font-ui);
+  --mantine-font-family: var(--mtr-font-ui);
+  --mantine-font-family-headings: var(--mtr-font-ui);
+  --mantine-font-weight-medium: 500;
+  font-family: var(--mtr-font-ui);
+  font-synthesis: none;
+  font-weight: 400;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) :is(.tool-tabs .mantine-Tabs-tab, .manage-tabs .mantine-Tabs-tab, .mantine-Input-input, .mantine-InputWrapper-label, .mantine-Button-root, .mantine-Table-table, .result-table th, .result-table td, .schedule-table th, .schedule-table td, .schedule-metric-table th, .schedule-metric-table td, .schedule-dns-history-table th, .schedule-dns-history-table td, .schedule-chart-label, .schedule-chart-tooltip, .mono-label) {
+  font-family: var(--mtr-font-ui);
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) :is(.result-table td, .schedule-table td, .schedule-metric-table td, .schedule-dns-history-table td) {
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) :is(.result-table .provider-primary, .result-table .region-cell, .schedule-table .mono-label) {
+  font-weight: 500;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .mantine-InputWrapper-label {
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .mantine-Button-root {
+  font-weight: 500;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .result-table td {
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .result-table th {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .result-table .compact-result-table td {
+  font-size: 13px;
+}
+
+body[data-ui-theme]:not([data-ui-theme="pixel"]) .result-table .compact-result-table th {
+  font-size: 12px;
+}
+
+/* The smaller, consistent type lets IPv4 results fit beside a navigation pane.
+   IPv6 and compact tables retain their separate width requirements. */
+
+body:is(.theme-modern, .theme-metro) .ping-result-table.has-ipv4:not(.compact-result-table) {
+  min-width: 1100px !important;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .region-column {
+  min-width: 100px;
+  width: 128px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .provider-column {
+  min-width: 100px;
+  width: 112px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .provider-cell {
+  max-width: 140px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .provider-primary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table.has-ipv4 .ip-column {
+  max-width: 240px;
+  min-width: 180px;
+  width: 200px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .protocol-column {
+  min-width: 68px;
+  width: 76px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .metric-column {
+  min-width: 52px;
+  width: 56px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .sent-column {
+  min-width: 40px;
+  width: 44px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .time-column {
+  min-width: 76px;
+  width: 82px;
+}
+
+body:is(.theme-modern, .theme-metro) .ping-result-table .chart-column {
+  min-width: 68px;
+  width: 76px;
+}

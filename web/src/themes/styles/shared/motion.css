@@ -1,0 +1,148 @@
+/* Shared motion: appearance snapshots, press feedback and diagnostic progress.
+   No result animation restarts when streaming updates an existing row. */
+
+body[data-ui-theme] .page-shell {
+  view-transition-name: ui-workspace;
+}
+
+::view-transition-old(root) {
+  display: none;
+}
+
+::view-transition-new(root) {
+  animation: none;
+}
+
+::view-transition-old(ui-workspace) {
+  animation: ui-fade-out 120ms ease both;
+}
+
+::view-transition-new(ui-workspace) {
+  animation: ui-fade-in 200ms ease both;
+}
+
+body[data-ui-theme] :is(.mantine-Button-root, .mantine-ActionIcon-root, .mantine-CloseButton-root, .mantine-InputClearButton-root, .mantine-Tabs-tab, [data-combobox-option]) {
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 120ms ease;
+}
+
+body[data-ui-theme] :is(.mantine-Button-root, .mantine-ActionIcon-root, .mantine-CloseButton-root, .mantine-InputClearButton-root, .mantine-Tabs-tab):active:not(:disabled):not([data-disabled]) {
+  transform: scale(0.97);
+}
+
+body[data-ui-theme] :is(.query-panel, .schedule-panel, .manage-agent-box) {
+  animation: ui-panel-in 200ms ease both;
+}
+
+body[data-ui-theme] .result-table {
+  position: relative;
+}
+
+body[data-ui-theme] .result-table[aria-busy="true"]::before {
+  animation: ui-progress 1.3s ease-in-out infinite;
+  background: var(--ui-primary, var(--metro-accent, var(--mtr-accent, var(--mantine-primary-color-filled))));
+  content: "";
+  height: 3px;
+  left: -35%;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 35%;
+  z-index: 2;
+}
+
+body[data-ui-theme] .run-button[data-running] {
+  opacity: 1;
+}
+
+body[data-ui-theme] .run-button[data-running] .mantine-Button-section {
+  animation: ui-live-pulse 1.4s ease-in-out infinite;
+}
+
+body[data-ui-theme] .result-table tbody tr:nth-child(-n + 12) {
+  animation: ui-row-in 180ms ease both;
+}
+
+@keyframes ui-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ui-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ui-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ui-row-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ui-progress {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(390%);
+  }
+}
+
+@keyframes ui-live-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root),
+  ::view-transition-old(ui-workspace),
+  ::view-transition-new(ui-workspace) {
+    animation: none;
+  }
+
+  body[data-ui-theme] :is(.mantine-Button-root, .mantine-ActionIcon-root, .mantine-CloseButton-root, .mantine-InputClearButton-root, .mantine-Tabs-tab, [data-combobox-option], .mantine-Input-input, .mantine-Switch-track, .mantine-Switch-thumb, .mantine-Modal-content, .mantine-Modal-overlay, .mantine-Popover-dropdown) {
+    transition: none !important;
+  }
+
+  body[data-ui-theme] :is(.query-panel, .schedule-panel, .manage-agent-box, .result-table tbody tr, .run-button[data-running] .mantine-Button-section, .button-progress-icon.is-spinning, .mantine-Loader-root) {
+    animation: none !important;
+  }
+
+  body[data-ui-theme] .result-table[aria-busy="true"]::before {
+    animation: none;
+    left: 0;
+  }
+
+  body[data-ui-theme] .mantine-Loader-root::after,
+  body[data-ui-theme] .mantine-Loader-root > span {
+    animation: none !important;
+  }
+
+  body[data-ui-theme] :is(.mantine-Button-root, .mantine-ActionIcon-root, .mantine-CloseButton-root, .mantine-InputClearButton-root, .mantine-Tabs-tab):active {
+    transform: none !important;
+  }
+}

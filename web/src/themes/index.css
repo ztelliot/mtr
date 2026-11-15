@@ -1,0 +1,15 @@
+/* styles.css supplies the Classic baseline. Keep imports in cascade order:
+   component bindings, theme tokens, shared layout, appearance, P5R, motion. */
+@import "./styles/pixel.css";
+@import "./styles/metro.css";
+@import "./styles/shared/components.css";
+@import "./styles/fluent.css";
+@import "./styles/material.css";
+@import "./styles/shared/fonts.css";
+@import "./styles/shared/typography.css";
+@import "./styles/shared/prompts.css";
+@import "./styles/shared/layout.css";
+@import "./styles/shared/sidebar.css";
+@import "./styles/shared/appearance.css";
+@import "./styles/p5r.css";
+@import "./styles/shared/motion.css";

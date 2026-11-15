@@ -30,7 +30,7 @@ export function NodeResultTable({
   if (tool === "ping") {
     return (
       <ScrollArea>
-        <Table className={tableClass(ipWidthClass, compact)} striped highlightOnHover verticalSpacing="xs" miw={pingTableMinWidth(hasIPv6, compact)}>
+        <Table className={tableClass(`ping-result-table ${ipWidthClass}`, compact)} striped highlightOnHover verticalSpacing="xs" miw={pingTableMinWidth(hasIPv6, compact)}>
           <Table.Thead>
             <Table.Tr>
               <Table.Th className="region-column">{t("results.region")}</Table.Th>

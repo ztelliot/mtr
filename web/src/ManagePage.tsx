@@ -658,7 +658,7 @@ export function ManagePage({ client, permissions, t }: { client: ApiClient | nul
   return (
     <Stack className="manage-page" gap="lg">
       {error && (
-        <Alert color="red" icon={<AlertTriangle size={18} />} title={t("errors.requestFailed")}>
+        <Alert color="red" data-color="red" icon={<AlertTriangle size={18} />} title={t("errors.requestFailed")}>
           {error}
         </Alert>
       )}
@@ -1260,7 +1260,7 @@ type GuardedActionIconProps = {
 };
 
 function GuardedActionIcon({ label, disabled, disabledReason, children, ...props }: GuardedActionIconProps) {
-  const action = <ActionIcon {...props} disabled={disabled}>{children}</ActionIcon>;
+  const action = <ActionIcon {...props} data-color={props.color} disabled={disabled}>{children}</ActionIcon>;
   return (
     <Tooltip label={disabled && disabledReason ? disabledReason : label}>
       <span>{action}</span>

@@ -19,6 +19,7 @@ import "@mantine/core/styles/Group.css";
 import "@mantine/core/styles/InlineInput.css";
 import "@mantine/core/styles/Input.css";
 import "@mantine/core/styles/Loader.css";
+import "@mantine/core/styles/Menu.css";
 import "@mantine/core/styles/Modal.css";
 import "@mantine/core/styles/ModalBase.css";
 import "@mantine/core/styles/Notification.css";
@@ -26,6 +27,7 @@ import "@mantine/core/styles/NumberInput.css";
 import "@mantine/core/styles/Overlay.css";
 import "@mantine/core/styles/Paper.css";
 import "@mantine/core/styles/PasswordInput.css";
+import "@mantine/core/styles/Pill.css";
 import "@mantine/core/styles/PillsInput.css";
 import "@mantine/core/styles/Popover.css";
 import "@mantine/core/styles/ScrollArea.css";
@@ -43,6 +45,7 @@ import "@mantine/core/styles/UnstyledButton.css";
 import "@mantine/notifications/styles.css";
 import "./i18n";
 import "./styles.css";
+import "./themes/index.css";
 
 const colorSchemeManager = localStorageColorSchemeManager({
   key: "mtr.color-scheme"
@@ -54,6 +57,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       colorSchemeManager={colorSchemeManager}
       defaultColorScheme="auto"
       theme={{
+        respectReducedMotion: true,
         fontFamily:
           "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
         primaryColor: "dark",
