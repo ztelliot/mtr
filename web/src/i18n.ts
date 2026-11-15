@@ -200,6 +200,7 @@ export const resources = {
         wtt: "汇港电讯",
         hkbn: "香港宽频",
         pccw: "电讯盈科",
+	hgc: "环球电讯",
         hinet: "中华电信",
         sony: "索尼通信",
       },
